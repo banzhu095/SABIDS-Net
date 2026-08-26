@@ -1,0 +1,7 @@
+sample_id,group_id,patient_id,dataset,domain,scan_protocol,frame_index,split,image_path,clean_path,layer_mask_path,vessel_mask_path,is_clean
+ss12_case01_b001,ss12_case01_b001,case01,Private1,private,SS-OCT-12x12,1,train,data/private1/case01/b001.png,,data/private1/case01/layer_001.png,data/private1/case01/vessel_001.png,0
+ss12_case01_b002,ss12_case01_b002,case01,Private1,private,SS-OCT-12x12,2,train,data/private1/case01/b002.png,,data/private1/case01/layer_002.png,,0
+ss15_case02_b001,ss15_case02_b001,case02,Private1,private,SS-OCT-15x9,1,val,data/private1/case02/b001.png,,data/private1/case02/layer_001.png,data/private1/case02/vessel_001.png,0
+ss15_case05_b001,ss15_case05_b001,case05,Private1,private,SS-OCT-15x9,1,test,data/private1/case05/b001.png,,data/private1/case05/layer_001.png,data/private1/case05/vessel_001.png,0
+line51_case03_b001,line51_case03,case03,Private2,private,51-line,1,source,data/private2/noisy/case03_b001.png,,,,0
+hd_case04_b001,hd_case04,case04,Private2,private,HD,1,train,data/private2/clean/case04_b001.png,,,,1

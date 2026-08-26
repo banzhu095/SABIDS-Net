@@ -1,0 +1,8 @@
+_base_: ../stage4_joint_fold0.yaml
+
+model:
+  enable_seg_to_denoise: true
+  enable_denoise_to_seg: false
+
+train:
+  output_dir: runs/current/ablations/seg_to_denoise_only_fold0

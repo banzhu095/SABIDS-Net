@@ -1,0 +1,43 @@
+# Python缓存
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# 编辑器
+.idea/
+.vscode/
+
+# 本地环境
+.env
+.venv/
+venv/
+env/
+
+# 数据、人工标签和清单
+/Data/
+/data/
+/Label/
+/Manifests/
+
+# 训练输出
+/runs/
+/outputs/
+/checkpoints/
+/predictions/
+/test_results/
+/tensorboard/
+
+# 模型权重
+*.pth
+*.pt
+*.ckpt
+*.onnx
+
+# 日志和临时文件
+*.log
+*.tmp
+.DS_Store
+Thumbs.db

@@ -1,0 +1,28 @@
+_base_: base.yaml
+
+data:
+  # Only 13 PKU positions carry vessel labels. Keep enough supervised
+  # segmentation updates while the remaining steps still cover all denoising data.
+  vessel_oversample_fraction: 0.35
+
+train:
+  stage: joint
+  output_dir: runs/stage4_joint
+  epochs: 120
+  pretrained: runs/stage2_segment/best.pth
+  strict_pretrained: false
+  detach_cross_epochs: 10
+  ramp_epochs: 30
+  # Fine-tuning from Stage 2 at 2e-4 caused vessel precision to collapse while
+  # recall increased. Use a conservative joint LR.
+  learning_rate: 0.00005
+  memory_safe_joint: true
+  stopgrad_repeat_teacher: true
+  clean_teacher_no_grad: true
+  monitor: vessel_soft_dice
+
+loss:
+  weights:
+    # The clean frame is a stop-gradient RMAC teacher in memory-safe mode.
+    identity: 0.0
+    rmac: 0.15

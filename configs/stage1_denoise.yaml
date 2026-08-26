@@ -1,0 +1,8 @@
+_base_: base.yaml
+
+train:
+  stage: denoise
+  output_dir: runs/stage1_denoise
+  epochs: 150
+  monitor: psnr
+

@@ -1,0 +1,106 @@
+seed: 42
+deterministic: false
+device: auto
+
+model:
+  in_channels: 1
+  channels: [32, 64, 128, 256]
+  encoder_depths: [2, 2, 4, 6]
+  decoder_depth: 2
+  interaction_levels: [3, 2, 1]
+  enable_seg_to_denoise: true
+  enable_denoise_to_seg: true
+  use_uncertainty: true
+  dropout: 0.0
+  residual_scale: 0.5
+  # Keep empty to freeze the shared encoder during private segmentation adaptation.
+  private_train_encoder_levels: []
+
+data:
+  manifest: examples/manifest_example.csv
+  root: null
+  train_split: train
+  val_split: val
+  train_datasets: null
+  val_datasets: null
+  test_datasets: null
+  # Public PKU37 images are 640x640; 512x512 preserves their square geometry.
+  target_size: [512, 512]
+  normalization: fixed
+  percentile_low: 0.5
+  percentile_high: 99.5
+  samples_per_epoch: null
+  augmentation:
+    horizontal_flip: 0.5
+    strong_private_only: true
+    gamma_range: [0.8, 1.2]
+    contrast_range: [0.85, 1.15]
+    speckle_std: 0.03
+    blur_probability: 0.1
+
+train:
+  stage: joint
+  output_dir: runs/sabids_joint
+  epochs: 120
+  batch_size: 2
+  gradient_accumulation_steps: 1
+  # Joint training can otherwise keep three full graphs (main/repeat/clean).
+  memory_safe_joint: true
+  stopgrad_repeat_teacher: true
+  clean_teacher_no_grad: true
+  num_workers: 4
+  learning_rate: 0.0002
+  minimum_learning_rate: 0.000001
+  weight_decay: 0.0001
+  gradient_clip: 1.0
+  amp: true
+  detach_cross_epochs: 10
+  ramp_epochs: 20
+  monitor: vessel_soft_dice
+  early_stopping_patience: 30
+  pretrained: null
+  strict_pretrained: false
+  resume: null
+  use_ema: false
+  ema_decay: 0.999
+
+loss:
+  boundary_weight: 0.2
+  boundary_positive_weight_cap: 20.0
+  auxiliary_weight: 0.1
+  # focal_tversky_loss uses FP*alpha + FN*beta. Penalise the observed
+  # full-layer vessel false positives more strongly than false negatives.
+  vessel_bce_weight: 0.5
+  vessel_fp_weight: 0.6
+  vessel_fn_weight: 0.4
+  vessel_tversky_gamma: 0.75
+  dark_percentile: 5.0
+  pseudo_positive: 0.9
+  pseudo_negative: 0.1
+  weights:
+    reconstruction: 1.0
+    residual: 0.5
+    layer: 1.0
+    vessel: 1.0
+    vessel_stroma: 0.25
+    vessel_area: 0.20
+    containment: 0.1
+    rmac: 0.15
+    identity: 0.05
+    pseudo: 0.5
+  rmac:
+    image_weight: 1.0
+    segmentation_weight: 1.0
+    layer_consistency_weight: 0.5
+    vessel_consistency_weight: 0.25
+    clean_teacher_weight: 0.25
+    feature_weight: 0.05
+
+evaluation:
+  batch_size: 1
+  num_workers: 2
+  threshold: 0.5
+  layer_threshold: 0.5
+  vessel_threshold: 0.5
+  axial_spacing: 1.0
+  lateral_spacing: 1.0

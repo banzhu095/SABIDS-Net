@@ -1,0 +1,6 @@
+sample_id,group_id,patient_id,dataset,domain,scan_protocol,frame_index,split,image_path,clean_path,layer_mask_path,vessel_mask_path,is_clean
+pku_pos01_f00,pku_pos01,pku_patient01,PKU37,public,SD-OCT,0,train,data/PKU37/pos01/noisy_00.png,data/PKU37/pos01/clean.png,data/PKU37/pos01/layer.png,data/PKU37/pos01/vessel.png,0
+pku_pos01_f01,pku_pos01,pku_patient01,PKU37,public,SD-OCT,1,train,data/PKU37/pos01/noisy_01.png,data/PKU37/pos01/clean.png,data/PKU37/pos01/layer.png,data/PKU37/pos01/vessel.png,0
+pku_pos02_f00,pku_pos02,pku_patient02,PKU37,public,SD-OCT,0,val,data/PKU37/pos02/noisy_00.png,data/PKU37/pos02/clean.png,data/PKU37/pos02/layer.png,data/PKU37/pos02/vessel.png,0
+duke17_001,duke17_001,duke_patient01,Duke17,public,SD-OCT,0,test,data/Duke17/001_noisy.png,data/Duke17/001_clean.png,data/Duke17/001_layer.png,data/Duke17/001_vessel.png,0
+

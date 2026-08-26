@@ -1,0 +1,12 @@
+_base_: ../stage2_segment.yaml
+
+data:
+  manifest: Manifests/segmentation_folds/manifest_seg_fold0.csv
+  root: .
+  target_size: [512, 512]
+  normalization: fixed
+
+train:
+  output_dir: runs/current/stage2_segment_fold0
+  pretrained: runs/current/stage1_denoise_fold0/best.pth
+  monitor: vessel_soft_dice

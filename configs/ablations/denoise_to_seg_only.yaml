@@ -1,0 +1,9 @@
+_base_: ../stage4_joint.yaml
+
+model:
+  enable_seg_to_denoise: false
+  enable_denoise_to_seg: true
+
+train:
+  output_dir: runs/ablations/denoise_to_seg_only
+

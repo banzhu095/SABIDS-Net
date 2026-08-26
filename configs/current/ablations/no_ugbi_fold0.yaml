@@ -1,0 +1,7 @@
+_base_: ../stage4_joint_fold0.yaml
+
+model:
+  interaction_levels: []
+
+train:
+  output_dir: runs/current/ablations/no_ugbi_fold0

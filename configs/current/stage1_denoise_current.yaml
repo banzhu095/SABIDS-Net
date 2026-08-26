@@ -1,0 +1,11 @@
+_base_: ../stage1_denoise.yaml
+
+data:
+  manifest: Manifests/manifest_denoise.csv
+  root: .
+  target_size: [512, 512]
+  normalization: fixed
+
+train:
+  output_dir: runs/current/stage1_denoise_standalone
+  monitor: psnr

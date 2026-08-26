@@ -1,0 +1,49 @@
+_base_: base.yaml
+
+data:
+  manifest: examples/manifest_private_example.csv
+  normalization: percentile
+  # 500x1536 -> approximately 320x983 at the same scale. A 320x960 canvas
+  # introduces little padding and is much cheaper than native 512x1536.
+  target_size: [320, 960]
+  # Patient-balanced oversampling prevents sparse manual vessel supervision
+  # from being overwhelmed by the 1000 layer-labelled B-scans.
+  vessel_oversample_fraction: 0.35
+
+model:
+  # Freeze the public denoising path and use fixed denoising features to guide
+  # private segmentation. This also prevents updated segmentation features from
+  # feeding back into the denoised image during adaptation.
+  enable_seg_to_denoise: false
+  enable_denoise_to_seg: true
+  private_train_encoder_levels: []
+
+train:
+  stage: private_seg
+  output_dir: runs/stage5_private_seg
+  epochs: 80
+  pretrained: runs/stage4_joint/best.pth
+  strict_pretrained: true
+  use_ema: true
+  ema_decay: 0.999
+  detach_cross_epochs: 0
+  ramp_epochs: 15
+  batch_size: 1
+  gradient_accumulation_steps: 2
+  learning_rate: 0.00005
+  monitor: vessel_soft_dice
+
+loss:
+  weights:
+    reconstruction: 0.0
+    residual: 0.0
+    identity: 0.0
+    rmac: 0.0
+    layer: 1.0
+    vessel: 1.0
+    containment: 0.1
+    pseudo: 0.5
+
+evaluation:
+  # Report the same EMA model used for private validation and pseudo-labeling.
+  use_ema: true

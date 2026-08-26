@@ -1,0 +1,8 @@
+_base_: ../stage4_joint.yaml
+
+model:
+  interaction_levels: []
+
+train:
+  output_dir: runs/ablations/no_ugbi
+

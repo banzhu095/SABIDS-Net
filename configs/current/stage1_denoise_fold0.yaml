@@ -1,0 +1,9 @@
+_base_: stage1_denoise_current.yaml
+
+# Fold-aware denoising pretraining for the segmentation experiment. The outer
+# segmentation test positions stay outside Stage 1 training as well.
+data:
+  manifest: Manifests/joint_folds/manifest_joint_fold0.csv
+
+train:
+  output_dir: runs/current/stage1_denoise_fold0

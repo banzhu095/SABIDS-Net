@@ -1,0 +1,11 @@
+_base_: ../stage5_private.yaml
+
+data:
+  manifest: Manifests/manifest_private_seg.csv
+  root: .
+  target_size: [320, 960]
+
+train:
+  output_dir: runs/current/stage5_private_seg_fold0
+  pretrained: runs/current/stage4_joint_fold0/best.pth
+  monitor: vessel_soft_dice

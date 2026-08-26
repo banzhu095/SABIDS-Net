@@ -1,0 +1,8 @@
+_base_: ../stage4_joint_fold0.yaml
+
+loss:
+  weights:
+    rmac: 0.0
+
+train:
+  output_dir: runs/current/ablations/no_rmac_fold0

@@ -1,0 +1,14 @@
+_base_: base.yaml
+
+train:
+  stage: segment
+  output_dir: runs/stage2_segment
+  epochs: 100
+  pretrained: runs/stage1_denoise/best.pth
+  strict_pretrained: false
+  # A hard 0.5 mask can stay unchanged for many epochs even while probability
+  # calibration improves. Select checkpoints with continuous soft Dice.
+  monitor: vessel_soft_dice
+
+loss:
+  auxiliary_weight: 0.0

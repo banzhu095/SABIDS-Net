@@ -1,0 +1,9 @@
+_base_: ../stage4_joint_fold0.yaml
+
+loss:
+  weights:
+    vessel_stroma: 0.0
+    vessel_area: 0.0
+
+train:
+  output_dir: runs/current/ablations/no_area_stroma_fold0

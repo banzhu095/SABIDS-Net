@@ -1,0 +1,7 @@
+_base_: ../stage4_joint_fold0.yaml
+
+model:
+  use_uncertainty: false
+
+train:
+  output_dir: runs/current/ablations/no_uncertainty_fold0
