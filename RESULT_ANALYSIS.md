@@ -52,6 +52,21 @@ Dice约0.458，层外预测明显增加。上述结论仅基于2个验证group�
 并导出原始、GT层oracle、预测层软门控和三类错误分区。E3b通过前继续暂缓
 S→D和Joint。
 
+## 0.3 E3b新协议结果与当前split对照
+
+用户提供的E3b完整60轮CSV在第55轮取得验证soft/hard Dice约
+0.676/0.738、Precision/Recall约0.704/0.780、层Dice约0.946，预测血管中
+约4.66%位于GT层外。预测层软门控在同checkpoint上把hard Dice提高到约
+0.751；临时关闭D→S把soft Dice降至约0.603，只能说明模型依赖该路径，
+不能等价为独立训练收益。
+
+本轮使用13个train-eval和3个validation group，而旧E1--E3使用8/2；本地
+清单仍是旧8/2/3，说明云端新manifest尚未同步。因此新增三个当前协议对照：
+`roi_current`仅把outside BCE权重设为0；`roi_outside_no_d2s`保留完整E3b
+损失而只关闭D→S；`safe_current`补传统安全基线。协议工具要求manifest、
+split、标签内容和Stage 1 checkpoint四类SHA256一致，否则禁止单因素归因。
+这些正式对照完成前仍不进入Joint。
+
 ## 1. 结论
 
 当前降噪结果具有实际改善，但Joint分割发生了明显的血管假阳性扩张。`vessel_recall=0.8260`而`vessel_precision=0.3801`，并且预测血管面积比例为`0.7322`、真值仅`0.4152`。这说明模型不是“漏掉小血管”，而是把大量层内非血管组织也预测为血管。

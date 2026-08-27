@@ -1,0 +1,15 @@
+_base_: stage2_segment_roi_outside.yaml
+
+# Current-split E3b D->S training ablation. It changes only the interaction:
+# the complete E3b objective, containment and optimization budget are retained.
+model:
+  enable_denoise_to_seg: false
+  stage2_train_denoise_to_seg: false
+
+train:
+  output_dir: runs/stage2_segment_roi_outside_no_d2s
+  monitor_d2s_sensitivity: false
+
+loss:
+  definition_version: roi-bce-dice-outside-bce-no-d2s-v1
+

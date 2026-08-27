@@ -1,0 +1,7 @@
+_base_: stage2_segment_safe.yaml
+
+# Current-split traditional E1 reference. A distinct name/output prevents the
+# historical 8/2-group run from being mistaken for this protocol.
+train:
+  output_dir: runs/stage2_segment_safe_current
+

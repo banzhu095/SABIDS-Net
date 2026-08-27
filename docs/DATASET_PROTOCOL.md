@@ -172,6 +172,13 @@ with segmentation validation/test groups and writes
 this audit whenever newly labelled positions change a fold; an old Stage 1
 checkpoint is not automatically valid for a new 20-position split.
 
+Run metadata fingerprints the contents of unique layer, vessel, validity and
+multiclass label assets in addition to the manifest text. The comparison tool
+requires matching manifest, effective split, label-asset and Stage 1 checkpoint
+SHA256 values before calling two runs a protocol-matched ablation. A history
+CSV without these hashes is retained as historical evidence but cannot prove a
+single-factor effect.
+
 ## 6. Split and independence rules
 
 ### 6.1 PKU37

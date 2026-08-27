@@ -141,7 +141,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--epochs-private", type=int, default=None)
     parser.add_argument(
         "--stage2-variant",
-        choices=["baseline", "safe", "d2s", "roi", "roi_outside"],
+        choices=[
+            "baseline",
+            "safe",
+            "d2s",
+            "roi",
+            "roi_outside",
+            "roi_current",
+            "roi_outside_no_d2s",
+            "safe_current",
+        ],
         default="baseline",
         help="Isolated Stage 2 experiment; non-baseline variants cannot launch Joint.",
     )
@@ -549,6 +558,15 @@ def evaluate_checkpoint(
         lateral_spacing=float(evaluation.get("lateral_spacing", 1.0)),
         save_predictions=save_predictions,
         stage=str(config.get("train", {}).get("stage", "joint")),
+        input_normalization=str(config["data"].get("normalization", "fixed")),
+        component_size_thresholds=(
+            tuple(evaluation["component_size_thresholds"])
+            if isinstance(
+                evaluation.get("component_size_thresholds"), (list, tuple)
+            )
+            else None
+        ),
+        boundary_band_width=float(evaluation.get("boundary_band_width", 3.0)),
     )
 
 

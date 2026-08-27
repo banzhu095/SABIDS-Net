@@ -97,6 +97,7 @@ class OCTManifestDataset(Dataset):
         repeat = self._load_optional(repeat_row["image_path"])
         if image is None or repeat is None:
             raise RuntimeError(f"Missing required image for sample {row['sample_id']}")
+        original_height, original_width = image.shape[-2:]
 
         clean = self._load_optional(row.get("clean_path", ""))
         layer = self._load_optional(row.get("layer_mask_path", ""), mask=True)
@@ -152,5 +153,15 @@ class OCTManifestDataset(Dataset):
             "dataset": str(row["dataset"]),
             "scan_protocol": str(row.get("scan_protocol", "unknown")),
             "original_path": str(self._resolve(row["image_path"])),
+            "clean_path": str(self._resolve(row.get("clean_path", "")) or ""),
+            "layer_mask_path": str(
+                self._resolve(row.get("layer_mask_path", "")) or ""
+            ),
+            "vessel_mask_path": str(
+                self._resolve(row.get("vessel_mask_path", "")) or ""
+            ),
+            "original_height": int(original_height),
+            "original_width": int(original_width),
+            "manifest_group_frames": int(len(self.group_to_indices[group_id])),
         }
         return output

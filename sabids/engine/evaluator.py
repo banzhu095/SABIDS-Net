@@ -38,6 +38,9 @@ def evaluate_model(
     lateral_spacing: float = 1.0,
     save_predictions: bool = False,
     stage: Optional[str] = None,
+    input_normalization: Optional[str] = None,
+    component_size_thresholds: Optional[tuple[int, int]] = None,
+    boundary_band_width: float = 3.0,
 ) -> Dict[str, object]:
     model.eval()
     layer_threshold = threshold if layer_threshold is None else layer_threshold
@@ -70,6 +73,17 @@ def evaluate_model(
                 "patient_id": batch["patient_id"][index],
                 "dataset": batch["dataset"][index],
                 "scan_protocol": batch["scan_protocol"][index],
+                "original_path": batch["original_path"][index],
+                "clean_path": batch["clean_path"][index],
+                "layer_mask_path": batch["layer_mask_path"][index],
+                "vessel_mask_path": batch["vessel_mask_path"][index],
+                "original_height": int(batch["original_height"][index]),
+                "original_width": int(batch["original_width"][index]),
+                "model_input_height": int(image.shape[-2]),
+                "model_input_width": int(image.shape[-1]),
+                "manifest_group_frames": int(
+                    batch["manifest_group_frames"][index]
+                ),
             }
             valid = batch["valid_mask"][index, 0].numpy() > 0.5
             coordinates = np.argwhere(valid)
@@ -81,6 +95,12 @@ def evaluate_model(
             crop = np.s_[y0:y1, x0:x1]
             layer_pred = layer_probability[index, 0][crop] >= layer_threshold
             vessel_pred = vessel_probability[index, 0][crop] >= vessel_threshold
+            vessel_tp = None
+            vessel_fp = None
+            vessel_fn = None
+            vessel_roi_tp = None
+            vessel_roi_fp = None
+            vessel_roi_fn = None
             if evaluate_segmentation:
                 predicted_vessel_pixels = float(vessel_pred.sum())
                 predicted_layer_pixels = float(layer_pred.sum())
@@ -143,6 +163,9 @@ def evaluate_model(
                 vessel_valid = (
                     batch["vessel_valid_mask"][index, 0].numpy()[crop] > 0.5
                 )
+                vessel_tp = vessel_pred & vessel_true & vessel_valid
+                vessel_fp = vessel_pred & ~vessel_true & vessel_valid
+                vessel_fn = ~vessel_pred & vessel_true & vessel_valid
                 if bool(batch["has_layer"][index]):
                     row.update(
                         vessel_diagnostic_metrics(
@@ -153,6 +176,8 @@ def evaluate_model(
                             vessel_valid,
                             vessel_threshold=vessel_threshold,
                             layer_threshold=layer_threshold,
+                            component_size_thresholds=component_size_thresholds,
+                            boundary_band_width=boundary_band_width,
                         )
                     )
                     error_outside_both = (
@@ -170,6 +195,10 @@ def evaluate_model(
                         * layer_probability[index, 0][crop]
                         >= vessel_threshold
                     )
+                    gt_roi = layer_true & vessel_valid
+                    vessel_roi_tp = vessel_tp & gt_roi
+                    vessel_roi_fp = vessel_fp & gt_roi
+                    vessel_roi_fn = vessel_fn & gt_roi
                 else:
                     for key, value in binary_metrics(
                         vessel_pred[vessel_valid], vessel_true[vessel_valid]
@@ -229,6 +258,12 @@ def evaluate_model(
                             vessel_true.astype(np.float32),
                         )
                     diagnostic_maps = {
+                        "vessel_tp": vessel_tp,
+                        "vessel_fp": vessel_fp,
+                        "vessel_fn": vessel_fn,
+                        "vessel_gt_layer_roi_tp": vessel_roi_tp,
+                        "vessel_gt_layer_roi_fp": vessel_roi_fp,
+                        "vessel_gt_layer_roi_fn": vessel_roi_fn,
                         "error_outside_gt_and_pred_layer": error_outside_both,
                         "error_outside_gt_inside_pred_layer": error_outside_gt_inside_pred,
                         "gt_vessel_outside_pred_layer": gt_vessel_outside_pred_layer,
@@ -259,6 +294,12 @@ def evaluate_model(
     numeric_columns = frame_table.select_dtypes(include=[np.number]).columns.tolist()
     group_columns = ["group_id", "dataset"]
     group_table = frame_table.groupby(group_columns, as_index=False)[numeric_columns].mean()
+    evaluated_frames = frame_table.groupby(group_columns).size().rename(
+        "n_evaluated_frames"
+    )
+    group_table = group_table.merge(
+        evaluated_frames.reset_index(), on=group_columns, how="left"
+    )
     summary = mean_dict(group_table[numeric_columns].to_dict("records"))
     summary["n_frames"] = int(len(frame_table))
     summary["n_groups"] = int(frame_table["group_id"].nunique())
@@ -270,6 +311,13 @@ def evaluate_model(
     }
     summary["layer_threshold"] = float(layer_threshold)
     summary["vessel_threshold"] = float(vessel_threshold)
+    summary["input_normalization"] = input_normalization or "unspecified"
+    summary["component_size_thresholds"] = (
+        list(component_size_thresholds)
+        if component_size_thresholds is not None
+        else None
+    )
+    summary["boundary_band_width_pixels"] = float(boundary_band_width)
     summary["evaluated_tasks"] = [
         name
         for name, enabled in (
@@ -309,6 +357,14 @@ def evaluate_model(
                 "oracle_warning": (
                     "GT-layer-restricted metrics are diagnostic only and are not "
                     "deployable model results"
+                ),
+                "vessel_pred_layer_soft_gate": (
+                    "p_gate = p_vessel * p_layer; its global threshold must be "
+                    "calibrated on validation separately from raw p_vessel"
+                ),
+                "vessel_gt_component_size": (
+                    "Connected-component pixel area in resized/padded model "
+                    "coordinates; thresholds must be derived from training labels"
                 ),
             },
             output_path / "metric_definitions.json",

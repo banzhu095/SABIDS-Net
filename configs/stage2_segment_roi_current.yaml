@@ -1,0 +1,11 @@
+_base_: stage2_segment_roi_outside.yaml
+
+# Current-split E3 control for E3b. It keeps D->S and containment identical to
+# E3b, changing only the outside-logit BCE weight from 0.5 to 0.
+train:
+  output_dir: runs/stage2_segment_roi_current
+
+loss:
+  definition_version: roi-bce-dice-current-control-v1
+  weights:
+    vessel_outside: 0.0

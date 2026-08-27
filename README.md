@@ -413,6 +413,49 @@ python evaluate.py \
 部署性能。错误叠加图中红色为同时位于GT层和预测层外的假阳性，橙色为
 位于GT层外但被预测层放行的假阳性，蓝色为预测层裁剪会漏掉的GT血管。
 
+E3b在新13/3组协议上成为候选后，旧8/2组E1--E3不能继续作为单因素对照。
+当前提供三个新目录，均从相同Stage 1权重、相同当前manifest和60轮预算
+开始：
+
+```bash
+# 仅移除outside BCE：E3-current
+python run_current_pipeline.py --project-root /mnt/SABIDS-Net --fold 0 \
+  --stages segment --stage2-variant roi_current --device cuda --skip-test --force
+
+# 保留完整E3b损失，仅关闭D→S：真正的训练消融
+python run_current_pipeline.py --project-root /mnt/SABIDS-Net --fold 0 \
+  --stages segment --stage2-variant roi_outside_no_d2s \
+  --device cuda --skip-test --force
+
+# 当前split上的传统E1参考
+python run_current_pipeline.py --project-root /mnt/SABIDS-Net --fold 0 \
+  --stages segment --stage2-variant safe_current \
+  --device cuda --skip-test --force
+```
+
+正式比较前运行协议审计；只有`comparable=True`才允许作单因素归因：
+
+```bash
+python tools/compare_stage2_protocols.py \
+  --experiments \
+    E3b=runs/current/stage2_segment_roi_outside_fold0 \
+    E3_current=runs/current/stage2_segment_roi_current_fold0 \
+    E3b_no_D2S=runs/current/stage2_segment_roi_outside_no_d2s_fold0 \
+    E1_current=runs/current/stage2_segment_safe_current_fold0 \
+  --reference E3b \
+  --output runs/current/stage2_protocol_comparison_fold0
+```
+
+原始输出与预测层软门控必须分别在validation上校准一个全局阈值。使用
+`--prediction-mode raw`或`soft_gate`，禁止按group或test调阈值。连通域
+尺度分层阈值先由训练组确定，再传给固定帧评价：
+
+```bash
+python tools/derive_vessel_component_thresholds.py \
+  --config runs/current/stage2_segment_roi_outside_fold0/resolved_config.yaml \
+  --output runs/current/stage2_segment_roi_outside_fold0/component_bins.json
+```
+
 ### Stage 3/4：UGBI预热与公开数据联合训练
 
 ```bash

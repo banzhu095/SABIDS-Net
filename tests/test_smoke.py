@@ -1,5 +1,9 @@
+import copy
+from pathlib import Path
+
 import torch
 
+from sabids.config import load_config
 from sabids.losses import SABIDSLoss
 from sabids.metrics import vessel_diagnostic_metrics
 from sabids.models import SABIDSNet
@@ -458,3 +462,69 @@ def test_roi_outside_bce_penalizes_saturated_false_positive_and_ignores_unknown(
     )
     assert logits.grad[0, :, 10:, :].mean() > 0
     assert logits.grad[0, :, :3, :].abs().sum() == 0
+
+
+def test_current_split_stage2_controls_change_only_the_intended_factor():
+    root = Path(__file__).resolve().parents[1]
+    e3b = load_config(root / "configs/stage2_segment_roi_outside.yaml")
+    e3_current = load_config(root / "configs/stage2_segment_roi_current.yaml")
+    no_d2s = load_config(
+        root / "configs/stage2_segment_roi_outside_no_d2s.yaml"
+    )
+    safe = load_config(root / "configs/stage2_segment_safe.yaml")
+    safe_current = load_config(root / "configs/stage2_segment_safe_current.yaml")
+
+    assert e3b["model"] == e3_current["model"]
+    assert e3b["data"] == e3_current["data"]
+    for key, value in e3b["train"].items():
+        if key != "output_dir":
+            assert e3_current["train"][key] == value
+    left, right = copy.deepcopy(e3b["loss"]), copy.deepcopy(e3_current["loss"])
+    left.pop("definition_version")
+    right.pop("definition_version")
+    left["weights"].pop("vessel_outside")
+    right["weights"].pop("vessel_outside")
+    assert left == right
+    assert e3b["loss"]["weights"]["vessel_outside"] == 0.5
+    assert e3_current["loss"]["weights"]["vessel_outside"] == 0.0
+
+    left, right = copy.deepcopy(e3b), copy.deepcopy(no_d2s)
+    for config in (left, right):
+        config.pop("runtime")
+        config["train"].pop("output_dir")
+        config["train"].pop("monitor_d2s_sensitivity")
+        config["loss"].pop("definition_version")
+        config["model"].pop("enable_denoise_to_seg")
+        config["model"].pop("stage2_train_denoise_to_seg")
+    assert left == right
+    assert e3b["model"]["enable_denoise_to_seg"] is True
+    assert no_d2s["model"]["enable_denoise_to_seg"] is False
+
+    left, right = copy.deepcopy(safe), copy.deepcopy(safe_current)
+    for config in (left, right):
+        config.pop("runtime")
+        config["train"].pop("output_dir")
+    assert left == right
+
+
+def test_vessel_diagnostics_report_component_scale_and_boundary_band():
+    layer = torch.ones(16, 16, dtype=torch.bool).numpy()
+    target = torch.zeros(16, 16, dtype=torch.bool).numpy()
+    target[1:3, 1:3] = True      # area 4, small
+    target[6:10, 6:10] = True    # area 16, medium
+    probability = target.astype("float32")
+    probability[1:3, 1:3] = 0.0
+    metrics = vessel_diagnostic_metrics(
+        probability,
+        layer.astype("float32"),
+        target,
+        layer,
+        valid=layer,
+        component_size_thresholds=(4, 20),
+        boundary_band_width=2.0,
+    )
+    assert metrics["vessel_gt_component_small_count"] == 1.0
+    assert metrics["vessel_gt_component_medium_count"] == 1.0
+    assert metrics["vessel_gt_component_small_pixel_recall"] < 0.01
+    assert metrics["vessel_gt_component_medium_pixel_recall"] > 0.99
+    assert "vessel_boundary_band_dice" in metrics

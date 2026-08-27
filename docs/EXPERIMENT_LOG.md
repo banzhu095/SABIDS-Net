@@ -337,3 +337,40 @@ Populate one row per independent fold after validation threshold selection.
   checkpoint SHA256. Stage 1 train versus Stage 2 val/test overlap is fatal.
 - Local verification: focused tests and a one-epoch real-manifest CPU E3b smoke
   passed; formal 512x512 cloud result remains pending.
+
+### EXP-DIAG-20260827-E3B-NEW-PROTOCOL
+
+- Evidence source: user-supplied 60-row E3b history CSV; best epoch 55 selected
+  by `val_vessel_soft_dice`. No checkpoint, resolved config, per-group CSV or
+  run metadata accompanied the history in this workspace.
+- Reported protocol: 13 train-eval groups and 3 validation groups, versus 8/2
+  in historical E1--E3. Therefore the apparent E3-to-E3b gain is not a valid
+  single-factor outside-BCE estimate.
+- Reported best metrics: validation vessel hard/soft Dice `0.73796/0.67618`,
+  Precision/Recall `0.70429/0.77956`, ROI Dice `0.75658`, layer Dice `0.94573`
+  and predicted-vessel outside-GT-layer fraction `0.04662`.
+- Same-checkpoint diagnostics: predicted-layer soft gate hard Dice `0.75133`;
+  disabling D2S reduced soft Dice to `0.60281`. The latter demonstrates model
+  dependence, not an independently trained D2S benefit.
+- Decision: retain E3b as candidate; train E3-current, E3b-no-D2S and
+  E1-current from the exact same current protocol before Joint.
+
+### CODE-20260827-STAGE2-CURRENT-CONTROLS
+
+- Added isolated variants `roi_current`, `roi_outside_no_d2s` and
+  `safe_current`, each with a new output directory. A focused test asserts that
+  E3-current changes only outside weight, and E3b-no-D2S changes only D2S.
+- Metadata now fingerprints label-file contents and records all split IDs/rows.
+  `tools/compare_stage2_protocols.py` marks missing/different fingerprints as
+  non-comparable.
+- Evaluation rows now include source/reference paths, original/model geometry,
+  manifest group frame count and evaluated frame IDs/counts. TP/FP/FN maps are
+  exported both globally and inside the GT layer.
+- Added boundary-band metrics and optional training-defined connected-component
+  size recall. `tools/derive_vessel_component_thresholds.py` derives area
+  tertiles from one deterministic training frame per labelled group.
+- Threshold calibration supports separate `raw` and `soft_gate` modes and
+  respects vessel-valid masks; selection remains validation-only.
+- Local verification: all three new variants completed one real-manifest CPU
+  smoke epoch. Their new metadata fingerprints were protocol-compatible with
+  each other. Formal current 13/3/4 cloud runs remain pending.

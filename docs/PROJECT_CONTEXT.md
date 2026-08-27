@@ -110,6 +110,9 @@ than force every dark pixel to be a vessel.
 | 2-E2 | `configs/current/stage2_segment_d2s_fold0.yaml` | Detached denoise-to-seg interaction diagnostic | Stage 1 `best.pth` |
 | 2-E3 | `configs/current/stage2_segment_roi_fold0.yaml` | ROI BCE+Dice vessel-supervision diagnostic | Stage 1 `best.pth` |
 | 2-E3b | `configs/current/stage2_segment_roi_outside_fold0.yaml` | E3 plus isolated outside-layer logit BCE | Stage 1 `best.pth` |
+| 2-E3-current | `configs/current/stage2_segment_roi_current_fold0.yaml` | Current-split outside-BCE control | Same Stage 1 `best.pth` |
+| 2-E3b-no-D2S | `configs/current/stage2_segment_roi_outside_no_d2s_fold0.yaml` | Current-split D2S training ablation | Same Stage 1 `best.pth` |
+| 2-E1-current | `configs/current/stage2_segment_safe_current_fold0.yaml` | Current-split traditional safe reference | Same Stage 1 `best.pth` |
 | 4 | `configs/current/stage4_joint_fold0.yaml` | UGBI + RMAC public joint training | Stage 2 `best.pth` |
 | 5 | `configs/current/stage5_private_seg_fold0.yaml` | Private sparse-label segmentation adaptation | Stage 4 `best.pth` |
 
@@ -204,6 +207,16 @@ about 0.458 full-image Dice with extensive layer-exterior predictions. These
 figures cover only two validation groups and are diagnostic, not held-out test
 evidence. E3b therefore retains E3's inside-ROI BCE+Dice and adds only stable
 outside-GT-layer negative BCE.
+
+The subsequent user-supplied E3b history used a changed 13-train/3-validation
+protocol and selected epoch 55 by validation soft Dice. It reported vessel
+hard/soft Dice about 0.738/0.676, Precision/Recall about 0.704/0.780, layer Dice
+about 0.946 and only about 4.66% of predicted vessel pixels outside the GT
+layer. Predicted-layer soft gating improved the same checkpoint's hard Dice to
+about 0.751. Because the old E1--E3 histories used 8/2 groups, none of these
+cross-protocol differences establishes a loss or interaction effect. The
+implemented next step is the three current-split controls above; Joint remains
+deferred.
 
 ## 6. Immediate experiment sequence
 

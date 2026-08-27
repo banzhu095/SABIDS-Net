@@ -28,6 +28,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--use-ema", action="store_true")
     parser.add_argument("--layer-threshold", type=float, default=None)
     parser.add_argument("--vessel-threshold", type=float, default=None)
+    parser.add_argument(
+        "--component-size-thresholds",
+        type=int,
+        nargs=2,
+        metavar=("SMALL_MAX", "MEDIUM_MAX"),
+        default=None,
+        help="Training-defined GT component-area thresholds in model pixels.",
+    )
+    parser.add_argument("--boundary-band-width", type=float, default=None)
     return parser.parse_args()
 
 
@@ -80,6 +89,23 @@ def main() -> None:
         lateral_spacing=float(evaluation.get("lateral_spacing", 1.0)),
         save_predictions=args.save_predictions,
         stage=str(config.get("train", {}).get("stage", "joint")),
+        input_normalization=str(config["data"].get("normalization", "fixed")),
+        component_size_thresholds=(
+            tuple(args.component_size_thresholds)
+            if args.component_size_thresholds is not None
+            else (
+                tuple(evaluation["component_size_thresholds"])
+                if isinstance(
+                    evaluation.get("component_size_thresholds"), (list, tuple)
+                )
+                else None
+            )
+        ),
+        boundary_band_width=(
+            args.boundary_band_width
+            if args.boundary_band_width is not None
+            else float(evaluation.get("boundary_band_width", 3.0))
+        ),
     )
     print(summary)
 

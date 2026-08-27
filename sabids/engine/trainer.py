@@ -331,6 +331,39 @@ class Trainer:
             str(key): int(value)
             for key, value in table["split"].value_counts().items()
         }
+        label_assets = []
+        data_root = self.config.get("data", {}).get("root")
+        root = Path(data_root).expanduser().resolve() if data_root else manifest.parent
+        for column in (
+            "layer_mask_path",
+            "vessel_mask_path",
+            "vessel_valid_mask_path",
+            "multiclass_label_path",
+        ):
+            if column not in table.columns:
+                continue
+            for value in sorted({str(item) for item in table[column] if str(item)}):
+                asset = Path(value).expanduser()
+                if not asset.is_absolute():
+                    asset = (root / asset).resolve()
+                label_assets.append(
+                    {
+                        "column": column,
+                        "path": str(asset),
+                        "sha256": _sha256_file(asset) if asset.is_file() else None,
+                    }
+                )
+        label_payload = "\n".join(
+            f"{item['column']}|{item['path']}|{item['sha256']}"
+            for item in label_assets
+        ).encode("utf-8")
+        runtime["label_assets_sha256"] = hashlib.sha256(
+            label_payload
+        ).hexdigest()
+        runtime["label_asset_count"] = len(label_assets)
+        runtime["missing_label_assets"] = [
+            item["path"] for item in label_assets if item["sha256"] is None
+        ]
         data_config = self.config.get("data", {})
         runtime["effective_groups"] = {}
         runtime["effective_rows"] = {}
@@ -383,6 +416,21 @@ class Trainer:
             ),
             "effective_groups": self.config.get("runtime", {}).get(
                 "effective_groups", {}
+            ),
+            "group_ids_by_split": self.config.get("runtime", {}).get(
+                "group_ids_by_split", {}
+            ),
+            "rows_by_split": self.config.get("runtime", {}).get(
+                "rows_by_split", {}
+            ),
+            "label_assets_sha256": self.config.get("runtime", {}).get(
+                "label_assets_sha256"
+            ),
+            "label_asset_count": self.config.get("runtime", {}).get(
+                "label_asset_count"
+            ),
+            "missing_label_assets": self.config.get("runtime", {}).get(
+                "missing_label_assets", []
             ),
             "initialization_checkpoint": self.config.get("runtime", {}).get(
                 "initialization_checkpoint"
@@ -741,6 +789,7 @@ class Trainer:
             evaluation.get("vessel_threshold", default_threshold)
         )
         group_values = defaultdict(lambda: defaultdict(list))
+        group_sample_ids = defaultdict(list)
         for batch in tqdm(loader, desc=description, leave=False):
             image = batch["image"].to(self.device, non_blocking=True)
             output = evaluation_model(
@@ -772,6 +821,9 @@ class Trainer:
             layer = layer_probability >= layer_threshold
             vessel = vessel_probability >= vessel_threshold
             for index, group_id in enumerate(batch["group_id"]):
+                group_sample_ids[str(group_id)].append(
+                    str(batch["sample_id"][index])
+                )
                 valid = batch["valid_mask"][index, 0].numpy() > 0.5
                 if d2s_disabled_vessel_probability is not None:
                     group_values[group_id][
@@ -822,6 +874,17 @@ class Trainer:
                             vessel_valid,
                             vessel_threshold=vessel_threshold,
                             layer_threshold=layer_threshold,
+                            component_size_thresholds=(
+                                tuple(evaluation["component_size_thresholds"])
+                                if isinstance(
+                                    evaluation.get("component_size_thresholds"),
+                                    (list, tuple),
+                                )
+                                else None
+                            ),
+                            boundary_band_width=float(
+                                evaluation.get("boundary_band_width", 3.0)
+                            ),
                         )
                         for name, value in diagnostics.items():
                             group_values[group_id][name].append(value)
@@ -851,6 +914,8 @@ class Trainer:
             group_rows.append(
                 {
                     "group_id": group_id,
+                    "n_evaluated_frames": len(group_sample_ids[group_id]),
+                    "sample_ids": ";".join(group_sample_ids[group_id]),
                     **{
                         name: float(np.mean(items))
                         for name, items in values.items()

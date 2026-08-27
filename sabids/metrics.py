@@ -3,7 +3,12 @@ from __future__ import annotations
 from typing import Dict, Tuple
 
 import numpy as np
-from scipy.ndimage import binary_erosion, distance_transform_edt, uniform_filter
+from scipy.ndimage import (
+    binary_erosion,
+    distance_transform_edt,
+    label as connected_components,
+    uniform_filter,
+)
 
 
 def psnr(prediction: np.ndarray, target: np.ndarray, data_range: float = 1.0) -> float:
@@ -193,6 +198,8 @@ def vessel_diagnostic_metrics(
     valid: np.ndarray,
     vessel_threshold: float = 0.5,
     layer_threshold: float = 0.5,
+    component_size_thresholds: Tuple[int, int] | None = None,
+    boundary_band_width: float = 3.0,
 ) -> Dict[str, float]:
     """Consistent full-image, GT-layer ROI, outside, and baseline metrics."""
     valid = valid.astype(bool)
@@ -293,6 +300,44 @@ def vessel_diagnostic_metrics(
     result["vessel_pred_layer_soft_gate_soft_dice"] = soft_dice_score(
         soft_gated_probability, vessel_target, valid
     )
+    if component_size_thresholds is not None:
+        small_max, medium_max = component_size_thresholds
+        labelled, count = connected_components(vessel_target & valid)
+        bins = {
+            "small": lambda area: area <= small_max,
+            "medium": lambda area: small_max < area <= medium_max,
+            "large": lambda area: area > medium_max,
+        }
+        for name, selector in bins.items():
+            component_ids = [
+                component_id
+                for component_id in range(1, count + 1)
+                if selector(int((labelled == component_id).sum()))
+            ]
+            component_mask = np.isin(labelled, component_ids)
+            pixels = float(component_mask.sum())
+            result[f"vessel_gt_component_{name}_count"] = float(
+                len(component_ids)
+            )
+            result[f"vessel_gt_component_{name}_pixels"] = pixels
+            result[f"vessel_gt_component_{name}_pixel_recall"] = (
+                float(np.logical_and(vessel_prediction, component_mask).sum())
+                / max(pixels, 1.0)
+            )
+
+    target_surface = _surface(vessel_target & valid)
+    if target_surface.any() and boundary_band_width > 0:
+        distance = distance_transform_edt(~target_surface)
+        boundary_band = valid & (distance <= float(boundary_band_width))
+        result.update(
+            {
+                f"vessel_boundary_band_{key}": value
+                for key, value in binary_metrics(
+                    vessel_prediction[boundary_band],
+                    vessel_target[boundary_band],
+                ).items()
+            }
+        )
     overlap = float(
         np.logical_and(vessel_prediction, layer_prediction & valid).sum()
     )
