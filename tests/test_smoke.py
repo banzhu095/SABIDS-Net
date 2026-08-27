@@ -130,6 +130,61 @@ def test_full_layer_vessel_prediction_is_penalized():
     assert collapsed["total"] > good["total"]
 
 
+def test_saturated_stroma_logits_keep_a_finite_corrective_gradient():
+    height, width = 16, 16
+    layer = torch.zeros(1, 1, height, width)
+    layer[:, :, 4:12] = 1.0
+    vessel = torch.zeros_like(layer)
+    vessel[:, :, 6:8, 5:11] = 1.0
+    # Half precision reproduces the saturation regime seen under CUDA AMP.
+    vessel_logits = torch.full(
+        layer.shape, -20.0, dtype=torch.float16, requires_grad=True
+    )
+    with torch.no_grad():
+        vessel_logits[layer.bool()] = 20.0
+    layer_logits = torch.where(layer > 0.5, 20.0, -20.0)
+    output = {
+        "denoised_raw": torch.zeros_like(layer, requires_grad=True),
+        "residual": torch.zeros_like(layer),
+        "layer_logits": layer_logits,
+        "vessel_logits": vessel_logits,
+        "layer_prob": torch.sigmoid(layer_logits),
+        "vessel_prob": torch.sigmoid(vessel_logits),
+        "boundary_logits": torch.zeros(1, 2, height, width),
+        "auxiliary": [],
+    }
+    batch = {
+        "layer_mask": layer,
+        "vessel_mask": vessel,
+        "valid_mask": torch.ones_like(layer),
+        "has_layer": torch.tensor([True]),
+        "has_vessel": torch.tensor([True]),
+        "has_clean": torch.tensor([False]),
+        "has_repeat": torch.tensor([False]),
+        "is_clean": torch.tensor([False]),
+        "image": torch.zeros_like(layer),
+        "image_weak": torch.zeros_like(layer),
+        "clean": torch.zeros_like(layer),
+    }
+    criterion = SABIDSLoss(
+        {
+            "weights": {
+                "layer": 0.0,
+                "vessel": 0.0,
+                "vessel_stroma": 1.0,
+                "vessel_area": 0.0,
+                "containment": 0.0,
+            }
+        }
+    )
+    losses = criterion(output, batch, stage="segment")
+    losses["total"].backward()
+    stroma = (layer > 0.5) & (vessel < 0.5)
+    assert torch.isfinite(losses["total"])
+    assert torch.isfinite(vessel_logits.grad).all()
+    assert vessel_logits.grad[stroma].mean() > 0
+
+
 def test_private_seg_freezes_public_denoising_path():
     model = SABIDSNet(
         channels=(8, 16, 32, 64),

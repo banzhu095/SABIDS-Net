@@ -65,6 +65,9 @@ train:
   ema_decay: 0.999
 
 loss:
+  # Bump when the implemented loss meaning changes so old checkpoints cannot
+  # be silently reused under a different objective.
+  definition_version: stable-stroma-fp32-v1
   boundary_weight: 0.2
   boundary_positive_weight_cap: 20.0
   auxiliary_weight: 0.1

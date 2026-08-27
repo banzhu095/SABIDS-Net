@@ -265,3 +265,28 @@ Populate one row per independent fold after validation threshold selection.
   Preserve the evidence, choose a new output directory or use safe archiving,
   and document the decision.
 
+## 10. Code diagnosis: Stage 2 saturation and non-finite loss
+
+### CODE-20260827-STAGE2-STABLE-STROMA
+
+- Trigger: a fresh Stage 2 log stayed at
+  `vessel_soft_dice=0.59735` through epochs 12--19 and printed `loss=nan`
+  during epoch 20.
+- Status: implementation correction completed locally; cloud retraining result
+  pending. This entry is not an experimental performance claim.
+- Confirmed code defect: the stroma negative term used a
+  sigmoid/log/clamp expression whose gradient becomes zero after a positive
+  vessel logit saturates sigmoid to one.
+- Correction: use `softplus(vessel_logit)`, promote custom segmentation losses
+  to FP32, run Stage 2 with LR `5e-5` and AMP disabled, fail fast on non-finite
+  loss, and log collapse diagnostics during validation.
+- Data audit: the 13 `Label/voc_jpg` references and PKU clean images had matching
+  640x640 geometry and correlations approximately 0.991--0.995. A sampled
+  global phase-shift audit of repeats was generally below two source pixels;
+  this does not prove local vessel registration, but did not support gross
+  global misregistration as the primary cause.
+- Checkpoint rule: do not resume or reuse the affected Stage 2 checkpoint. The
+  resolved loss now carries `definition_version: stable-stroma-fp32-v1` so the
+  pipeline rejects the old objective.
+- Required cloud outcome: pending fresh fold-0 Stage 2 run, probability-map
+  review, and group-level validation diagnostics.

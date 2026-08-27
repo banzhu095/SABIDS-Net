@@ -14,6 +14,11 @@ def charbonnier(prediction: torch.Tensor, target: torch.Tensor, eps: float = 1e-
 def soft_dice_loss(
     logits: torch.Tensor, target: torch.Tensor, eps: float = 1e-6
 ) -> torch.Tensor:
+    # Custom reductions are not automatically promoted by AMP.  At 512x512,
+    # keeping probabilities/reductions in float16 can overflow or lose the
+    # small gradients needed to recover from a saturated foreground mask.
+    logits = logits.float()
+    target = target.float()
     probability = torch.sigmoid(logits)
     dims = tuple(range(1, probability.ndim))
     intersection = (probability * target).sum(dim=dims)
@@ -30,6 +35,8 @@ def focal_tversky_loss(
     gamma: float = 0.75,
     eps: float = 1e-6,
 ) -> torch.Tensor:
+    logits = logits.float()
+    target = target.float()
     probability = torch.sigmoid(logits)
     dims = tuple(range(1, probability.ndim))
     tp = (probability * target).sum(dim=dims)
@@ -146,6 +153,10 @@ class SegmentationLoss(nn.Module):
         target: torch.Tensor,
         boundary_logits: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        logits = logits.float()
+        target = target.float()
+        if boundary_logits is not None:
+            boundary_logits = boundary_logits.float()
         bce = F.binary_cross_entropy_with_logits(logits, target)
         dice = soft_dice_loss(logits, target)
         if self.task == "vessel":

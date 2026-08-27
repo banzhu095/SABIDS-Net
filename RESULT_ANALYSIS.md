@@ -1,5 +1,31 @@
 # 当前Joint结果分析与修复方案
 
+## 0. 2026-08-27 Stage 2非有限损失补充诊断
+
+新鲜Stage 2运行在epoch 12--19连续报告
+`vessel_soft_dice=0.59735`，并在epoch 20训练中出现`loss=nan`。固定的
+soft Dice提示模型几乎没有继续更新，但它本身不能证明输出就是整层；
+必须联合查看Precision、Recall、预测血管面积和层-血管相似度。
+
+代码审计发现层内基质负样本项原先使用
+`-log(1-sigmoid(vessel_logit)).clamp(...)`。当正logit足够大时，sigmoid
+在浮点数中舍入为1，clamp分支的梯度为0，导致整层假阳性进入饱和区后
+最关键的纠正项失效。自定义Dice/Tversky归约在AMP下也没有显式提升到
+FP32，增加了512x512训练的数值风险。
+
+当前修复为：
+
+- 基质负类BCE改为数学等价、梯度稳定的`softplus(vessel_logit)`；
+- Dice、Tversky、stroma、area和containment使用FP32计算；
+- Stage 2学习率降至`5e-5`并关闭AMP；
+- 首个非有限loss立即打印样本和所有损失分量并停止；
+- validation新增血管Precision/Recall、预测/真实面积比例及
+  `pred_layer_vessel_dice`。
+
+这只是代码层修复，尚未产生新的云端训练结果。旧Stage 2 checkpoint已
+使用不同的损失定义，必须通过`--force`归档后从Stage 1重新训练，不能
+resume。
+
 ## 1. 结论
 
 当前降噪结果具有实际改善，但Joint分割发生了明显的血管假阳性扩张。`vessel_recall=0.8260`而`vessel_precision=0.3801`，并且预测血管面积比例为`0.7322`、真值仅`0.4152`。这说明模型不是“漏掉小血管”，而是把大量层内非血管组织也预测为血管。

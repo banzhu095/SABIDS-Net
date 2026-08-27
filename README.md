@@ -24,6 +24,11 @@ SABIDS-Net是面向脉络膜OCT图像的多任务学习框架，在一个网络�
 
 > **v0.2修订重点：** Joint阶段采用stop-gradient repeat/clean教师，显著降低三路前向的显存峰值；血管损失增加层内基质负样本和面积约束；验证用soft Dice选择checkpoint；流水线会拒绝复用输入尺寸或损失不兼容的旧权重。
 
+> **Stage 2数值稳定性修复：** 层内基质负样本损失使用稳定的
+> `softplus(vessel_logit)`，避免血管概率饱和为1后梯度被截断；Dice、
+> Tversky和面积归约固定使用FP32。Stage 2当前采用`5e-5`且关闭AMP，
+> 验证日志同时报告Precision、Recall、血管面积比例和层-血管相似度。
+
 ## 1. 网络结构
 
 ```mermaid
@@ -352,6 +357,11 @@ python train.py --config configs/stage2_segment.yaml
 
 配置中的`pretrained`应指向Stage 1的最佳权重。层分支采用Dice、BCE和类别均衡的上下边界监督；血管分支采用Dice、BCE、偏重假阳性的Focal-Tversky和边界损失。为防止血管头退化为整层掩膜，还加入层内非血管基质负样本损失和逐图像血管面积比例约束。
 
+层内基质项直接以logit计算负类BCE，不经过`sigmoid -> log -> clamp`。
+后者在高正logit下会因概率舍入为1而失去纠正假阳性的梯度。当前Stage 2
+还使用全精度损失和保守学习率；如果任何损失分量变为非有限值，训练会
+立即报告epoch、batch、样本ID和各分量，而不是继续保存损坏权重。
+
 Stage 2和Stage 4默认监控`vessel_soft_dice`。固定0.5阈值产生的二值掩膜可能连续多轮完全不变，不能可靠判断概率输出是否仍在改善；最终二值阈值应在验证集单独校准。
 
 ### Stage 3/4：UGBI预热与公开数据联合训练
@@ -487,6 +497,10 @@ python evaluate.py \
 - 降噪：PSNR、SSIM、RMSE、EPI、SNR、CNR，以及noisy基线和改善量；
 - 层分割：Dice、IoU、Precision、Recall、HD95、ASSD、上下边界MAE、厚度MAE；
 - 血管分割：Dice、IoU、Precision、Recall、HD95、ASSD、血管面积比例误差。
+
+训练期验证日志额外记录`val_pred_layer_vessel_dice`。该值接近1，同时
+`val_vessel_area_fraction_pred`明显高于真值且Precision低于Recall，是
+血管头退化为层掩膜的直接证据；单独一个soft Dice不能确认这种失败。
 
 只使用验证集校准血管阈值：
 

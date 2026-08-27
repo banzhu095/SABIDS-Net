@@ -354,6 +354,17 @@ class Trainer:
                     teacher_output=teacher_output,
                     ramp=ramp,
                 )
+            if not bool(torch.isfinite(losses["total"])):
+                components = {
+                    key: float(value.detach().float().item())
+                    for key, value in losses.items()
+                    if torch.is_tensor(value) and value.numel() == 1
+                }
+                raise FloatingPointError(
+                    "Non-finite training loss before backward: "
+                    f"epoch={epoch + 1}, batch={batch_index + 1}, "
+                    f"samples={batch.get('sample_id')}, components={components}"
+                )
             accumulation_group_start = (
                 batch_index // accumulation_steps
             ) * accumulation_steps
@@ -412,9 +423,13 @@ class Trainer:
                 valid = batch["valid_mask"][index, 0].numpy() > 0.5
                 if bool(batch["has_layer"][index]):
                     target = batch["layer_mask"][index, 0].numpy() > 0.5
-                    group_values[group_id]["layer_dice"].append(
-                        binary_metrics(layer[index, 0][valid], target[valid])["dice"]
+                    layer_metrics = binary_metrics(
+                        layer[index, 0][valid], target[valid]
                     )
+                    for name in ("dice", "precision", "recall"):
+                        group_values[group_id][f"layer_{name}"].append(
+                            layer_metrics[name]
+                        )
                     probability = layer_probability[index, 0][valid]
                     target_float = target[valid].astype(np.float32)
                     group_values[group_id]["layer_soft_dice"].append(
@@ -425,9 +440,13 @@ class Trainer:
                     )
                 if bool(batch["has_vessel"][index]):
                     target = batch["vessel_mask"][index, 0].numpy() > 0.5
-                    group_values[group_id]["vessel_dice"].append(
-                        binary_metrics(vessel[index, 0][valid], target[valid])["dice"]
+                    vessel_metrics = binary_metrics(
+                        vessel[index, 0][valid], target[valid]
                     )
+                    for name in ("dice", "precision", "recall"):
+                        group_values[group_id][f"vessel_{name}"].append(
+                            vessel_metrics[name]
+                        )
                     probability = vessel_probability[index, 0][valid]
                     target_float = target[valid].astype(np.float32)
                     group_values[group_id]["vessel_soft_dice"].append(
@@ -436,6 +455,38 @@ class Trainer:
                             / (probability.sum() + target_float.sum() + 1e-6)
                         )
                     )
+                    if bool(batch["has_layer"][index]):
+                        layer_target = (
+                            batch["layer_mask"][index, 0].numpy() > 0.5
+                        )[valid]
+                        vessel_prediction = vessel[index, 0][valid]
+                        layer_prediction = layer[index, 0][valid]
+                        roi_pixels = max(float(layer_target.sum()), 1.0)
+                        predicted_fraction = float(
+                            np.logical_and(vessel_prediction, layer_target).sum()
+                            / roi_pixels
+                        )
+                        true_fraction = float(target[valid].sum() / roi_pixels)
+                        group_values[group_id][
+                            "vessel_area_fraction_pred"
+                        ].append(predicted_fraction)
+                        group_values[group_id][
+                            "vessel_area_fraction_true"
+                        ].append(true_fraction)
+                        group_values[group_id]["vessel_area_fraction_mae"].append(
+                            abs(predicted_fraction - true_fraction)
+                        )
+                        intersection = float(
+                            np.logical_and(vessel_prediction, layer_prediction).sum()
+                        )
+                        similarity = (2.0 * intersection + 1e-6) / (
+                            float(vessel_prediction.sum())
+                            + float(layer_prediction.sum())
+                            + 1e-6
+                        )
+                        group_values[group_id]["pred_layer_vessel_dice"].append(
+                            similarity
+                        )
                 if bool(batch["has_clean"][index]):
                     prediction = output["denoised"][index, 0].cpu().numpy()
                     target = batch["clean"][index, 0].numpy()
@@ -477,6 +528,11 @@ class Trainer:
             if monitored is None:
                 fallback = "layer_dice" if "layer_dice" in val_metrics else "psnr"
                 monitored = val_metrics.get(fallback, -math.inf)
+            if not math.isfinite(float(monitored)):
+                raise FloatingPointError(
+                    f"Validation monitor {monitor!r} is non-finite at epoch "
+                    f"{epoch + 1}: {monitored!r}. Metrics={val_metrics}"
+                )
             improved = monitored > self.best_metric
             if improved:
                 self.best_metric = monitored

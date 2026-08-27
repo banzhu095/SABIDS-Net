@@ -109,15 +109,17 @@ class SABIDSLoss(nn.Module):
         # (2) per-image vessel-area matching.  Padding is excluded.
         constrained = vessel_valid & layer_valid
         if bool(constrained.any()):
-            probability = output["vessel_prob"][constrained]
-            vessel_target = batch["vessel_mask"][constrained]
-            layer_target = batch["layer_mask"][constrained]
-            valid_mask = batch["valid_mask"][constrained]
+            vessel_logits = output["vessel_logits"][constrained].float()
+            probability = torch.sigmoid(vessel_logits)
+            vessel_target = batch["vessel_mask"][constrained].float()
+            layer_target = batch["layer_mask"][constrained].float()
+            valid_mask = batch["valid_mask"][constrained].float()
             roi = layer_target * valid_mask
             stroma = roi * (1.0 - vessel_target)
-            negative_log_likelihood = -torch.log(
-                (1.0 - probability).clamp_min(1e-6)
-            )
+            # BCE(target=0) == softplus(logit).  The former sigmoid/log/clamp
+            # expression had zero gradient once sigmoid rounded to exactly 1,
+            # which disabled the safeguard for saturated full-layer vessels.
+            negative_log_likelihood = F.softplus(vessel_logits)
             vessel_stroma = (negative_log_likelihood * stroma).sum() / (
                 stroma.sum().clamp_min(1.0)
             )
@@ -186,12 +188,13 @@ class SABIDSLoss(nn.Module):
             has_layer = batch["has_layer"].view(-1, 1, 1, 1)
             layer_reference = torch.where(
                 has_layer,
-                batch["layer_mask"],
-                output["layer_prob"].detach(),
-            )
-            valid_mask = batch["valid_mask"]
+                batch["layer_mask"].float(),
+                torch.sigmoid(output["layer_logits"].float()).detach(),
+            ).float()
+            valid_mask = batch["valid_mask"].float()
+            vessel_probability = torch.sigmoid(output["vessel_logits"].float())
             containment = (
-                output["vessel_prob"] * (1.0 - layer_reference) * valid_mask
+                vessel_probability * (1.0 - layer_reference) * valid_mask
             ).sum() / valid_mask.sum().clamp_min(1.0)
         losses["containment"] = containment
 

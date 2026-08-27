@@ -89,6 +89,8 @@ have manual vessel masks. Current safeguards against vessel over-expansion are:
 - stronger false-positive than false-negative Tversky weighting (`0.6/0.4`);
 - layer-interior non-vessel stroma negative loss;
 - per-image vessel-area fraction matching;
+- logit-space stroma-negative BCE that retains a corrective gradient even when
+  vessel probabilities saturate near one;
 - soft containment outside a true layer ROI when available;
 - 35% vessel-labelled training-step sampling in Stage 4/5;
 - weaker RMAC vessel consistency than layer consistency;
@@ -168,6 +170,15 @@ Version 0.2 changed the loss, sampling, checkpoint monitor, learning rate, RMAC
 strength, and memory behavior to address that failure. Therefore the old Stage
 2 and Joint checkpoints are incompatible with the intended v0.2 experiment and
 must not be resumed. See `RESULT_ANALYSIS.md` and `docs/EXPERIMENT_LOG.md`.
+
+A subsequent Stage 2 run reported a flat `vessel_soft_dice=0.59735` followed by
+a non-finite training loss near epoch 20. Review found that the intended stroma
+negative term used `-log(1-sigmoid(logit))` with a clamp. Once sigmoid rounded
+to one, the clamp removed the gradient precisely on saturated false-positive
+stroma. The current implementation uses the equivalent stable
+`softplus(logit)` form, performs custom segmentation reductions in FP32, and
+runs Stage 2 at `5e-5` without AMP. This is an implementation correction, not a
+confirmed new training result; the public fold-0 rerun remains pending.
 
 ## 6. Immediate experiment sequence
 
@@ -255,4 +266,3 @@ with matching controls and without changing the held-out test set.
 For every substantive experiment, record the exact Git commit returned by
 `git rev-parse --short HEAD`; a version name such as v0.2 is not precise enough
 for reproducibility.
-

@@ -9,6 +9,11 @@ train:
   # A hard 0.5 mask can stay unchanged for many epochs even while probability
   # calibration improves. Select checkpoints with continuous soft Dice.
   monitor: vessel_soft_dice
+  # Stage 2 previously saturated into a layer-like vessel solution and became
+  # non-finite around epoch 20.  Use conservative full-precision optimization;
+  # a single segmentation forward fits comfortably on the target 24 GB GPU.
+  learning_rate: 0.00005
+  amp: false
 
 loss:
   auxiliary_weight: 0.0
