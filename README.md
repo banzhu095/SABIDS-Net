@@ -2,6 +2,11 @@
 
 **Sparse-Annotation-aware Bidirectional Interaction Denoising–Segmentation Network**
 
+> Codex/开发者入口：先阅读根目录的`AGENTS.md`，再根据任务查看
+> `docs/PROJECT_CONTEXT.md`、`docs/DATASET_PROTOCOL.md`和
+> `docs/EXPERIMENT_LOG.md`。当前已知Joint失败及v0.2修复见
+> `RESULT_ANALYSIS.md`。
+
 SABIDS-Net是面向脉络膜OCT图像的多任务学习框架，在一个网络中联合完成：
 
 1. OCT图像降噪；
@@ -62,6 +67,11 @@ Y_hat = X - R
 
 ```text
 SABIDS-Net/
+├── AGENTS.md
+├── docs/
+│   ├── PROJECT_CONTEXT.md
+│   ├── DATASET_PROTOCOL.md
+│   └── EXPERIMENT_LOG.md
 ├── configs/
 │   ├── base.yaml
 │   ├── stage1_denoise.yaml
