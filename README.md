@@ -364,6 +364,34 @@ python train.py --config configs/stage2_segment.yaml
 
 Stage 2和Stage 4默认监控`vessel_soft_dice`。固定0.5阈值产生的二值掩膜可能连续多轮完全不变，不能可靠判断概率输出是否仍在改善；最终二值阈值应在验证集单独校准。
 
+为定位“Stage 2最优点很早、随后分割退化并破坏Stage 1表征”的问题，当前
+提供三个互不覆盖输出目录的诊断变体：
+
+- `safe`（E1）：冻结完整Stage 1上游与去噪路径，关闭双向UGBI，只训练
+  层/血管路径；被冻结模块持续处于`eval`，并逐轮验证固定探针的去噪输出
+  漂移不超过`1e-6`。
+- `d2s`（E2）：在E1上只开放“去噪→分割”的UGBI接收侧，来源特征
+  stop-gradient；“分割→去噪”仍关闭。
+- `roi`（E3）：在E2上将血管主监督替换为真值层ROI内的masked BCE+Dice，
+  同时保留层外containment；未知像素由可选的`vessel_valid_mask_path`排除。
+
+流水线会在epoch 0记录无增强验证、可选train-eval、整图/层内/层外指标、
+空掩膜/整层基线、逐组CSV、参数审计和清单SHA256。正式实验依次运行：
+
+```bash
+python run_current_pipeline.py --project-root /mnt/SABIDS-Net --fold 0 \
+  --stages segment --stage2-variant safe --device cuda --skip-test --force
+python run_current_pipeline.py --project-root /mnt/SABIDS-Net --fold 0 \
+  --stages segment --stage2-variant d2s --device cuda --skip-test --force
+python run_current_pipeline.py --project-root /mnt/SABIDS-Net --fold 0 \
+  --stages segment --stage2-variant roi --device cuda --skip-test --force
+```
+
+E0小样本过拟合可在上述任一Stage 2命令中增加
+`--overfit-groups <训练组1> <训练组2>`；仅允许2--4个组，训练和验证都会
+限定为这些训练组，因此只用于链路诊断，不能报告为泛化结果。三个变体尚未
+获得云端正式结果；在Stage 2门禁通过前不要衔接Joint。
+
 ### Stage 3/4：UGBI预热与公开数据联合训练
 
 ```bash

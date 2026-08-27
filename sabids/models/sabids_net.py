@@ -23,6 +23,7 @@ class SABIDSNet(nn.Module):
         enable_seg_to_denoise: bool = True,
         enable_denoise_to_seg: bool = True,
         use_uncertainty: bool = True,
+        detach_denoise_to_seg_source: bool = False,
         dropout: float = 0.0,
         residual_scale: float = 0.5,
     ) -> None:
@@ -32,6 +33,9 @@ class SABIDSNet(nn.Module):
         self.channels = list(channels)
         self.interaction_levels = set(int(level) for level in interaction_levels)
         self.residual_scale = residual_scale
+        self.enable_seg_to_denoise = enable_seg_to_denoise
+        self.enable_denoise_to_seg = enable_denoise_to_seg
+        self.detach_denoise_to_seg_source = detach_denoise_to_seg_source
 
         self.stem = nn.Conv2d(in_channels, channels[0], 3, padding=1)
         self.encoder_blocks = nn.ModuleList(
@@ -106,6 +110,7 @@ class SABIDSNet(nn.Module):
             layer,
             vessel,
             detach_cross=detach_cross,
+            detach_denoise_to_seg=self.detach_denoise_to_seg_source,
             return_details=auxiliary is not None,
         )
         if auxiliary is not None and details is not None:
@@ -183,6 +188,8 @@ class SABIDSNet(nn.Module):
         self,
         stage: str,
         private_train_encoder_levels: Iterable[int] = (),
+        freeze_shared_encoder: bool = False,
+        train_denoise_to_seg: bool = False,
     ) -> None:
         for parameter in self.parameters():
             parameter.requires_grad_(True)
@@ -194,6 +201,33 @@ class SABIDSNet(nn.Module):
             for name, parameter in self.named_parameters():
                 if any(token in name for token in ("denoise", "residual_head", "interactions")):
                     parameter.requires_grad_(False)
+            if freeze_shared_encoder:
+                self._set_module_trainable(self.stem, False)
+                self._set_module_trainable(self.encoder_blocks, False)
+                self._set_module_trainable(self.downsamples, False)
+            if train_denoise_to_seg:
+                if self.enable_seg_to_denoise:
+                    raise ValueError(
+                        "Safe Stage 2 D->S requires model.enable_seg_to_denoise=false "
+                        "so changing segmentation features cannot alter denoising."
+                    )
+                if not self.enable_denoise_to_seg:
+                    raise ValueError(
+                        "train_denoise_to_seg=true requires "
+                        "model.enable_denoise_to_seg=true"
+                    )
+                for interaction in self.interactions.values():
+                    for module in (
+                        interaction.noise_head,
+                        interaction.restoration_context,
+                        interaction.denoise_to_layer_gate,
+                        interaction.denoise_to_vessel_gate,
+                        interaction.denoise_to_layer,
+                        interaction.denoise_to_vessel,
+                    ):
+                        self._set_module_trainable(module)
+                    interaction.layer_scale.requires_grad_(True)
+                    interaction.vessel_scale.requires_grad_(True)
         elif stage == "private_seg":
             # Start from a fully frozen public model. Private adaptation then
             # updates only the layer/vessel pathways and D->S interaction path,
@@ -238,3 +272,17 @@ class SABIDSNet(nn.Module):
             return
         else:
             raise ValueError(f"Unsupported training stage: {stage}")
+
+    def enforce_frozen_eval(self) -> None:
+        """Keep the fixed denoising function deterministic during adaptation."""
+        modules = (
+            self.stem,
+            self.encoder_blocks,
+            self.downsamples,
+            self.adapters["denoise"],
+            self.decoders["denoise"],
+            self.residual_head,
+        )
+        for module in modules:
+            if not any(parameter.requires_grad for parameter in module.parameters()):
+                module.eval()

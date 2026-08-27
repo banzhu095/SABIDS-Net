@@ -63,6 +63,7 @@ class UGBIBlock(nn.Module):
         layer: torch.Tensor,
         vessel: torch.Tensor,
         detach_cross: bool = False,
+        detach_denoise_to_seg: bool = False,
         return_details: bool = True,
     ) -> Tuple[
         torch.Tensor,
@@ -71,6 +72,9 @@ class UGBIBlock(nn.Module):
         Optional[Dict[str, torch.Tensor]],
     ]:
         source_d = denoise.detach() if detach_cross else denoise
+        source_d_to_seg = (
+            denoise.detach() if detach_cross or detach_denoise_to_seg else denoise
+        )
         source_l = layer.detach() if detach_cross else layer
         source_v = vessel.detach() if detach_cross else vessel
 
@@ -99,8 +103,10 @@ class UGBIBlock(nn.Module):
             else denoise
         )
 
-        noise_hint = torch.abs(torch.tanh(self.noise_head(source_d)))
-        restoration = self.restoration_context(torch.cat([source_d, noise_hint], dim=1))
+        noise_hint = torch.abs(torch.tanh(self.noise_head(source_d_to_seg)))
+        restoration = self.restoration_context(
+            torch.cat([source_d_to_seg, noise_hint], dim=1)
+        )
         d2l_gate = torch.sigmoid(
             self.denoise_to_layer_gate(torch.cat([source_l, restoration], dim=1))
         )
@@ -108,13 +114,17 @@ class UGBIBlock(nn.Module):
             self.denoise_to_vessel_gate(torch.cat([source_v, restoration], dim=1))
         )
         if self.enable_denoise_to_seg:
-            layer_updated = layer + self.layer_scale * d2l_gate * self.denoise_to_layer(
-                restoration
+            layer_injection = (
+                self.layer_scale * d2l_gate * self.denoise_to_layer(restoration)
             )
-            vessel_updated = vessel + self.vessel_scale * d2v_gate * self.denoise_to_vessel(
-                restoration
+            vessel_injection = (
+                self.vessel_scale * d2v_gate * self.denoise_to_vessel(restoration)
             )
+            layer_updated = layer + layer_injection
+            vessel_updated = vessel + vessel_injection
         else:
+            layer_injection = torch.zeros_like(layer)
+            vessel_injection = torch.zeros_like(vessel)
             layer_updated = layer
             vessel_updated = vessel
 
@@ -129,5 +139,9 @@ class UGBIBlock(nn.Module):
                 "seg_to_denoise_gate": s2d_gate,
                 "denoise_to_layer_gate": d2l_gate,
                 "denoise_to_vessel_gate": d2v_gate,
+                "denoise_to_layer_injection_abs_mean": layer_injection.detach().abs().mean(),
+                "denoise_to_vessel_injection_abs_mean": vessel_injection.detach().abs().mean(),
+                "layer_scale_abs_mean": self.layer_scale.detach().abs().mean(),
+                "vessel_scale_abs_mean": self.vessel_scale.detach().abs().mean(),
             }
         return denoise_updated, layer_updated, vessel_updated, auxiliary

@@ -12,6 +12,7 @@ from .common import (
     edge_map,
     image_gradients,
     multi_scale_ssim_loss,
+    masked_bce_dice_loss,
     wavelet_loss,
 )
 from .pseudo import build_dual_source_pseudo_labels, confidence_masked_bce
@@ -27,6 +28,13 @@ class SABIDSLoss(nn.Module):
         super().__init__()
         self.config = config
         self.weights = config.get("weights", {})
+        self.vessel_supervision_mode = str(
+            config.get("vessel_supervision_mode", "composite")
+        )
+        if self.vessel_supervision_mode not in {"composite", "roi_bce_dice"}:
+            raise ValueError(
+                "loss.vessel_supervision_mode must be composite or roi_bce_dice"
+            )
         common = {
             "boundary_weight": float(config.get("boundary_weight", 0.2)),
             "boundary_positive_weight_cap": float(
@@ -90,17 +98,33 @@ class SABIDSLoss(nn.Module):
         vessel = _zero(output)
         vessel_stroma = _zero(output)
         vessel_area = _zero(output)
+        spatial_valid = batch["valid_mask"].float()
+        vessel_annotation_valid = batch.get("vessel_valid_mask", spatial_valid).float()
+        vessel_annotation_valid = vessel_annotation_valid * spatial_valid
         if bool(layer_valid.any()):
             layer = self.layer_loss(
                 output["layer_logits"][layer_valid],
                 batch["layer_mask"][layer_valid],
                 output["boundary_logits"][layer_valid],
+                spatial_valid[layer_valid],
             )
         if bool(vessel_valid.any()):
-            vessel = self.vessel_loss(
-                output["vessel_logits"][vessel_valid],
-                batch["vessel_mask"][vessel_valid],
-            )
+            if self.vessel_supervision_mode == "roi_bce_dice":
+                roi = (
+                    vessel_annotation_valid[vessel_valid]
+                    * batch["layer_mask"][vessel_valid].float()
+                )
+                vessel = masked_bce_dice_loss(
+                    output["vessel_logits"][vessel_valid],
+                    batch["vessel_mask"][vessel_valid],
+                    roi,
+                )
+            else:
+                vessel = self.vessel_loss(
+                    output["vessel_logits"][vessel_valid],
+                    batch["vessel_mask"][vessel_valid],
+                    valid_mask=vessel_annotation_valid[vessel_valid],
+                )
 
         # The containment loss only forbids vessels outside the layer; by
         # itself it does not forbid predicting the *entire* layer as vessel.
@@ -113,7 +137,7 @@ class SABIDSLoss(nn.Module):
             probability = torch.sigmoid(vessel_logits)
             vessel_target = batch["vessel_mask"][constrained].float()
             layer_target = batch["layer_mask"][constrained].float()
-            valid_mask = batch["valid_mask"][constrained].float()
+            valid_mask = vessel_annotation_valid[constrained]
             roi = layer_target * valid_mask
             stroma = roi * (1.0 - vessel_target)
             # BCE(target=0) == softplus(logit).  The former sigmoid/log/clamp
@@ -141,7 +165,13 @@ class SABIDSLoss(nn.Module):
                         mode="nearest",
                     )
                     layer = layer + auxiliary_weight * self.layer_loss(
-                        auxiliary["layer_logit"][layer_valid], target
+                        auxiliary["layer_logit"][layer_valid],
+                        target,
+                        valid_mask=F.interpolate(
+                            spatial_valid[layer_valid],
+                            size=auxiliary["layer_logit"].shape[-2:],
+                            mode="nearest",
+                        ),
                     )
                 if bool(vessel_valid.any()):
                     target = F.interpolate(
@@ -149,9 +179,29 @@ class SABIDSLoss(nn.Module):
                         size=auxiliary["vessel_logit"].shape[-2:],
                         mode="nearest",
                     )
-                    vessel = vessel + auxiliary_weight * self.vessel_loss(
-                        auxiliary["vessel_logit"][vessel_valid], target
+                    auxiliary_valid = F.interpolate(
+                        vessel_annotation_valid[vessel_valid],
+                        size=auxiliary["vessel_logit"].shape[-2:],
+                        mode="nearest",
                     )
+                    if self.vessel_supervision_mode == "roi_bce_dice":
+                        auxiliary_layer = F.interpolate(
+                            batch["layer_mask"][vessel_valid],
+                            size=auxiliary["vessel_logit"].shape[-2:],
+                            mode="nearest",
+                        )
+                        auxiliary_loss = masked_bce_dice_loss(
+                            auxiliary["vessel_logit"][vessel_valid],
+                            target,
+                            auxiliary_valid * auxiliary_layer,
+                        )
+                    else:
+                        auxiliary_loss = self.vessel_loss(
+                            auxiliary["vessel_logit"][vessel_valid],
+                            target,
+                            valid_mask=auxiliary_valid,
+                        )
+                    vessel = vessel + auxiliary_weight * auxiliary_loss
         return layer, vessel, vessel_stroma, vessel_area
 
     def forward(

@@ -1,0 +1,29 @@
+_base_: stage2_segment.yaml
+
+# E1: protect the complete Stage 1 denoising function. Only the layer/vessel
+# adapters, decoders, and output heads are optimized; UGBI is inactive.
+model:
+  enable_seg_to_denoise: false
+  enable_denoise_to_seg: false
+  detach_denoise_to_seg_source: true
+  stage2_freeze_shared_encoder: true
+  stage2_train_denoise_to_seg: false
+
+data:
+  # Eight fold-0 training positions should not be expanded into 368 nominally
+  # independent observations every epoch. The group sampler rotates repeats.
+  samples_per_epoch: 64
+  max_train_eval_samples: null
+  train_eval_frames_per_group: 1
+
+train:
+  output_dir: runs/stage2_segment_safe
+  epochs: 60
+  early_stopping_patience: 12
+  scheduler: plateau
+  lr_plateau_patience: 4
+  lr_plateau_factor: 0.5
+  evaluate_epoch0: true
+  train_eval_every: 1
+  monitor_denoise_drift: true
+  denoise_drift_tolerance: 0.000001

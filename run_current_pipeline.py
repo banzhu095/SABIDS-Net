@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import subprocess
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict
@@ -17,6 +19,20 @@ from sabids.utils import get_device, write_json
 
 
 DEFAULT_PROJECT_ROOT = r"E:\1-脉络膜\OCT降噪\SABIDS-Net"
+
+
+def _git_commit(root: Path) -> str:
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=root,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return result.stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return "unknown"
 
 
 def parse_args() -> argparse.Namespace:
@@ -53,6 +69,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--epochs-joint", type=int, default=None)
     parser.add_argument("--epochs-private", type=int, default=None)
     parser.add_argument(
+        "--stage2-variant",
+        choices=["baseline", "safe", "d2s", "roi"],
+        default="baseline",
+        help="Isolated Stage 2 experiment; non-baseline variants cannot launch Joint.",
+    )
+    parser.add_argument(
+        "--overfit-groups",
+        nargs="+",
+        default=None,
+        help="E0 diagnostic: fit 2-4 train group IDs with train=validation.",
+    )
+    parser.add_argument(
         "--force", action="store_true", help="Retrain even if best.pth exists"
     )
     parser.add_argument(
@@ -77,12 +105,21 @@ def parse_args() -> argparse.Namespace:
 
 
 def stage_specifications(
-    root: Path, fold: int, smoke_test: bool = False
+    root: Path,
+    fold: int,
+    smoke_test: bool = False,
+    stage2_variant: str = "baseline",
 ) -> Dict[str, Dict[str, Path]]:
     if smoke_test:
         run_root = root / "runs" / "current" / "smoke" / f"fold{fold}"
     else:
         run_root = root / "runs" / "current"
+    stage2_suffix = "" if stage2_variant == "baseline" else f"_{stage2_variant}"
+    stage2_config = (
+        "stage2_segment_fold0.yaml"
+        if stage2_variant == "baseline"
+        else f"stage2_segment_{stage2_variant}_fold0.yaml"
+    )
     return {
         "denoise": {
             "config": root / "configs" / "current" / "stage1_denoise_fold0.yaml",
@@ -97,15 +134,15 @@ def stage_specifications(
             ),
         },
         "segment": {
-            "config": root / "configs" / "current" / "stage2_segment_fold0.yaml",
+            "config": root / "configs" / "current" / stage2_config,
             "manifest": root
             / "Manifests"
             / "segmentation_folds"
             / f"manifest_seg_fold{fold}.csv",
             "output": (
-                run_root / "stage2_segment"
+                run_root / f"stage2_segment{stage2_suffix}"
                 if smoke_test
-                else run_root / f"stage2_segment_fold{fold}"
+                else run_root / f"stage2_segment{stage2_suffix}_fold{fold}"
             ),
         },
         "joint": {
@@ -145,6 +182,22 @@ def prepare_config(
     config["data"]["manifest"] = str(specification["manifest"])
     config["data"]["root"] = str(root)
     config["device"] = args.device
+    config.setdefault("runtime", {})["fold"] = int(args.fold)
+    config["runtime"]["stage2_variant"] = args.stage2_variant
+    config["runtime"]["git_commit"] = _git_commit(root)
+    if args.overfit_groups is not None:
+        if stage != "segment":
+            raise ValueError("--overfit-groups is only valid for Stage 2 segment")
+        if not 2 <= len(args.overfit_groups) <= 4:
+            raise ValueError("--overfit-groups requires 2 to 4 group IDs")
+        groups = [str(value) for value in args.overfit_groups]
+        config["data"]["train_groups"] = groups
+        config["data"]["val_groups"] = groups
+        config["data"]["val_split"] = config["data"].get("train_split", "train")
+        config["data"]["samples_per_epoch"] = 16 * len(groups)
+        config["data"]["augmentation"]["horizontal_flip"] = 0.0
+        config["train"]["train_eval_every"] = 1
+        config["runtime"]["overfit_groups"] = groups
     if args.smoke_test:
         config["data"]["target_size"] = [
             args.target_height or 64,
@@ -223,15 +276,23 @@ def prepare_config(
     if args.smoke_test:
         smoke_root = root / "runs" / "current" / "smoke" / f"fold{args.fold}"
         stage1_best = smoke_root / "stage1_denoise" / "best.pth"
-        stage2_best = smoke_root / "stage2_segment" / "best.pth"
+        stage2_name = (
+            "stage2_segment"
+            if args.stage2_variant == "baseline"
+            else f"stage2_segment_{args.stage2_variant}"
+        )
+        stage2_best = smoke_root / stage2_name / "best.pth"
         stage4_best = smoke_root / "stage4_joint" / "best.pth"
     else:
         stage1_best = (
             root / "runs" / "current" / f"stage1_denoise_fold{args.fold}" / "best.pth"
         )
-        stage2_best = (
-            root / "runs" / "current" / f"stage2_segment_fold{args.fold}" / "best.pth"
+        stage2_name = (
+            f"stage2_segment_fold{args.fold}"
+            if args.stage2_variant == "baseline"
+            else f"stage2_segment_{args.stage2_variant}_fold{args.fold}"
         )
+        stage2_best = root / "runs" / "current" / stage2_name / "best.pth"
         stage4_best = (
             root / "runs" / "current" / f"stage4_joint_fold{args.fold}" / "best.pth"
         )
@@ -241,6 +302,10 @@ def prepare_config(
         config["train"]["pretrained"] = str(stage2_best)
     elif stage == "private":
         config["train"]["pretrained"] = str(stage4_best)
+    # Keep the original initialization lineage stable after --resume replaces
+    # ``pretrained`` with ``resume``.  This is part of the compatibility
+    # signature and the resolved experiment fingerprint.
+    config["runtime"]["pretrained_source"] = config["train"].get("pretrained")
     return config
 
 
@@ -248,21 +313,55 @@ def _training_signature(config: Dict[str, Any]) -> Dict[str, Any]:
     """Fields that must agree before an existing checkpoint may be reused."""
     data = config.get("data", {})
     train = config.get("train", {})
+    manifest = Path(str(data.get("manifest", ""))).expanduser()
+    manifest_sha256 = None
+    if manifest.is_file():
+        digest = hashlib.sha256()
+        with manifest.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        manifest_sha256 = digest.hexdigest()
     return {
         "stage": train.get("stage"),
         "model": config.get("model", {}),
         "data": {
             "manifest": str(data.get("manifest", "")),
+            "manifest_sha256": manifest_sha256,
             "target_size": data.get("target_size"),
             "normalization": data.get("normalization"),
             "train_datasets": data.get("train_datasets"),
             "val_datasets": data.get("val_datasets"),
+            "train_groups": data.get("train_groups"),
+            "val_groups": data.get("val_groups"),
+            "train_split": data.get("train_split", "train"),
+            "val_split": data.get("val_split", "val"),
             "vessel_oversample_fraction": data.get(
                 "vessel_oversample_fraction", 0.0
             ),
             "augmentation": data.get("augmentation", {}),
+            "samples_per_epoch": data.get("samples_per_epoch"),
         },
         "loss": config.get("loss", {}),
+        "optimization": {
+            key: train.get(key)
+            for key in (
+                "learning_rate",
+                "minimum_learning_rate",
+                "weight_decay",
+                "batch_size",
+                "gradient_accumulation_steps",
+                "amp",
+                "scheduler",
+                "lr_plateau_patience",
+                "lr_plateau_factor",
+            )
+        },
+        "initialization": {
+            "pretrained": config.get("runtime", {}).get(
+                "pretrained_source", train.get("pretrained")
+            ),
+            "strict_pretrained": train.get("strict_pretrained"),
+        },
         "joint_runtime": {
             key: train.get(key)
             for key in (
@@ -382,7 +481,21 @@ def main() -> None:
         raise ValueError("--force and --resume are mutually exclusive")
     project_root = str(args.project_root).strip()
     root = Path(project_root or ".").expanduser().resolve()
-    specifications = stage_specifications(root, args.fold, args.smoke_test)
+    if args.stage2_variant != "baseline" and "joint" in args.stages:
+        raise ValueError(
+            "A non-baseline Stage 2 variant is an isolated E1/E2/E3 experiment. "
+            "Validate and freeze the design before using it to initialize Joint."
+        )
+    specifications = stage_specifications(
+        root, args.fold, args.smoke_test, args.stage2_variant
+    )
+    if args.overfit_groups is not None:
+        specifications["segment"]["output"] = (
+            root
+            / "runs"
+            / "current"
+            / f"stage2_overfit_{args.stage2_variant}_fold{args.fold}"
+        )
     if args.private_manifest:
         private_manifest = Path(args.private_manifest).expanduser()
         if not private_manifest.is_absolute():

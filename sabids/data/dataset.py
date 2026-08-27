@@ -39,6 +39,7 @@ class OCTManifestDataset(Dataset):
         sample_repeat: bool = True,
         root: Optional[str | Path] = None,
         datasets: Optional[List[str]] = None,
+        groups: Optional[List[str]] = None,
     ) -> None:
         self.manifest = Path(manifest).expanduser().resolve()
         self.root = Path(root).expanduser().resolve() if root else self.manifest.parent
@@ -51,6 +52,8 @@ class OCTManifestDataset(Dataset):
         table = table[table["split"].astype(str) == str(split)].copy()
         if datasets:
             table = table[table["dataset"].isin(datasets)].copy()
+        if groups:
+            table = table[table["group_id"].isin([str(value) for value in groups])].copy()
         if table.empty:
             raise ValueError(f"No samples for split={split!r} in {self.manifest}")
         self.table = table.reset_index(drop=True)
@@ -101,6 +104,15 @@ class OCTManifestDataset(Dataset):
         has_clean = clean is not None
         has_layer = layer is not None
         has_vessel = vessel is not None
+        vessel_valid = self._load_optional(
+            row.get("vessel_valid_mask_path", ""), mask=True
+        )
+        if vessel_valid is None:
+            vessel_valid = (
+                np.ones_like(image, dtype=np.float32)
+                if has_vessel
+                else np.zeros_like(image, dtype=np.float32)
+            )
 
         is_clean_only = str(row.get("is_clean", "0")).lower() in {"1", "true", "yes"}
         allow_strong = self.transform.training and (
@@ -111,6 +123,7 @@ class OCTManifestDataset(Dataset):
             masks={
                 "layer_mask": layer,
                 "vessel_mask": vessel,
+                "vessel_valid_mask": vessel_valid,
                 "valid_mask": np.ones_like(image, dtype=np.float32),
             },
             allow_strong=allow_strong,
@@ -126,6 +139,7 @@ class OCTManifestDataset(Dataset):
             "clean": transformed.get("clean", zeros.clone()),
             "layer_mask": transformed.get("layer_mask", zeros.clone()),
             "vessel_mask": transformed.get("vessel_mask", zeros.clone()),
+            "vessel_valid_mask": transformed["vessel_valid_mask"],
             "valid_mask": transformed["valid_mask"],
             "has_clean": torch.tensor(has_clean, dtype=torch.bool),
             "has_layer": torch.tensor(has_layer, dtype=torch.bool),

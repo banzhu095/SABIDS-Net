@@ -290,3 +290,28 @@ Populate one row per independent fold after validation threshold selection.
   pipeline rejects the old objective.
 - Required cloud outcome: pending fresh fold-0 Stage 2 run, probability-map
   review, and group-level validation diagnostics.
+
+### CODE-20260827-STAGE2-E0-E3-DIAGNOSTICS
+
+- Status: implementation and local CPU smoke verification completed; formal
+  cloud training result pending. This is not a performance claim.
+- Motivation: the numerically stable Stage 2 rerun reportedly peaked near
+  epoch 8 and then degraded, suggesting optimization/representation drift in
+  addition to the corrected non-finite loss.
+- E0: epoch-0 and no-augmentation train/validation diagnostics, independent
+  group counts, per-group CSVs, whole-layer/empty baselines, manifest SHA256,
+  checkpoint lineage and a 2--4 training-group overfit mode.
+- E1: freeze the complete Stage 1 upstream and denoising function, disable
+  UGBI, enforce frozen modules in evaluation mode and fail if a fixed denoising
+  probe drifts by more than `1e-6`.
+- E2: open only detached denoising-to-segmentation UGBI receiver parameters;
+  segmentation-to-denoising remains disabled and injection magnitudes/scales
+  are logged.
+- E3: optional ROI masked BCE+Dice vessel supervision with explicit unknown
+  pixels; the outside containment constraint remains active.
+- Outputs: `stage2_segment_safe_fold0`, `stage2_segment_d2s_fold0`, and
+  `stage2_segment_roi_fold0`; these must not initialize Joint until the Stage 2
+  gate is reviewed.
+- Local verification: one real-manifest CPU smoke epoch of E1 completed and
+  reported denoising probe maximum absolute drift `0.0`; this verifies the code
+  path only, not model quality.

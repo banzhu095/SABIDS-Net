@@ -169,3 +169,87 @@ def vessel_area_fraction(mask: np.ndarray, layer: np.ndarray) -> float:
     if denominator <= 0:
         return float("nan")
     return float(np.logical_and(mask > 0, layer > 0).sum() / denominator)
+
+
+def soft_dice_score(
+    probability: np.ndarray,
+    target: np.ndarray,
+    valid: np.ndarray,
+    eps: float = 1e-6,
+) -> float:
+    probability = probability[valid].astype(np.float64)
+    target = target[valid].astype(np.float64)
+    return float(
+        (2.0 * (probability * target).sum() + eps)
+        / (probability.sum() + target.sum() + eps)
+    )
+
+
+def vessel_diagnostic_metrics(
+    vessel_probability: np.ndarray,
+    layer_probability: np.ndarray,
+    vessel_target: np.ndarray,
+    layer_target: np.ndarray,
+    valid: np.ndarray,
+    vessel_threshold: float = 0.5,
+    layer_threshold: float = 0.5,
+) -> Dict[str, float]:
+    """Consistent full-image, GT-layer ROI, outside, and baseline metrics."""
+    valid = valid.astype(bool)
+    vessel_target = vessel_target.astype(bool)
+    layer_target = layer_target.astype(bool)
+    vessel_prediction = vessel_probability >= vessel_threshold
+    layer_prediction = layer_probability >= layer_threshold
+    result = {
+        f"vessel_{key}": value
+        for key, value in binary_metrics(
+            vessel_prediction[valid], vessel_target[valid]
+        ).items()
+    }
+    result["vessel_soft_dice"] = soft_dice_score(
+        vessel_probability, vessel_target, valid
+    )
+
+    roi = valid & layer_target
+    if roi.any():
+        result.update(
+            {
+                f"vessel_roi_{key}": value
+                for key, value in binary_metrics(
+                    vessel_prediction[roi], vessel_target[roi]
+                ).items()
+            }
+        )
+        roi_pixels = float(roi.sum())
+        predicted_fraction = float(
+            np.logical_and(vessel_prediction, roi).sum() / roi_pixels
+        )
+        true_fraction = float(np.logical_and(vessel_target, roi).sum() / roi_pixels)
+        result["vessel_area_fraction_pred"] = predicted_fraction
+        result["vessel_area_fraction_true"] = true_fraction
+        result["vessel_area_fraction_mae"] = abs(
+            predicted_fraction - true_fraction
+        )
+
+    predicted_pixels = float(np.logical_and(vessel_prediction, valid).sum())
+    outside_pixels = float(
+        np.logical_and(vessel_prediction, valid & ~layer_target).sum()
+    )
+    result["vessel_outside_gt_layer_fraction"] = outside_pixels / max(
+        predicted_pixels, 1.0
+    )
+    overlap = float(
+        np.logical_and(vessel_prediction, layer_prediction & valid).sum()
+    )
+    result["pred_layer_vessel_dice"] = (2.0 * overlap + 1e-6) / (
+        float(np.logical_and(vessel_prediction, valid).sum())
+        + float(np.logical_and(layer_prediction, valid).sum())
+        + 1e-6
+    )
+    result["whole_layer_baseline_vessel_dice"] = binary_metrics(
+        layer_target[valid], vessel_target[valid]
+    )["dice"]
+    result["empty_baseline_vessel_dice"] = binary_metrics(
+        np.zeros_like(vessel_target[valid]), vessel_target[valid]
+    )["dice"]
+    return result

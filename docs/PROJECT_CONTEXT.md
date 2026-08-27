@@ -106,6 +106,9 @@ than force every dark pixel to be a vessel.
 | --- | --- | --- | --- |
 | 1 | `configs/current/stage1_denoise_fold0.yaml` | Paired denoising | none |
 | 2 | `configs/current/stage2_segment_fold0.yaml` | Public layer/vessel pretraining | Stage 1 `best.pth` |
+| 2-E1 | `configs/current/stage2_segment_safe_fold0.yaml` | Frozen-denoising segmentation diagnostic | Stage 1 `best.pth` |
+| 2-E2 | `configs/current/stage2_segment_d2s_fold0.yaml` | Detached denoise-to-seg interaction diagnostic | Stage 1 `best.pth` |
+| 2-E3 | `configs/current/stage2_segment_roi_fold0.yaml` | ROI BCE+Dice vessel-supervision diagnostic | Stage 1 `best.pth` |
 | 4 | `configs/current/stage4_joint_fold0.yaml` | UGBI + RMAC public joint training | Stage 2 `best.pth` |
 | 5 | `configs/current/stage5_private_seg_fold0.yaml` | Private sparse-label segmentation adaptation | Stage 4 `best.pth` |
 
@@ -180,6 +183,17 @@ stroma. The current implementation uses the equivalent stable
 runs Stage 2 at `5e-5` without AMP. This is an implementation correction, not a
 confirmed new training result; the public fold-0 rerun remains pending.
 
+The code now also implements the staged E0--E3 diagnosis proposed after the
+numerically stable rerun still peaked early. E1 freezes the complete Stage 1
+stem, encoder, downsampling and denoising path and checks a fixed denoising
+probe for exact functional drift. E2 opens only the receiving side of
+denoising-to-segmentation UGBI while detaching its denoising source. E3 uses a
+masked BCE+Dice vessel objective inside the ground-truth layer ROI and retains
+the outside containment constraint. All variants record epoch-0, no-augmentation
+and group-level diagnostics in separate output directories. These are
+implemented experimental controls, not evidence that any variant improves the
+public result.
+
 ## 6. Immediate experiment sequence
 
 The next decision gate is a fresh fold-0 public baseline:
@@ -187,8 +201,8 @@ The next decision gate is a fresh fold-0 public baseline:
 1. Regenerate and audit manifests and binary masks.
 2. Reuse Stage 1 only if its resolved configuration and target size are
    compatible.
-3. Retrain Stage 2 at 512x512 and inspect validation probability maps.
-4. Continue to Joint only if Stage 2 vessel predictions are distinct from the
+3. Run E0 on 2--4 training groups, then compare E1, E2 and E3 at 512x512.
+4. Continue to Joint only if one Stage 2 vessel prediction is distinct from the
    layer and vessel area is plausible.
 5. Retrain Joint at 512x512 with batch 1 and accumulation 2.
 6. Calibrate the vessel threshold on validation data only.

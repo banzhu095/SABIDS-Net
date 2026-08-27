@@ -12,7 +12,10 @@ def charbonnier(prediction: torch.Tensor, target: torch.Tensor, eps: float = 1e-
 
 
 def soft_dice_loss(
-    logits: torch.Tensor, target: torch.Tensor, eps: float = 1e-6
+    logits: torch.Tensor,
+    target: torch.Tensor,
+    valid_mask: torch.Tensor | None = None,
+    eps: float = 1e-6,
 ) -> torch.Tensor:
     # Custom reductions are not automatically promoted by AMP.  At 512x512,
     # keeping probabilities/reductions in float16 can overflow or lose the
@@ -20,6 +23,9 @@ def soft_dice_loss(
     logits = logits.float()
     target = target.float()
     probability = torch.sigmoid(logits)
+    mask = torch.ones_like(target) if valid_mask is None else valid_mask.float()
+    probability = probability * mask
+    target = target * mask
     dims = tuple(range(1, probability.ndim))
     intersection = (probability * target).sum(dim=dims)
     denominator = probability.sum(dim=dims) + target.sum(dim=dims)
@@ -33,11 +39,15 @@ def focal_tversky_loss(
     alpha: float = 0.3,
     beta: float = 0.7,
     gamma: float = 0.75,
+    valid_mask: torch.Tensor | None = None,
     eps: float = 1e-6,
 ) -> torch.Tensor:
     logits = logits.float()
     target = target.float()
     probability = torch.sigmoid(logits)
+    mask = torch.ones_like(target) if valid_mask is None else valid_mask.float()
+    probability = probability * mask
+    target = target * mask
     dims = tuple(range(1, probability.ndim))
     tp = (probability * target).sum(dim=dims)
     fp = (probability * (1.0 - target)).sum(dim=dims)
@@ -152,13 +162,16 @@ class SegmentationLoss(nn.Module):
         logits: torch.Tensor,
         target: torch.Tensor,
         boundary_logits: torch.Tensor | None = None,
+        valid_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         logits = logits.float()
         target = target.float()
         if boundary_logits is not None:
             boundary_logits = boundary_logits.float()
-        bce = F.binary_cross_entropy_with_logits(logits, target)
-        dice = soft_dice_loss(logits, target)
+        mask = torch.ones_like(target) if valid_mask is None else valid_mask.float()
+        raw_bce = F.binary_cross_entropy_with_logits(logits, target, reduction="none")
+        bce = (raw_bce * mask).sum() / mask.sum().clamp_min(1.0)
+        dice = soft_dice_loss(logits, target, valid_mask=mask)
         if self.task == "vessel":
             # In focal_tversky_loss, alpha multiplies false positives and beta
             # multiplies false negatives.  The previous 0.3/0.7 setting strongly
@@ -170,15 +183,19 @@ class SegmentationLoss(nn.Module):
                 alpha=self.vessel_fp_weight,
                 beta=self.vessel_fn_weight,
                 gamma=self.vessel_tversky_gamma,
+                valid_mask=mask,
             )
             region = region + self.vessel_bce_weight * bce
             predicted_edge = edge_map(torch.sigmoid(logits))
             target_edge = edge_map(target)
-            boundary = F.l1_loss(predicted_edge, target_edge)
+            boundary = (torch.abs(predicted_edge - target_edge) * mask).sum() / (
+                mask.sum().clamp_min(1.0)
+            )
         else:
             region = dice + bce
             if boundary_logits is not None:
                 boundary_target, valid = layer_boundary_targets(target)
+                valid = valid * mask
                 raw = F.binary_cross_entropy_with_logits(
                     boundary_logits, boundary_target, reduction="none"
                 )
@@ -192,5 +209,38 @@ class SegmentationLoss(nn.Module):
                     valid * weights
                 ).sum().clamp_min(1.0)
             else:
-                boundary = F.l1_loss(edge_map(torch.sigmoid(logits)), edge_map(target))
+                boundary = (
+                    torch.abs(edge_map(torch.sigmoid(logits)) - edge_map(target))
+                    * mask
+                ).sum() / mask.sum().clamp_min(1.0)
         return region + self.boundary_weight * boundary
+
+
+def masked_bce_dice_loss(
+    logits: torch.Tensor,
+    target: torch.Tensor,
+    valid_mask: torch.Tensor,
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    """Per-image BCE+Dice over explicitly annotated pixels only."""
+    logits = logits.float()
+    target = target.float()
+    valid_mask = valid_mask.float()
+    per_image = []
+    for index in range(logits.shape[0]):
+        mask = valid_mask[index]
+        if not bool(mask.any()):
+            continue
+        raw = F.binary_cross_entropy_with_logits(
+            logits[index], target[index], reduction="none"
+        )
+        bce = (raw * mask).sum() / mask.sum().clamp_min(1.0)
+        probability = torch.sigmoid(logits[index]) * mask
+        masked_target = target[index] * mask
+        dice = 1.0 - (
+            2.0 * (probability * masked_target).sum() + eps
+        ) / (probability.sum() + masked_target.sum() + eps)
+        per_image.append(bce + dice)
+    if not per_image:
+        return logits.sum() * 0.0
+    return torch.stack(per_image).mean()

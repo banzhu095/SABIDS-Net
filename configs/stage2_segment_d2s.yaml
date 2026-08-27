@@ -1,0 +1,15 @@
+_base_: stage2_segment_safe.yaml
+
+# E2: keep the complete denoising function fixed, then train only the receiving
+# side of denoising-to-segmentation interaction. S->D remains disabled.
+model:
+  enable_denoise_to_seg: true
+  stage2_train_denoise_to_seg: true
+
+train:
+  output_dir: runs/stage2_segment_d2s
+
+loss:
+  # Intermediate segmentation heads are not used as uncalibrated teachers.
+  auxiliary_weight: 0.0
+

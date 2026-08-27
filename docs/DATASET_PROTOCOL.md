@@ -149,6 +149,7 @@ One CSV row represents one input B-scan. Core fields are:
 | `clean_path` | paired clean target, blank when unavailable |
 | `layer_mask_path` | binary layer mask, blank when unavailable |
 | `vessel_mask_path` | manual binary vessel mask, blank when unavailable |
+| `vessel_valid_mask_path` | optional binary mask of pixels with known vessel labels; blank means every pixel is known when a vessel mask exists |
 | `is_clean` | whether `image_path` is a clean-only sample |
 
 Public preparation additionally records `multiclass_label_path` and
@@ -157,6 +158,13 @@ source frame index, original shape, and filename for audit.
 
 Paths may be project-relative. Relative paths are preferred when all files are
 under the project root.
+
+`vessel_valid_mask_path` must describe annotation validity, not anatomy. A zero
+pixel is ignored by vessel supervision and must never be silently interpreted
+as a known non-vessel pixel. When the column is absent, a row with
+`vessel_mask_path` is treated as fully labelled and a row without it has no
+supervised vessel pixels. The Stage 2 ROI diagnostic further intersects this
+validity mask with the ground-truth layer mask.
 
 ## 6. Split and independence rules
 
@@ -328,4 +336,3 @@ Before launching a long run, record all answers in the experiment log:
 - [ ] Public fold and target size match the checkpoint initialization chain.
 - [ ] Paths resolve on the current OS/server.
 - [ ] `git status --short` does not show data, labels, manifests, or runs.
-

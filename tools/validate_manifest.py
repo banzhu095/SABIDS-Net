@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 from pathlib import Path
 
 import pandas as pd
@@ -22,6 +23,7 @@ def main() -> None:
     manifest = Path(args.manifest).resolve()
     root = Path(args.root).resolve() if args.root else manifest.parent
     table = pd.read_csv(manifest, dtype=str).fillna("")
+    digest = hashlib.sha256(manifest.read_bytes()).hexdigest()
     required = {"sample_id", "group_id", "dataset", "split", "image_path"}
     missing = required - set(table.columns)
     if missing:
@@ -56,10 +58,27 @@ def main() -> None:
             preview = "\n".join(map(str, missing_files[:20]))
             raise FileNotFoundError(f"Missing {len(missing_files)} files:\n{preview}")
     print(f"Rows: {len(table)}")
+    print(f"Manifest SHA256: {digest}")
     print(f"Groups: {table['group_id'].nunique()}")
     print(f"Datasets: {table['dataset'].value_counts().to_dict()}")
     print(f"Groups per split: {split_counts.to_dict()}")
     print(f"Rows per split: {table['split'].value_counts().to_dict()}")
+    for split, part in table.groupby("split"):
+        group_ids = sorted(part["group_id"].astype(str).unique().tolist())
+        vessel_groups = (
+            sorted(
+                part.loc[part.get("vessel_mask_path", "") != "", "group_id"]
+                .astype(str)
+                .unique()
+                .tolist()
+            )
+            if "vessel_mask_path" in part.columns
+            else []
+        )
+        print(
+            f"{split} group IDs ({len(group_ids)}): {group_ids}; "
+            f"vessel-labelled groups ({len(vessel_groups)}): {vessel_groups}"
+        )
     if "patient_id" in table.columns:
         patients = table[table["patient_id"] != ""].groupby("split")[
             "patient_id"

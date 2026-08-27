@@ -1,23 +1,40 @@
 from __future__ import annotations
 
 import math
+import hashlib
 import time
+import warnings
 from collections import defaultdict
 from contextlib import nullcontext
 from pathlib import Path
 from typing import Dict, Optional
 
 import numpy as np
+import pandas as pd
 import torch
 from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader, Subset
-from torch.utils.tensorboard import SummaryWriter
+try:
+    from torch.utils.tensorboard import SummaryWriter
+except ImportError:  # Training metrics still persist in CSV/JSON without it.
+    class SummaryWriter:  # type: ignore[no-redef]
+        def __init__(self, *args, **kwargs):
+            warnings.warn(
+                "tensorboard is unavailable; continuing with CSV/JSON logging only.",
+                RuntimeWarning,
+            )
+
+        def add_scalar(self, *args, **kwargs) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
 from tqdm import tqdm
 
 from ..data import GroupUniformSampler, OCTManifestDataset, SparseAnnotationSampler
 from ..data.transforms import JointOCTTransform
 from ..losses import SABIDSLoss
-from ..metrics import binary_metrics
+from ..metrics import binary_metrics, soft_dice_score, vessel_diagnostic_metrics
 from ..models import ModelEMA, SABIDSNet
 from ..utils import (
     CSVLogger,
@@ -26,6 +43,7 @@ from ..utils import (
     load_checkpoint,
     save_checkpoint,
     seed_everything,
+    write_json,
 )
 
 
@@ -56,6 +74,7 @@ def build_loaders(config: Dict) -> tuple[DataLoader, DataLoader, object]:
         sample_repeat=True,
         root=data_cfg.get("root"),
         datasets=data_cfg.get("train_datasets"),
+        groups=data_cfg.get("train_groups"),
     )
     val_dataset = OCTManifestDataset(
         data_cfg["manifest"],
@@ -64,6 +83,7 @@ def build_loaders(config: Dict) -> tuple[DataLoader, DataLoader, object]:
         sample_repeat=False,
         root=data_cfg.get("root"),
         datasets=data_cfg.get("val_datasets"),
+        groups=data_cfg.get("val_groups"),
     )
     max_val_samples = data_cfg.get("max_val_samples")
     if max_val_samples is not None:
@@ -104,6 +124,47 @@ def build_loaders(config: Dict) -> tuple[DataLoader, DataLoader, object]:
     return train_loader, val_loader, train_sampler
 
 
+def build_diagnostic_loader(
+    config: Dict, split: str, max_samples: Optional[int] = None
+) -> DataLoader:
+    data_cfg = config["data"]
+    dataset = OCTManifestDataset(
+        data_cfg["manifest"],
+        split=split,
+        transform=_make_transform(config, False),
+        sample_repeat=False,
+        root=data_cfg.get("root"),
+        datasets=(
+            data_cfg.get("train_datasets")
+            if split == data_cfg.get("train_split", "train")
+            else data_cfg.get("val_datasets")
+        ),
+        groups=(
+            data_cfg.get("train_groups")
+            if split == data_cfg.get("train_split", "train")
+            else data_cfg.get("val_groups")
+        ),
+    )
+    frames_per_group = config["data"].get("train_eval_frames_per_group")
+    if split == data_cfg.get("train_split", "train") and frames_per_group is not None:
+        indices = []
+        for group_id in sorted(dataset.groups):
+            indices.extend(dataset.groups[group_id][: int(frames_per_group)])
+        dataset = Subset(dataset, indices)
+    if max_samples is not None:
+        dataset = Subset(dataset, range(min(int(max_samples), len(dataset))))
+    workers = int(config.get("evaluation", {}).get("num_workers", 2))
+    return DataLoader(
+        dataset,
+        batch_size=int(config.get("evaluation", {}).get("batch_size", 1)),
+        shuffle=False,
+        drop_last=False,
+        num_workers=workers,
+        pin_memory=True,
+        persistent_workers=workers > 0,
+    )
+
+
 def build_model(config: Dict) -> SABIDSNet:
     model_cfg = config["model"]
     return SABIDSNet(
@@ -115,6 +176,9 @@ def build_model(config: Dict) -> SABIDSNet:
         enable_seg_to_denoise=bool(model_cfg.get("enable_seg_to_denoise", True)),
         enable_denoise_to_seg=bool(model_cfg.get("enable_denoise_to_seg", True)),
         use_uncertainty=bool(model_cfg.get("use_uncertainty", True)),
+        detach_denoise_to_seg_source=bool(
+            model_cfg.get("detach_denoise_to_seg_source", False)
+        ),
         dropout=float(model_cfg.get("dropout", 0.0)),
         residual_scale=float(model_cfg.get("residual_scale", 0.5)),
     )
@@ -132,12 +196,30 @@ class Trainer:
         self.output_dir = Path(config["train"].get("output_dir", "runs/sabids"))
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.train_loader, self.val_loader, self.train_sampler = build_loaders(config)
+        self._record_run_inputs()
+        train_eval_every = int(config["train"].get("train_eval_every", 0) or 0)
+        self.train_eval_every = train_eval_every
+        self.train_eval_loader = (
+            build_diagnostic_loader(
+                config,
+                split=config["data"].get("train_split", "train"),
+                max_samples=config["data"].get("max_train_eval_samples"),
+            )
+            if train_eval_every > 0
+            else None
+        )
         self.model = build_model(config).to(self.device)
         self.stage = config["train"].get("stage", "joint")
         self.model.set_train_stage(
             self.stage,
             private_train_encoder_levels=config.get("model", {}).get(
                 "private_train_encoder_levels", []
+            ),
+            freeze_shared_encoder=bool(
+                config.get("model", {}).get("stage2_freeze_shared_encoder", False)
+            ),
+            train_denoise_to_seg=bool(
+                config.get("model", {}).get("stage2_train_denoise_to_seg", False)
             ),
         )
         self.loss_fn = SABIDSLoss(config["loss"]).to(self.device)
@@ -167,12 +249,47 @@ class Trainer:
             lr=float(config["train"].get("learning_rate", 2e-4)),
             weight_decay=float(config["train"].get("weight_decay", 1e-4)),
         )
-        epochs = int(config["train"].get("epochs", 100))
-        self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            self.optimizer,
-            T_max=max(epochs, 1),
-            eta_min=float(config["train"].get("minimum_learning_rate", 1e-6)),
+        write_json(
+            {
+                "trainable": [
+                    name
+                    for name, parameter in self.model.named_parameters()
+                    if parameter.requires_grad
+                ],
+                "frozen": [
+                    name
+                    for name, parameter in self.model.named_parameters()
+                    if not parameter.requires_grad
+                ],
+                "optimizer_parameter_count": int(
+                    sum(
+                        parameter.numel()
+                        for group in self.optimizer.param_groups
+                        for parameter in group["params"]
+                    )
+                ),
+            },
+            self.output_dir / "parameter_audit.json",
         )
+        epochs = int(config["train"].get("epochs", 100))
+        scheduler_name = str(config["train"].get("scheduler", "cosine"))
+        self.scheduler_name = scheduler_name
+        if scheduler_name == "plateau":
+            self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                self.optimizer,
+                mode="max",
+                factor=float(config["train"].get("lr_plateau_factor", 0.5)),
+                patience=int(config["train"].get("lr_plateau_patience", 4)),
+                min_lr=float(config["train"].get("minimum_learning_rate", 1e-6)),
+            )
+        elif scheduler_name == "cosine":
+            self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                self.optimizer,
+                T_max=max(epochs, 1),
+                eta_min=float(config["train"].get("minimum_learning_rate", 1e-6)),
+            )
+        else:
+            raise ValueError("train.scheduler must be cosine or plateau")
         amp_enabled = bool(config["train"].get("amp", True)) and self.device.type == "cuda"
         self.scaler = torch.cuda.amp.GradScaler(enabled=amp_enabled)
         self.amp_enabled = amp_enabled
@@ -188,6 +305,65 @@ class Trainer:
         self.best_metric = -math.inf
         self.bad_epochs = 0
         self._resume_if_needed()
+        self._denoise_probe_image: Optional[torch.Tensor] = None
+        self._denoise_probe_reference: Optional[torch.Tensor] = None
+        if bool(config["train"].get("monitor_denoise_drift", False)):
+            self._initialize_denoise_probe()
+
+    def _record_run_inputs(self) -> None:
+        runtime = self.config.setdefault("runtime", {})
+        manifest = Path(self.config["data"]["manifest"]).expanduser().resolve()
+        digest = hashlib.sha256()
+        with manifest.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        runtime["manifest_sha256"] = digest.hexdigest()
+        table = pd.read_csv(manifest, dtype=str).fillna("")
+        runtime["group_ids_by_split"] = {
+            str(split): sorted(part["group_id"].astype(str).unique().tolist())
+            for split, part in table.groupby("split")
+        }
+        runtime["rows_by_split"] = {
+            str(key): int(value)
+            for key, value in table["split"].value_counts().items()
+        }
+        data_config = self.config.get("data", {})
+        runtime["effective_groups"] = {}
+        runtime["effective_rows"] = {}
+        for role in ("train", "val"):
+            split = str(data_config.get(f"{role}_split", role))
+            part = table[table["split"].astype(str) == split]
+            configured_groups = data_config.get(f"{role}_groups")
+            if configured_groups:
+                allowed = {str(value) for value in configured_groups}
+                part = part[part["group_id"].astype(str).isin(allowed)]
+            runtime["effective_groups"][role] = sorted(
+                part["group_id"].astype(str).unique().tolist()
+            )
+            runtime["effective_rows"][role] = int(len(part))
+        pretrained = self.config["train"].get("pretrained") or runtime.get(
+            "pretrained_source"
+        )
+        if pretrained:
+            checkpoint = Path(pretrained).expanduser().resolve()
+            runtime["initialization_checkpoint"] = str(checkpoint)
+            if checkpoint.is_file():
+                stat = checkpoint.stat()
+                runtime["initialization_checkpoint_size"] = int(stat.st_size)
+                runtime["initialization_checkpoint_mtime_ns"] = int(
+                    stat.st_mtime_ns
+                )
+
+    @torch.no_grad()
+    def _initialize_denoise_probe(self) -> None:
+        batch = next(iter(self.val_loader))
+        self._denoise_probe_image = batch["image"][:1].to(self.device)
+        self.model.eval()
+        self._denoise_probe_reference = self.model(
+            self._denoise_probe_image,
+            return_features=False,
+            return_auxiliary=False,
+        )["denoised"].detach().clone()
 
     def _resume_if_needed(self) -> None:
         resume = self.config["train"].get("resume")
@@ -320,9 +496,15 @@ class Trainer:
 
     def train_epoch(self, epoch: int) -> Dict[str, float]:
         self.model.train()
+        self.model.enforce_frozen_eval()
         self.train_sampler.set_epoch(epoch)
         totals = defaultdict(float)
         steps = 0
+        optimizer_steps = 0
+        gradient_norm_total = 0.0
+        seen_groups = set()
+        layer_supervised_samples = 0
+        vessel_supervised_samples = 0
         accumulation_steps = max(
             1, int(self.config["train"].get("gradient_accumulation_steps", 1))
         )
@@ -337,6 +519,9 @@ class Trainer:
                 key: value.to(self.device, non_blocking=True) if torch.is_tensor(value) else value
                 for key, value in batch.items()
             }
+            seen_groups.update(str(value) for value in batch["group_id"])
+            layer_supervised_samples += int(batch["has_layer"].sum().item())
+            vessel_supervised_samples += int(batch["has_vessel"].sum().item())
             amp_context = (
                 torch.cuda.amp.autocast() if self.amp_enabled else nullcontext()
             )
@@ -380,12 +565,19 @@ class Trainer:
             )
             if should_step:
                 self.scaler.unscale_(self.optimizer)
-                clip_grad_norm_(
+                gradient_norm = clip_grad_norm_(
                     self.model.parameters(),
                     float(self.config["train"].get("gradient_clip", 1.0)),
                 )
+                if not bool(torch.isfinite(gradient_norm)):
+                    raise FloatingPointError(
+                        f"Non-finite gradient norm at epoch={epoch + 1}, "
+                        f"batch={batch_index + 1}, samples={batch.get('sample_id')}"
+                    )
+                gradient_norm_total += float(gradient_norm.detach().item())
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
+                optimizer_steps += 1
                 self.optimizer.zero_grad(set_to_none=True)
                 if self.ema is not None:
                     self.ema.update(self.model)
@@ -393,12 +585,39 @@ class Trainer:
             for key, value in losses.items():
                 scalar = float(value.detach().item()) if torch.is_tensor(value) else float(value)
                 totals[key] += scalar
+            auxiliary = output.get("auxiliary", [])
+            if auxiliary:
+                for name in (
+                    "denoise_to_layer_injection_abs_mean",
+                    "denoise_to_vessel_injection_abs_mean",
+                    "layer_scale_abs_mean",
+                    "vessel_scale_abs_mean",
+                ):
+                    values = [float(item[name].item()) for item in auxiliary if name in item]
+                    if values:
+                        totals[f"interaction_{name}"] += float(np.mean(values))
             progress.set_postfix(loss=totals["total"] / steps)
             del output, repeat_output, clean_output, teacher_output, losses
-        return {key: value / max(steps, 1) for key, value in totals.items()}
+        result = {key: value / max(steps, 1) for key, value in totals.items()}
+        result.update(
+            {
+                "optimizer_steps": float(optimizer_steps),
+                "gradient_norm": gradient_norm_total / max(optimizer_steps, 1),
+                "unique_groups_seen": float(len(seen_groups)),
+                "layer_supervised_samples": float(layer_supervised_samples),
+                "vessel_supervised_samples": float(vessel_supervised_samples),
+            }
+        )
+        return result
 
     @torch.no_grad()
-    def validate(self) -> Dict[str, float]:
+    def validate(
+        self,
+        loader: Optional[DataLoader] = None,
+        description: str = "Validation",
+        group_output: Optional[Path] = None,
+    ) -> Dict[str, float]:
+        loader = loader or self.val_loader
         evaluation_model = self.ema.module if self.ema is not None else self.model
         evaluation_model.eval()
         evaluation = self.config.get("evaluation", {})
@@ -410,7 +629,7 @@ class Trainer:
             evaluation.get("vessel_threshold", default_threshold)
         )
         group_values = defaultdict(lambda: defaultdict(list))
-        for batch in tqdm(self.val_loader, desc="Validation", leave=False):
+        for batch in tqdm(loader, desc=description, leave=False):
             image = batch["image"].to(self.device, non_blocking=True)
             output = evaluation_model(
                 image, return_features=False, return_auxiliary=False
@@ -430,62 +649,40 @@ class Trainer:
                         group_values[group_id][f"layer_{name}"].append(
                             layer_metrics[name]
                         )
-                    probability = layer_probability[index, 0][valid]
-                    target_float = target[valid].astype(np.float32)
                     group_values[group_id]["layer_soft_dice"].append(
-                        float(
-                            (2.0 * (probability * target_float).sum() + 1e-6)
-                            / (probability.sum() + target_float.sum() + 1e-6)
+                        soft_dice_score(
+                            layer_probability[index, 0], target, valid
                         )
                     )
                 if bool(batch["has_vessel"][index]):
                     target = batch["vessel_mask"][index, 0].numpy() > 0.5
-                    vessel_metrics = binary_metrics(
-                        vessel[index, 0][valid], target[valid]
-                    )
-                    for name in ("dice", "precision", "recall"):
-                        group_values[group_id][f"vessel_{name}"].append(
-                            vessel_metrics[name]
-                        )
-                    probability = vessel_probability[index, 0][valid]
-                    target_float = target[valid].astype(np.float32)
-                    group_values[group_id]["vessel_soft_dice"].append(
-                        float(
-                            (2.0 * (probability * target_float).sum() + 1e-6)
-                            / (probability.sum() + target_float.sum() + 1e-6)
-                        )
+                    vessel_valid = valid & (
+                        batch["vessel_valid_mask"][index, 0].numpy() > 0.5
                     )
                     if bool(batch["has_layer"][index]):
-                        layer_target = (
-                            batch["layer_mask"][index, 0].numpy() > 0.5
-                        )[valid]
-                        vessel_prediction = vessel[index, 0][valid]
-                        layer_prediction = layer[index, 0][valid]
-                        roi_pixels = max(float(layer_target.sum()), 1.0)
-                        predicted_fraction = float(
-                            np.logical_and(vessel_prediction, layer_target).sum()
-                            / roi_pixels
+                        diagnostics = vessel_diagnostic_metrics(
+                            vessel_probability[index, 0],
+                            layer_probability[index, 0],
+                            target,
+                            batch["layer_mask"][index, 0].numpy() > 0.5,
+                            vessel_valid,
+                            vessel_threshold=vessel_threshold,
+                            layer_threshold=layer_threshold,
                         )
-                        true_fraction = float(target[valid].sum() / roi_pixels)
-                        group_values[group_id][
-                            "vessel_area_fraction_pred"
-                        ].append(predicted_fraction)
-                        group_values[group_id][
-                            "vessel_area_fraction_true"
-                        ].append(true_fraction)
-                        group_values[group_id]["vessel_area_fraction_mae"].append(
-                            abs(predicted_fraction - true_fraction)
+                        for name, value in diagnostics.items():
+                            group_values[group_id][name].append(value)
+                    else:
+                        vessel_metrics = binary_metrics(
+                            vessel[index, 0][vessel_valid], target[vessel_valid]
                         )
-                        intersection = float(
-                            np.logical_and(vessel_prediction, layer_prediction).sum()
-                        )
-                        similarity = (2.0 * intersection + 1e-6) / (
-                            float(vessel_prediction.sum())
-                            + float(layer_prediction.sum())
-                            + 1e-6
-                        )
-                        group_values[group_id]["pred_layer_vessel_dice"].append(
-                            similarity
+                        for name, value in vessel_metrics.items():
+                            group_values[group_id][f"vessel_{name}"].append(value)
+                        group_values[group_id]["vessel_soft_dice"].append(
+                            soft_dice_score(
+                                vessel_probability[index, 0],
+                                target,
+                                vessel_valid,
+                            )
                         )
                 if bool(batch["has_clean"][index]):
                     prediction = output["denoised"][index, 0].cpu().numpy()
@@ -495,6 +692,18 @@ class Trainer:
                         99.0 if mse < 1e-12 else 10.0 * math.log10(1.0 / mse)
                     )
         metrics = {}
+        group_rows = []
+        for group_id, values in sorted(group_values.items()):
+            group_rows.append(
+                {
+                    "group_id": group_id,
+                    **{
+                        name: float(np.mean(items))
+                        for name, items in values.items()
+                        if items
+                    },
+                }
+            )
         names = sorted({name for values in group_values.values() for name in values})
         for name in names:
             per_group = [
@@ -504,6 +713,30 @@ class Trainer:
             ]
             if per_group:
                 metrics[name] = float(np.mean(per_group))
+                metrics[f"n_groups_{name}"] = float(len(per_group))
+        if group_output is not None:
+            group_output.parent.mkdir(parents=True, exist_ok=True)
+            pd.DataFrame(group_rows).to_csv(
+                group_output, index=False, encoding="utf-8-sig"
+            )
+        if self._denoise_probe_image is not None:
+            current = evaluation_model(
+                self._denoise_probe_image,
+                return_features=False,
+                return_auxiliary=False,
+            )["denoised"]
+            metrics["denoise_probe_max_abs_diff"] = float(
+                (current - self._denoise_probe_reference).abs().max().item()
+            )
+            tolerance = self.config["train"].get("denoise_drift_tolerance")
+            if tolerance is not None and metrics[
+                "denoise_probe_max_abs_diff"
+            ] > float(tolerance):
+                raise RuntimeError(
+                    "Frozen denoising function drifted: max_abs_diff="
+                    f"{metrics['denoise_probe_max_abs_diff']:.8g} exceeds "
+                    f"tolerance={float(tolerance):.8g}"
+                )
         return metrics
 
     def fit(self) -> None:
@@ -519,11 +752,53 @@ class Trainer:
             f"memory_safe_joint={self.config['train'].get('memory_safe_joint', True)} | "
             f"stopgrad_repeat={self.config['train'].get('stopgrad_repeat_teacher', True)}"
         )
+        diagnostics_dir = self.output_dir / "diagnostics"
+        if self.start_epoch == 0 and bool(
+            self.config["train"].get("evaluate_epoch0", False)
+        ):
+            epoch0 = {
+                "val": self.validate(
+                    group_output=diagnostics_dir / "val_groups_epoch000.csv"
+                )
+            }
+            if self.train_eval_loader is not None:
+                epoch0["train_eval"] = self.validate(
+                    loader=self.train_eval_loader,
+                    description="Train-eval epoch 0",
+                    group_output=diagnostics_dir / "train_groups_epoch000.csv",
+                )
+            write_json(epoch0, diagnostics_dir / "epoch000_metrics.json")
+            save_checkpoint(
+                self.output_dir / "epoch0.pth",
+                self.model,
+                self.optimizer,
+                self.scheduler,
+                -1,
+                self.best_metric,
+                self.config,
+                self.scaler,
+                self.ema.state_dict() if self.ema is not None else None,
+            )
+            print(f"Epoch 000 diagnostics: {epoch0}")
         for epoch in range(self.start_epoch, epochs):
             start = time.time()
             train_metrics = self.train_epoch(epoch)
-            val_metrics = self.validate()
-            self.scheduler.step()
+            epoch_number = epoch + 1
+            val_metrics = self.validate(
+                group_output=diagnostics_dir
+                / f"val_groups_epoch{epoch_number:03d}.csv"
+            )
+            train_eval_metrics = {}
+            if (
+                self.train_eval_loader is not None
+                and epoch_number % self.train_eval_every == 0
+            ):
+                train_eval_metrics = self.validate(
+                    loader=self.train_eval_loader,
+                    description=f"Train-eval {epoch_number}",
+                    group_output=diagnostics_dir
+                    / f"train_groups_epoch{epoch_number:03d}.csv",
+                )
             monitored = val_metrics.get(monitor)
             if monitored is None:
                 fallback = "layer_dice" if "layer_dice" in val_metrics else "psnr"
@@ -533,6 +808,10 @@ class Trainer:
                     f"Validation monitor {monitor!r} is non-finite at epoch "
                     f"{epoch + 1}: {monitored!r}. Metrics={val_metrics}"
                 )
+            if self.scheduler_name == "plateau":
+                self.scheduler.step(float(monitored))
+            else:
+                self.scheduler.step()
             improved = monitored > self.best_metric
             if improved:
                 self.best_metric = monitored
@@ -545,6 +824,10 @@ class Trainer:
                 "lr": self.optimizer.param_groups[0]["lr"],
                 **{f"train_{k}": v for k, v in train_metrics.items()},
                 **{f"val_{k}": v for k, v in val_metrics.items()},
+                **{
+                    f"train_eval_{k}": v
+                    for k, v in train_eval_metrics.items()
+                },
             }
             self.csv_logger.log(row)
             for key, value in row.items():

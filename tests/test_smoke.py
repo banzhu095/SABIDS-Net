@@ -1,6 +1,7 @@
 import torch
 
 from sabids.losses import SABIDSLoss
+from sabids.metrics import vessel_diagnostic_metrics
 from sabids.models import SABIDSNet
 
 
@@ -229,3 +230,165 @@ def test_optional_private_deep_encoder_unfreezing():
     assert any(parameter.requires_grad for parameter in model.encoder_blocks[3].parameters())
     assert any(parameter.requires_grad for parameter in model.downsamples[2].parameters())
     assert not any(parameter.requires_grad for parameter in model.encoder_blocks[2].parameters())
+
+
+def test_safe_stage2_preserves_complete_denoising_function():
+    model = SABIDSNet(
+        channels=(8, 16, 32, 64),
+        encoder_depths=(1, 1, 1, 1),
+        decoder_depth=1,
+        enable_seg_to_denoise=False,
+        enable_denoise_to_seg=False,
+        dropout=0.2,
+    )
+    model.set_train_stage("segment", freeze_shared_encoder=True)
+    assert not any(parameter.requires_grad for parameter in model.stem.parameters())
+    assert not any(
+        parameter.requires_grad for parameter in model.encoder_blocks.parameters()
+    )
+    assert any(
+        parameter.requires_grad for parameter in model.decoders["vessel"].parameters()
+    )
+
+    image = torch.rand(1, 1, 64, 128)
+    model.eval()
+    before = model(image)["denoised"].detach().clone()
+    model.train()
+    model.enforce_frozen_eval()
+    optimizer = torch.optim.AdamW(
+        [parameter for parameter in model.parameters() if parameter.requires_grad],
+        lr=1e-3,
+    )
+    output = model(image)
+    (output["layer_prob"].mean() + output["vessel_prob"].mean()).backward()
+    optimizer.step()
+    model.eval()
+    after = model(image)["denoised"].detach()
+    torch.testing.assert_close(before, after, rtol=0.0, atol=0.0)
+
+
+def test_safe_stage2_denoise_to_seg_has_gradients_without_denoise_drift():
+    model = SABIDSNet(
+        channels=(8, 16, 32, 64),
+        encoder_depths=(1, 1, 1, 1),
+        decoder_depth=1,
+        enable_seg_to_denoise=False,
+        enable_denoise_to_seg=True,
+        detach_denoise_to_seg_source=True,
+    )
+    model.set_train_stage(
+        "segment", freeze_shared_encoder=True, train_denoise_to_seg=True
+    )
+    image = torch.rand(1, 1, 64, 128)
+    model.eval()
+    denoised_before = model(image)["denoised"].detach().clone()
+    optimizer = torch.optim.AdamW(
+        [parameter for parameter in model.parameters() if parameter.requires_grad],
+        lr=1e-3,
+    )
+    for _ in range(2):
+        optimizer.zero_grad()
+        model.train()
+        model.enforce_frozen_eval()
+        output = model(image)
+        (output["layer_prob"].mean() + output["vessel_prob"].mean()).backward()
+        optimizer.step()
+    assert any(
+        interaction.layer_scale.grad is not None
+        and torch.isfinite(interaction.layer_scale.grad).all()
+        for interaction in model.interactions.values()
+    )
+    assert any(
+        parameter.grad is not None and parameter.grad.abs().sum() > 0
+        for interaction in model.interactions.values()
+        for parameter in interaction.denoise_to_vessel.parameters()
+    )
+    model.eval()
+    final = model(image)
+    torch.testing.assert_close(
+        denoised_before, final["denoised"].detach(), rtol=0.0, atol=0.0
+    )
+    assert any(
+        float(item["denoise_to_vessel_injection_abs_mean"]) > 0.0
+        for item in final["auxiliary"]
+    )
+
+
+def test_roi_vessel_loss_ignores_unknown_pixels_and_penalizes_mislocalization():
+    height, width = 16, 16
+    layer = torch.ones(1, 1, height, width)
+    target = torch.zeros_like(layer)
+    target[:, :, 4:8, 3:7] = 1.0
+    valid = torch.ones_like(layer)
+    valid[:, :, :, 12:] = 0.0
+    good_logits = torch.where(target > 0.5, 6.0, -6.0)
+    shifted = torch.zeros_like(target)
+    shifted[:, :, 8:12, 3:7] = 1.0
+    shifted_logits = torch.where(shifted > 0.5, 6.0, -6.0)
+    changed_only_in_unknown = good_logits.clone()
+    changed_only_in_unknown[:, :, :, 12:] = 20.0
+
+    criterion = SABIDSLoss(
+        {
+            "vessel_supervision_mode": "roi_bce_dice",
+            "weights": {
+                "layer": 0.0,
+                "vessel": 1.0,
+                "vessel_stroma": 0.0,
+                "vessel_area": 0.0,
+                "containment": 0.0,
+            },
+        }
+    )
+
+    def compute(logits):
+        output = {
+            "denoised_raw": torch.zeros_like(layer, requires_grad=True),
+            "layer_logits": torch.full_like(layer, 6.0),
+            "vessel_logits": logits,
+            "layer_prob": torch.ones_like(layer),
+            "vessel_prob": torch.sigmoid(logits),
+            "boundary_logits": torch.zeros(1, 2, height, width),
+            "residual": torch.zeros_like(layer),
+            "auxiliary": [],
+        }
+        batch = {
+            "layer_mask": layer,
+            "vessel_mask": target,
+            "vessel_valid_mask": valid,
+            "valid_mask": torch.ones_like(layer),
+            "has_layer": torch.tensor([True]),
+            "has_vessel": torch.tensor([True]),
+            "has_clean": torch.tensor([False]),
+            "has_repeat": torch.tensor([False]),
+            "is_clean": torch.tensor([False]),
+            "image": torch.zeros_like(layer),
+            "image_weak": torch.zeros_like(layer),
+            "clean": torch.zeros_like(layer),
+        }
+        return criterion(output, batch, stage="segment")["vessel"]
+
+    good = compute(good_logits)
+    unknown_changed = compute(changed_only_in_unknown)
+    wrong_location = compute(shifted_logits)
+    torch.testing.assert_close(good, unknown_changed)
+    assert wrong_location > good
+
+
+def test_vessel_diagnostics_separate_full_roi_and_outside_errors():
+    layer = torch.zeros(8, 8, dtype=torch.bool).numpy()
+    layer[2:6, 1:7] = True
+    target = torch.zeros(8, 8, dtype=torch.bool).numpy()
+    target[3:5, 2:4] = True
+    vessel_probability = target.astype("float32")
+    vessel_probability[0, 0] = 1.0
+    metrics = vessel_diagnostic_metrics(
+        vessel_probability,
+        layer.astype("float32"),
+        target,
+        layer,
+        valid=torch.ones(8, 8, dtype=torch.bool).numpy(),
+    )
+    assert metrics["vessel_roi_dice"] > metrics["vessel_dice"]
+    assert metrics["vessel_outside_gt_layer_fraction"] > 0.0
+    assert metrics["whole_layer_baseline_vessel_dice"] < 1.0

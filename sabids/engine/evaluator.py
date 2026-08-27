@@ -20,6 +20,7 @@ from ..metrics import (
     ssim,
     surface_distances,
     vessel_area_fraction,
+    vessel_diagnostic_metrics,
 )
 from ..utils import mean_dict, write_json
 
@@ -134,11 +135,32 @@ def evaluate_model(
                 layer_true = layer_pred
             if evaluate_segmentation and bool(batch["has_vessel"][index]):
                 vessel_true = batch["vessel_mask"][index, 0].numpy()[crop] > 0.5
-                for key, value in binary_metrics(vessel_pred, vessel_true).items():
-                    row[f"vessel_{key}"] = value
-                hd95, assd = surface_distances(
-                    vessel_pred, vessel_true, (axial_spacing, lateral_spacing)
+                vessel_valid = (
+                    batch["vessel_valid_mask"][index, 0].numpy()[crop] > 0.5
                 )
+                if bool(batch["has_layer"][index]):
+                    row.update(
+                        vessel_diagnostic_metrics(
+                            vessel_probability[index, 0][crop],
+                            layer_probability[index, 0][crop],
+                            vessel_true,
+                            layer_true,
+                            vessel_valid,
+                            vessel_threshold=vessel_threshold,
+                            layer_threshold=layer_threshold,
+                        )
+                    )
+                else:
+                    for key, value in binary_metrics(
+                        vessel_pred[vessel_valid], vessel_true[vessel_valid]
+                    ).items():
+                        row[f"vessel_{key}"] = value
+                if bool(vessel_valid.all()):
+                    hd95, assd = surface_distances(
+                        vessel_pred, vessel_true, (axial_spacing, lateral_spacing)
+                    )
+                else:
+                    hd95, assd = float("nan"), float("nan")
                 row["vessel_hd95"] = hd95
                 row["vessel_assd"] = assd
                 predicted_fraction = vessel_area_fraction(vessel_pred, layer_true)
@@ -181,6 +203,12 @@ def evaluate_model(
     summary = mean_dict(group_table[numeric_columns].to_dict("records"))
     summary["n_frames"] = int(len(frame_table))
     summary["n_groups"] = int(frame_table["group_id"].nunique())
+    summary["metric_group_counts"] = {
+        column: int(
+            group_table.loc[group_table[column].notna(), "group_id"].nunique()
+        )
+        for column in numeric_columns
+    }
     summary["layer_threshold"] = float(layer_threshold)
     summary["vessel_threshold"] = float(vessel_threshold)
     summary["evaluated_tasks"] = [

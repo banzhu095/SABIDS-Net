@@ -1,0 +1,14 @@
+_base_: stage2_segment_d2s.yaml
+
+# E3: simple, attributable vessel supervision inside the fully annotated GT
+# layer ROI, plus the existing small outside-layer containment term.
+train:
+  output_dir: runs/stage2_segment_roi
+
+loss:
+  definition_version: roi-bce-dice-fp32-v1
+  vessel_supervision_mode: roi_bce_dice
+  weights:
+    vessel_stroma: 0.0
+    vessel_area: 0.0
+
