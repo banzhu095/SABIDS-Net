@@ -392,3 +392,69 @@ def test_vessel_diagnostics_separate_full_roi_and_outside_errors():
     assert metrics["vessel_roi_dice"] > metrics["vessel_dice"]
     assert metrics["vessel_outside_gt_layer_fraction"] > 0.0
     assert metrics["whole_layer_baseline_vessel_dice"] < 1.0
+    assert metrics["vessel_error_outside_gt_and_pred_layer_pixels"] == 1.0
+    assert metrics["vessel_oracle_gt_layer_dice"] == 1.0
+
+
+def test_roi_outside_bce_penalizes_saturated_false_positive_and_ignores_unknown():
+    shape = (2, 1, 12, 12)
+    layer = torch.zeros(shape)
+    layer[:, :, 3:9, 2:10] = 1.0
+    vessel = torch.zeros_like(layer)
+    vessel[:, :, 5:7, 4:8] = 1.0
+    valid = torch.ones_like(layer)
+    valid[0, :, :3] = 0.0
+    # Image 1 has no outside region and must be skipped safely.
+    layer[1] = 1.0
+    logits = torch.full(shape, -20.0, requires_grad=True)
+    with torch.no_grad():
+        logits[0, :, 10:, :] = 20.0  # valid, high-confidence outside FP
+        logits[0, :, :3, :] = 20.0   # unknown, must have no effect
+
+    output = {
+        "denoised_raw": torch.zeros_like(layer, requires_grad=True),
+        "residual": torch.zeros_like(layer),
+        "layer_logits": torch.where(layer > 0.5, 20.0, -20.0),
+        "vessel_logits": logits,
+        "layer_prob": layer,
+        "vessel_prob": torch.sigmoid(logits),
+        "boundary_logits": torch.zeros(2, 2, 12, 12),
+        "auxiliary": [],
+    }
+    batch = {
+        "layer_mask": layer,
+        "vessel_mask": vessel,
+        "vessel_valid_mask": valid,
+        "valid_mask": torch.ones_like(layer),
+        "has_layer": torch.tensor([True, True]),
+        "has_vessel": torch.tensor([True, True]),
+        "has_clean": torch.tensor([False, False]),
+        "has_repeat": torch.tensor([False, False]),
+        "is_clean": torch.tensor([False, False]),
+        "image": torch.zeros_like(layer),
+        "image_weak": torch.zeros_like(layer),
+        "clean": torch.zeros_like(layer),
+    }
+    criterion = SABIDSLoss(
+        {
+            "vessel_supervision_mode": "roi_bce_dice_outside",
+            "weights": {
+                "layer": 0.0,
+                "vessel": 0.0,
+                "vessel_stroma": 0.0,
+                "vessel_area": 0.0,
+                "vessel_outside": 0.5,
+                "containment": 0.0,
+            },
+        }
+    )
+    losses = criterion(output, batch, stage="segment")
+    losses["total"].backward()
+    assert torch.isfinite(losses["vessel_outside"])
+    assert losses["vessel_outside_valid_images"] == 1.0
+    assert losses["vessel_outside_weight"] == 0.5
+    torch.testing.assert_close(
+        losses["vessel_outside_weighted"], losses["vessel_outside"] * 0.5
+    )
+    assert logits.grad[0, :, 10:, :].mean() > 0
+    assert logits.grad[0, :, :3, :].abs().sum() == 0

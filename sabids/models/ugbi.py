@@ -141,6 +141,14 @@ class UGBIBlock(nn.Module):
                 "denoise_to_vessel_gate": d2v_gate,
                 "denoise_to_layer_injection_abs_mean": layer_injection.detach().abs().mean(),
                 "denoise_to_vessel_injection_abs_mean": vessel_injection.detach().abs().mean(),
+                "denoise_to_layer_injection_relative_rms": (
+                    layer_injection.detach().float().square().mean().sqrt()
+                    / (layer.detach().float().square().mean().sqrt() + 1e-8)
+                ),
+                "denoise_to_vessel_injection_relative_rms": (
+                    vessel_injection.detach().float().square().mean().sqrt()
+                    / (vessel.detach().float().square().mean().sqrt() + 1e-8)
+                ),
                 "layer_scale_abs_mean": self.layer_scale.detach().abs().mean(),
                 "vessel_scale_abs_mean": self.vessel_scale.detach().abs().mean(),
             }

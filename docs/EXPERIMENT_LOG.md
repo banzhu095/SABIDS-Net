@@ -315,3 +315,25 @@ Populate one row per independent fold after validation threshold selection.
 - Local verification: one real-manifest CPU smoke epoch of E1 completed and
   reported denoising probe maximum absolute drift `0.0`; this verifies the code
   path only, not model quality.
+
+### CODE-20260827-STAGE2-E3B-OUTSIDE-BCE
+
+- Evidence source: user-supplied analysis of complete E0/E1/E2/E3 history CSVs;
+  no held-out test result was supplied.
+- Observed decision: retain E1 as the main reference and E2 as interaction
+  control. E3 preserved validation ROI Dice near `0.706` but full-image Dice
+  fell to about `0.458`, with validation layer-exterior prediction fraction
+  reported near `41.7%` of predicted vessel pixels.
+- Implementation: new `roi_outside`/E3b variant adds only per-image FP32
+  outside-GT-layer BCE(target=0) in logit space, default weight `0.5`; padding
+  and unknown vessel pixels are excluded and empty outside regions are skipped.
+- Logging: every active objective records raw, weight and weighted values. D2S
+  records relative injection RMS, interaction/scale gradients, scale updates
+  and same-checkpoint disable-D2S sensitivity.
+- Diagnostics: full/ROI/oracle/soft-gate metrics, three predicted-layer error
+  partitions, fixed-frame masks and error overlays; formulas are exported.
+- Reproducibility: run metadata includes Stage 1 checkpoint SHA256,
+  manifest/split hashes, effective group IDs, best epoch, thresholds and best
+  checkpoint SHA256. Stage 1 train versus Stage 2 val/test overlap is fatal.
+- Local verification: focused tests and a one-epoch real-manifest CPU E3b smoke
+  passed; formal 512x512 cloud result remains pending.

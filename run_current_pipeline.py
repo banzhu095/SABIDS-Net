@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Dict
 
 import torch
+import pandas as pd
 from torch.utils.data import DataLoader, Subset
 
 from sabids.config import load_config, save_config
@@ -33,6 +34,76 @@ def _git_commit(root: Path) -> str:
         return result.stdout.strip()
     except (OSError, subprocess.CalledProcessError):
         return "unknown"
+
+
+def _audit_stage1_isolation(
+    stage1_manifest: Path,
+    segmentation_manifest: Path,
+    output_path: Path,
+) -> Dict[str, Any]:
+    """Stop when segmentation validation/test anatomy entered Stage 1 train."""
+    stage1 = pd.read_csv(stage1_manifest, dtype=str).fillna("")
+    segmentation = pd.read_csv(segmentation_manifest, dtype=str).fillna("")
+    stage1_train = set(
+        stage1.loc[stage1["split"].astype(str) == "train", "group_id"].astype(str)
+    )
+    held_out = set(
+        segmentation.loc[
+            segmentation["split"].astype(str).isin(["val", "test"]),
+            "group_id",
+        ].astype(str)
+    )
+    overlap = sorted(stage1_train & held_out)
+    stage1_train_patients: set[str] = set()
+    held_out_patients: set[str] = set()
+    if "patient_id" in stage1.columns and "patient_id" in segmentation.columns:
+        stage1_train_patients = {
+            value
+            for value in stage1.loc[
+                stage1["split"].astype(str) == "train", "patient_id"
+            ].astype(str)
+            if value
+        }
+        held_out_patients = {
+            value
+            for value in segmentation.loc[
+                segmentation["split"].astype(str).isin(["val", "test"]),
+                "patient_id",
+            ].astype(str)
+            if value
+        }
+    patient_overlap = sorted(stage1_train_patients & held_out_patients)
+    report = {
+        "stage1_manifest": str(stage1_manifest.resolve()),
+        "stage1_manifest_sha256": _file_sha256(stage1_manifest),
+        "segmentation_manifest": str(segmentation_manifest.resolve()),
+        "segmentation_manifest_sha256": _file_sha256(segmentation_manifest),
+        "stage1_train_groups": sorted(stage1_train),
+        "segmentation_val_test_groups": sorted(held_out),
+        "overlap": overlap,
+        "stage1_train_patients": sorted(stage1_train_patients),
+        "segmentation_val_test_patients": sorted(held_out_patients),
+        "patient_overlap": patient_overlap,
+        "passed": not overlap and not patient_overlap,
+    }
+    write_json(report, output_path)
+    if overlap or patient_overlap:
+        raise RuntimeError(
+            "Stage 1 leakage audit failed: segmentation validation/test anatomy "
+            "was used in Stage 1 training. "
+            f"group_overlap={overlap}, patient_overlap={patient_overlap}. "
+            "Regenerate the fold and "
+            "retrain Stage 1 before comparing Stage 2 variants."
+        )
+    return report
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def parse_args() -> argparse.Namespace:
@@ -70,7 +141,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--epochs-private", type=int, default=None)
     parser.add_argument(
         "--stage2-variant",
-        choices=["baseline", "safe", "d2s", "roi"],
+        choices=["baseline", "safe", "d2s", "roi", "roi_outside"],
         default="baseline",
         help="Isolated Stage 2 experiment; non-baseline variants cannot launch Joint.",
     )
@@ -405,6 +476,12 @@ def _archive_run_outputs(output_dir: Path) -> None:
         output_dir / "resolved_config.yaml",
         output_dir / "tensorboard",
         output_dir / "test_results",
+        output_dir / "diagnostics",
+        output_dir / "diagnostic_export",
+        output_dir / "epoch0.pth",
+        output_dir / "parameter_audit.json",
+        output_dir / "run_metadata.json",
+        output_dir / "stage1_isolation_audit.json",
     ]
     existing = [path for path in candidates if path.exists()]
     if not existing:
@@ -483,7 +560,7 @@ def main() -> None:
     root = Path(project_root or ".").expanduser().resolve()
     if args.stage2_variant != "baseline" and "joint" in args.stages:
         raise ValueError(
-            "A non-baseline Stage 2 variant is an isolated E1/E2/E3 experiment. "
+            "A non-baseline Stage 2 variant is an isolated E1/E2/E3/E3b experiment. "
             "Validate and freeze the design before using it to initialize Joint."
         )
     specifications = stage_specifications(
@@ -530,6 +607,14 @@ def main() -> None:
                 raise FileNotFoundError(
                     f"Required pretrained checkpoint is missing: {pretrained}"
                 )
+        if args.force:
+            _archive_run_outputs(output_dir)
+        if stage == "segment":
+            _audit_stage1_isolation(
+                specifications["denoise"]["manifest"],
+                specification["manifest"],
+                output_dir / "stage1_isolation_audit.json",
+            )
         last_checkpoint = output_dir / "last.pth"
         if args.resume:
             if not last_checkpoint.is_file():
@@ -550,8 +635,6 @@ def main() -> None:
             save_config(config, output_dir / "resolved_config.yaml")
             trainer.fit()
         elif args.force or not best_checkpoint.is_file():
-            if args.force:
-                _archive_run_outputs(output_dir)
             trainer = Trainer(config)
             save_config(config, output_dir / "resolved_config.yaml")
             trainer.fit()

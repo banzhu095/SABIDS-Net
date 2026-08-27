@@ -49,3 +49,16 @@ def write_gray(path: str | Path, image: np.ndarray) -> None:
         raise RuntimeError(f"OpenCV failed to encode: {path}")
     encoded.tofile(str(path))
 
+
+def write_rgb(path: str | Path, image: np.ndarray) -> None:
+    """Write an RGB float image while preserving non-ASCII paths."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    array = np.round(np.clip(image, 0.0, 1.0) * 255.0).astype(np.uint8)
+    if array.ndim != 3 or array.shape[2] != 3:
+        raise ValueError(f"Expected HxWx3 RGB image, got {array.shape}")
+    suffix = path.suffix if path.suffix else ".png"
+    success, encoded = cv2.imencode(suffix, cv2.cvtColor(array, cv2.COLOR_RGB2BGR))
+    if not success:
+        raise RuntimeError(f"OpenCV failed to encode: {path}")
+    encoded.tofile(str(path))

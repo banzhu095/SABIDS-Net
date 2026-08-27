@@ -238,6 +238,61 @@ def vessel_diagnostic_metrics(
     result["vessel_outside_gt_layer_fraction"] = outside_pixels / max(
         predicted_pixels, 1.0
     )
+    outside_gt = valid & ~layer_target
+    outside_both = vessel_prediction & outside_gt & ~layer_prediction
+    outside_gt_inside_pred = vessel_prediction & outside_gt & layer_prediction
+    missed_by_predicted_layer = vessel_target & valid & ~layer_prediction
+    true_vessel_pixels = float(np.logical_and(vessel_target, valid).sum())
+    result.update(
+        {
+            # Fractions use predicted-vessel pixels for the two FP partitions,
+            # and true-vessel pixels for the clipping-risk partition.
+            "vessel_error_outside_gt_and_pred_layer_pixels": float(
+                outside_both.sum()
+            ),
+            "vessel_error_outside_gt_and_pred_layer_fraction": float(
+                outside_both.sum()
+            )
+            / max(predicted_pixels, 1.0),
+            "vessel_error_outside_gt_inside_pred_layer_pixels": float(
+                outside_gt_inside_pred.sum()
+            ),
+            "vessel_error_outside_gt_inside_pred_layer_fraction": float(
+                outside_gt_inside_pred.sum()
+            )
+            / max(predicted_pixels, 1.0),
+            "gt_vessel_outside_pred_layer_pixels": float(
+                missed_by_predicted_layer.sum()
+            ),
+            "gt_vessel_outside_pred_layer_fraction": float(
+                missed_by_predicted_layer.sum()
+            )
+            / max(true_vessel_pixels, 1.0),
+        }
+    )
+
+    oracle_prediction = vessel_prediction & layer_target
+    result.update(
+        {
+            f"vessel_oracle_gt_layer_{key}": value
+            for key, value in binary_metrics(
+                oracle_prediction[valid], vessel_target[valid]
+            ).items()
+        }
+    )
+    soft_gated_probability = vessel_probability * layer_probability
+    soft_gated_prediction = soft_gated_probability >= vessel_threshold
+    result.update(
+        {
+            f"vessel_pred_layer_soft_gate_{key}": value
+            for key, value in binary_metrics(
+                soft_gated_prediction[valid], vessel_target[valid]
+            ).items()
+        }
+    )
+    result["vessel_pred_layer_soft_gate_soft_dice"] = soft_dice_score(
+        soft_gated_probability, vessel_target, valid
+    )
     overlap = float(
         np.logical_and(vessel_prediction, layer_prediction & valid).sum()
     )

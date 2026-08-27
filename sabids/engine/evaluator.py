@@ -8,7 +8,7 @@ import pandas as pd
 import torch
 from tqdm import tqdm
 
-from ..data.io import write_gray
+from ..data.io import write_gray, write_rgb
 from ..metrics import (
     automatic_cnr,
     binary_metrics,
@@ -59,6 +59,11 @@ def evaluate_model(
         vessel_probability = output["vessel_prob"].cpu().numpy()
         batch_size = image.shape[0]
         for index in range(batch_size):
+            error_outside_both = None
+            error_outside_gt_inside_pred = None
+            gt_vessel_outside_pred_layer = None
+            vessel_oracle_gt_layer = None
+            vessel_pred_layer_soft_gate = None
             row: Dict[str, object] = {
                 "sample_id": batch["sample_id"][index],
                 "group_id": batch["group_id"][index],
@@ -150,6 +155,21 @@ def evaluate_model(
                             layer_threshold=layer_threshold,
                         )
                     )
+                    error_outside_both = (
+                        vessel_pred & ~layer_true & ~layer_pred & vessel_valid
+                    )
+                    error_outside_gt_inside_pred = (
+                        vessel_pred & ~layer_true & layer_pred & vessel_valid
+                    )
+                    gt_vessel_outside_pred_layer = (
+                        vessel_true & ~layer_pred & vessel_valid
+                    )
+                    vessel_oracle_gt_layer = vessel_pred & layer_true
+                    vessel_pred_layer_soft_gate = (
+                        vessel_probability[index, 0][crop]
+                        * layer_probability[index, 0][crop]
+                        >= vessel_threshold
+                    )
                 else:
                     for key, value in binary_metrics(
                         vessel_pred[vessel_valid], vessel_true[vessel_valid]
@@ -173,11 +193,14 @@ def evaluate_model(
             if output_path and save_predictions:
                 sample_dir = output_path / "predictions" / str(batch["dataset"][index])
                 sample_id = str(batch["sample_id"][index])
-                if evaluate_denoising:
-                    write_gray(
-                        sample_dir / f"{sample_id}_denoised.png",
-                        denoised[index, 0][crop],
-                    )
+                write_gray(
+                    sample_dir / f"{sample_id}_noisy.png",
+                    batch["image"][index, 0].numpy()[crop],
+                )
+                write_gray(
+                    sample_dir / f"{sample_id}_denoised.png",
+                    denoised[index, 0][crop],
+                )
                 if evaluate_segmentation:
                     write_gray(
                         sample_dir / f"{sample_id}_layer_prob.png",
@@ -195,6 +218,42 @@ def evaluate_model(
                         sample_dir / f"{sample_id}_vessel_mask.png",
                         vessel_pred.astype(np.float32),
                     )
+                    if bool(batch["has_layer"][index]):
+                        write_gray(
+                            sample_dir / f"{sample_id}_layer_gt.png",
+                            layer_true.astype(np.float32),
+                        )
+                    if bool(batch["has_vessel"][index]):
+                        write_gray(
+                            sample_dir / f"{sample_id}_vessel_gt.png",
+                            vessel_true.astype(np.float32),
+                        )
+                    diagnostic_maps = {
+                        "error_outside_gt_and_pred_layer": error_outside_both,
+                        "error_outside_gt_inside_pred_layer": error_outside_gt_inside_pred,
+                        "gt_vessel_outside_pred_layer": gt_vessel_outside_pred_layer,
+                        "vessel_oracle_gt_layer": vessel_oracle_gt_layer,
+                        "vessel_pred_layer_soft_gate": vessel_pred_layer_soft_gate,
+                    }
+                    for suffix, diagnostic in diagnostic_maps.items():
+                        if diagnostic is not None:
+                            write_gray(
+                                sample_dir / f"{sample_id}_{suffix}.png",
+                                diagnostic.astype(np.float32),
+                            )
+                    if error_outside_both is not None:
+                        base = batch["image"][index, 0].numpy()[crop]
+                        overlay = np.repeat(base[..., None], 3, axis=2)
+                        # Red: vessel outside both anatomical masks. Orange:
+                        # vessel outside GT but admitted by predicted layer.
+                        # Blue: GT vessel that predicted-layer clipping loses.
+                        overlay[error_outside_both] = (1.0, 0.0, 0.0)
+                        overlay[error_outside_gt_inside_pred] = (1.0, 0.55, 0.0)
+                        overlay[gt_vessel_outside_pred_layer] = (0.0, 0.45, 1.0)
+                        write_rgb(
+                            sample_dir / f"{sample_id}_error_overlay.png",
+                            overlay,
+                        )
 
     frame_table = pd.DataFrame(rows)
     numeric_columns = frame_table.select_dtypes(include=[np.number]).columns.tolist()
@@ -230,4 +289,28 @@ def evaluate_model(
         frame_table.to_csv(output_path / "frame_metrics.csv", index=False, encoding="utf-8-sig")
         group_table.to_csv(output_path / "group_metrics.csv", index=False, encoding="utf-8-sig")
         write_json(summary, output_path / "summary.json")
+        write_json(
+            {
+                "vessel_outside_gt_layer_fraction": (
+                    "predicted vessel pixels outside GT layer / all predicted "
+                    "vessel pixels, within vessel-valid pixels"
+                ),
+                "vessel_error_outside_gt_and_pred_layer_fraction": (
+                    "predicted vessel outside both GT and predicted layer / all "
+                    "predicted vessel pixels"
+                ),
+                "vessel_error_outside_gt_inside_pred_layer_fraction": (
+                    "predicted vessel outside GT but inside predicted layer / all "
+                    "predicted vessel pixels"
+                ),
+                "gt_vessel_outside_pred_layer_fraction": (
+                    "GT vessel outside predicted layer / all GT vessel pixels"
+                ),
+                "oracle_warning": (
+                    "GT-layer-restricted metrics are diagnostic only and are not "
+                    "deployable model results"
+                ),
+            },
+            output_path / "metric_definitions.json",
+        )
     return summary

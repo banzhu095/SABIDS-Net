@@ -87,6 +87,7 @@ loss:
     vessel: 1.0
     vessel_stroma: 0.25
     vessel_area: 0.20
+    vessel_outside: 0.0
     containment: 0.1
     rmac: 0.15
     identity: 0.05

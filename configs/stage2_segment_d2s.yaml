@@ -8,8 +8,8 @@ model:
 
 train:
   output_dir: runs/stage2_segment_d2s
+  monitor_d2s_sensitivity: true
 
 loss:
   # Intermediate segmentation heads are not used as uncalibrated teachers.
   auxiliary_weight: 0.0
-

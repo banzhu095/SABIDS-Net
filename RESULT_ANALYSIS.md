@@ -38,6 +38,20 @@ train-eval、逐组指标、整层/空掩膜基线、参数审计和清单/初�
 它不构成云端训练效果结论。应按E0→E1→E2→E3顺序比较，Stage 2门禁通过
 前不进入Joint。
 
+## 0.2 E0--E3结果后的E3b控制
+
+用户提供的完整历史CSV分析显示：E0最佳血管Dice约0.891，说明小样本链路
+可拟合；E1验证血管Dice约0.577，是当前保守主参照；E2相对E1的全图Dice
+约下降0.005，证据不足以支持放大交互；E3验证ROI Dice仍约0.706，但全图
+Dice约0.458，层外预测明显增加。上述结论仅基于2个验证group，不是最终
+测试结果。
+
+因此新增E3b `roi_outside`：保持E3的层内masked BCE+Dice，只加入GT层外
+稳定logit负类BCE，默认权重0.5，不恢复area、stroma或Tversky。该项按样本
+归约、排除padding/unknown并跳过空outside。日志同时记录raw/weight/weighted，
+并导出原始、GT层oracle、预测层软门控和三类错误分区。E3b通过前继续暂缓
+S→D和Joint。
+
 ## 1. 结论
 
 当前降噪结果具有实际改善，但Joint分割发生了明显的血管假阳性扩张。`vessel_recall=0.8260`而`vessel_precision=0.3801`，并且预测血管面积比例为`0.7322`、真值仅`0.4152`。这说明模型不是“漏掉小血管”，而是把大量层内非血管组织也预测为血管。

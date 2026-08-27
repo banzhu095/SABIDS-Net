@@ -109,6 +109,7 @@ than force every dark pixel to be a vessel.
 | 2-E1 | `configs/current/stage2_segment_safe_fold0.yaml` | Frozen-denoising segmentation diagnostic | Stage 1 `best.pth` |
 | 2-E2 | `configs/current/stage2_segment_d2s_fold0.yaml` | Detached denoise-to-seg interaction diagnostic | Stage 1 `best.pth` |
 | 2-E3 | `configs/current/stage2_segment_roi_fold0.yaml` | ROI BCE+Dice vessel-supervision diagnostic | Stage 1 `best.pth` |
+| 2-E3b | `configs/current/stage2_segment_roi_outside_fold0.yaml` | E3 plus isolated outside-layer logit BCE | Stage 1 `best.pth` |
 | 4 | `configs/current/stage4_joint_fold0.yaml` | UGBI + RMAC public joint training | Stage 2 `best.pth` |
 | 5 | `configs/current/stage5_private_seg_fold0.yaml` | Private sparse-label segmentation adaptation | Stage 4 `best.pth` |
 
@@ -128,7 +129,7 @@ The implemented objective is:
 
 ```text
 L = λrec Lrec + λres Lresidual + λlayer Llayer + λvessel Lvessel
-  + λstroma Lstroma + λarea Larea + λcontain Lcontain
+  + λstroma Lstroma + λarea Larea + λoutside Loutside + λcontain Lcontain
   + λrmac LRMAC + λid Lidentity + λpseudo Lpseudo
 ```
 
@@ -142,6 +143,7 @@ Default global weights in `configs/base.yaml` are:
 | Vessel | 1.00 | Stage 2/Joint/Stage 5 when labelled |
 | Stroma negatives | 0.25 | labelled layer/vessel samples |
 | Vessel area | 0.20 | labelled layer/vessel samples |
+| Outside-layer logit BCE | 0 base; 0.50 in E3b | isolated E3b diagnostic |
 | Containment | 0.10 | segmentation stages |
 | RMAC | 0.15 | Joint, ramped |
 | Clean identity | 0.05 base; 0 in memory-safe Joint | Stage 1 as configured |
@@ -193,6 +195,15 @@ the outside containment constraint. All variants record epoch-0, no-augmentation
 and group-level diagnostics in separate output directories. These are
 implemented experimental controls, not evidence that any variant improves the
 public result.
+
+User-supplied E0--E3 CSV analysis subsequently reported that E0 was learnable
+(best vessel Dice about 0.891), while E1 remained the strongest conservative
+reference (validation vessel Dice about 0.577). E2 changed full-image Dice by
+only about -0.005 versus E1. E3 retained ROI Dice around 0.706 but fell to
+about 0.458 full-image Dice with extensive layer-exterior predictions. These
+figures cover only two validation groups and are diagnostic, not held-out test
+evidence. E3b therefore retains E3's inside-ROI BCE+Dice and adds only stable
+outside-GT-layer negative BCE.
 
 ## 6. Immediate experiment sequence
 

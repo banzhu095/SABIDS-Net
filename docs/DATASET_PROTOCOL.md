@@ -166,6 +166,12 @@ as a known non-vessel pixel. When the column is absent, a row with
 supervised vessel pixels. The Stage 2 ROI diagnostic further intersects this
 validity mask with the ground-truth layer mask.
 
+Before every Stage 2 pipeline run, the code compares Stage 1 training groups
+with segmentation validation/test groups and writes
+`stage1_isolation_audit.json`. A confirmed overlap stops training. Regenerate
+this audit whenever newly labelled positions change a fold; an old Stage 1
+checkpoint is not automatically valid for a new 20-position split.
+
 ## 6. Split and independence rules
 
 ### 6.1 PKU37

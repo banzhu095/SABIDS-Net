@@ -244,3 +244,26 @@ def masked_bce_dice_loss(
     if not per_image:
         return logits.sum() * 0.0
     return torch.stack(per_image).mean()
+
+
+def masked_negative_bce_loss(
+    logits: torch.Tensor,
+    valid_mask: torch.Tensor,
+) -> tuple[torch.Tensor, int]:
+    """Stable per-image BCE(target=0), skipping images with no valid pixels."""
+    logits = logits.float()
+    valid_mask = valid_mask.float()
+    per_image = []
+    for index in range(logits.shape[0]):
+        mask = valid_mask[index]
+        if not bool(mask.any()):
+            continue
+        # BCEWithLogits(z, 0) == softplus(z), whose derivative remains
+        # sigmoid(z) even for a highly confident false positive.
+        per_image.append(
+            (F.softplus(logits[index]) * mask).sum()
+            / mask.sum().clamp_min(1.0)
+        )
+    if not per_image:
+        return logits.sum() * 0.0, 0
+    return torch.stack(per_image).mean(), len(per_image)

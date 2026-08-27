@@ -13,6 +13,7 @@ from .common import (
     image_gradients,
     multi_scale_ssim_loss,
     masked_bce_dice_loss,
+    masked_negative_bce_loss,
     wavelet_loss,
 )
 from .pseudo import build_dual_source_pseudo_labels, confidence_masked_bce
@@ -31,9 +32,14 @@ class SABIDSLoss(nn.Module):
         self.vessel_supervision_mode = str(
             config.get("vessel_supervision_mode", "composite")
         )
-        if self.vessel_supervision_mode not in {"composite", "roi_bce_dice"}:
+        if self.vessel_supervision_mode not in {
+            "composite",
+            "roi_bce_dice",
+            "roi_bce_dice_outside",
+        }:
             raise ValueError(
-                "loss.vessel_supervision_mode must be composite or roi_bce_dice"
+                "loss.vessel_supervision_mode must be composite, roi_bce_dice, "
+                "or roi_bce_dice_outside"
             )
         common = {
             "boundary_weight": float(config.get("boundary_weight", 0.2)),
@@ -91,13 +97,22 @@ class SABIDSLoss(nn.Module):
         self,
         output: Dict[str, torch.Tensor],
         batch: Dict[str, torch.Tensor],
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        int,
+    ]:
         layer_valid = batch["has_layer"].bool()
         vessel_valid = batch["has_vessel"].bool()
         layer = _zero(output)
         vessel = _zero(output)
         vessel_stroma = _zero(output)
         vessel_area = _zero(output)
+        vessel_outside = _zero(output)
+        vessel_outside_valid_images = 0
         spatial_valid = batch["valid_mask"].float()
         vessel_annotation_valid = batch.get("vessel_valid_mask", spatial_valid).float()
         vessel_annotation_valid = vessel_annotation_valid * spatial_valid
@@ -109,7 +124,10 @@ class SABIDSLoss(nn.Module):
                 spatial_valid[layer_valid],
             )
         if bool(vessel_valid.any()):
-            if self.vessel_supervision_mode == "roi_bce_dice":
+            if self.vessel_supervision_mode in {
+                "roi_bce_dice",
+                "roi_bce_dice_outside",
+            }:
                 roi = (
                     vessel_annotation_valid[vessel_valid]
                     * batch["layer_mask"][vessel_valid].float()
@@ -119,6 +137,15 @@ class SABIDSLoss(nn.Module):
                     batch["vessel_mask"][vessel_valid],
                     roi,
                 )
+                if self.vessel_supervision_mode == "roi_bce_dice_outside":
+                    outside = vessel_annotation_valid[vessel_valid] * (
+                        1.0 - batch["layer_mask"][vessel_valid].float()
+                    )
+                    vessel_outside, vessel_outside_valid_images = (
+                        masked_negative_bce_loss(
+                            output["vessel_logits"][vessel_valid], outside
+                        )
+                    )
             else:
                 vessel = self.vessel_loss(
                     output["vessel_logits"][vessel_valid],
@@ -184,7 +211,10 @@ class SABIDSLoss(nn.Module):
                         size=auxiliary["vessel_logit"].shape[-2:],
                         mode="nearest",
                     )
-                    if self.vessel_supervision_mode == "roi_bce_dice":
+                    if self.vessel_supervision_mode in {
+                        "roi_bce_dice",
+                        "roi_bce_dice_outside",
+                    }:
                         auxiliary_layer = F.interpolate(
                             batch["layer_mask"][vessel_valid],
                             size=auxiliary["vessel_logit"].shape[-2:],
@@ -202,7 +232,14 @@ class SABIDSLoss(nn.Module):
                             valid_mask=auxiliary_valid,
                         )
                     vessel = vessel + auxiliary_weight * auxiliary_loss
-        return layer, vessel, vessel_stroma, vessel_area
+        return (
+            layer,
+            vessel,
+            vessel_stroma,
+            vessel_area,
+            vessel_outside,
+            vessel_outside_valid_images,
+        )
 
     def forward(
         self,
@@ -221,17 +258,33 @@ class SABIDSLoss(nn.Module):
         else:
             reconstruction, residual = zero, zero
         if stage in {"segment", "warmup", "joint", "private", "private_seg"}:
-            layer, vessel, vessel_stroma, vessel_area = self._segmentation(
-                output, batch
-            )
+            (
+                layer,
+                vessel,
+                vessel_stroma,
+                vessel_area,
+                vessel_outside,
+                vessel_outside_valid_images,
+            ) = self._segmentation(output, batch)
         else:
-            layer, vessel, vessel_stroma, vessel_area = zero, zero, zero, zero
+            layer, vessel, vessel_stroma, vessel_area, vessel_outside = (
+                zero,
+                zero,
+                zero,
+                zero,
+                zero,
+            )
+            vessel_outside_valid_images = 0
         losses["reconstruction"] = reconstruction
         losses["residual"] = residual
         losses["layer"] = layer
         losses["vessel"] = vessel
         losses["vessel_stroma"] = vessel_stroma
         losses["vessel_area"] = vessel_area
+        losses["vessel_outside"] = vessel_outside
+        losses["vessel_outside_valid_images"] = float(
+            vessel_outside_valid_images
+        )
 
         containment = zero
         if stage in {"segment", "warmup", "joint", "private", "private_seg"}:
@@ -322,29 +375,38 @@ class SABIDSLoss(nn.Module):
         active = {
             "denoise": {"reconstruction", "residual", "identity"},
             "segment": {
-                "layer", "vessel", "vessel_stroma", "vessel_area", "containment"
+                "layer", "vessel", "vessel_stroma", "vessel_area",
+                "vessel_outside", "containment"
             },
             "warmup": {
                 "reconstruction", "residual", "layer", "vessel",
-                "vessel_stroma", "vessel_area", "containment", "identity"
+                "vessel_stroma", "vessel_area", "vessel_outside",
+                "containment", "identity"
             },
             "joint": {
                 "reconstruction", "residual", "layer", "vessel",
-                "vessel_stroma", "vessel_area", "containment", "identity", "rmac"
+                "vessel_stroma", "vessel_area", "vessel_outside",
+                "containment", "identity", "rmac"
             },
             "private": {
                 "reconstruction", "residual", "layer", "vessel",
-                "vessel_stroma", "vessel_area", "containment", "identity", "rmac",
+                "vessel_stroma", "vessel_area", "vessel_outside",
+                "containment", "identity", "rmac",
                 "pseudo"
             },
             "private_seg": {
-                "layer", "vessel", "vessel_stroma", "vessel_area", "containment",
+                "layer", "vessel", "vessel_stroma", "vessel_area",
+                "vessel_outside", "containment",
                 "pseudo"
             },
         }[stage]
         total = _zero(output)
         for name in active:
             multiplier = ramp if name in {"rmac", "pseudo"} else 1.0
-            total = total + self._weight(name) * multiplier * losses[name]
+            weight = self._weight(name) * multiplier
+            weighted = weight * losses[name]
+            losses[f"{name}_weight"] = float(weight)
+            losses[f"{name}_weighted"] = weighted
+            total = total + weighted
         losses["total"] = total
         return losses

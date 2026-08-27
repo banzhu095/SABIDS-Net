@@ -1,0 +1,13 @@
+_base_: stage2_segment_roi.yaml
+
+# E3b: isolate stable outside-GT-layer negative supervision. Keep the E3
+# inside-ROI BCE+Dice objective and do not restore stroma/area/Tversky terms.
+train:
+  output_dir: runs/stage2_segment_roi_outside
+
+loss:
+  definition_version: roi-bce-dice-outside-bce-fp32-v1
+  vessel_supervision_mode: roi_bce_dice_outside
+  weights:
+    vessel_outside: 0.5
+

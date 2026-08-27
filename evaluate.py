@@ -4,7 +4,7 @@ import argparse
 from pathlib import Path
 
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 
 from sabids.config import load_config
 from sabids.data import OCTManifestDataset
@@ -20,6 +20,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--split", default="test")
     parser.add_argument("--output", default="outputs/evaluation")
     parser.add_argument("--save-predictions", action="store_true")
+    parser.add_argument(
+        "--one-frame-per-group",
+        action="store_true",
+        help="Use the first manifest row of every group for deterministic diagnostics.",
+    )
     parser.add_argument("--use-ema", action="store_true")
     parser.add_argument("--layer-threshold", type=float, default=None)
     parser.add_argument("--vessel-threshold", type=float, default=None)
@@ -40,8 +45,12 @@ def main() -> None:
         transform=_make_transform(config, False),
         sample_repeat=False,
         root=config["data"].get("root"),
-        datasets=config["data"].get("test_datasets"),
+        datasets=config["data"].get(f"{args.split}_datasets"),
+        groups=config["data"].get(f"{args.split}_groups"),
     )
+    if args.one_frame_per_group:
+        indices = [dataset.groups[group_id][0] for group_id in sorted(dataset.groups)]
+        dataset = Subset(dataset, indices)
     loader = DataLoader(
         dataset,
         batch_size=int(config.get("evaluation", {}).get("batch_size", 1)),

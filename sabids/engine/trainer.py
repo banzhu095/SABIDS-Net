@@ -47,6 +47,14 @@ from ..utils import (
 )
 
 
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def _make_transform(config: Dict, training: bool) -> JointOCTTransform:
     size = config["data"].get("target_size", [512, 1024])
     augmentation = config["data"].get("augmentation", {})
@@ -313,11 +321,7 @@ class Trainer:
     def _record_run_inputs(self) -> None:
         runtime = self.config.setdefault("runtime", {})
         manifest = Path(self.config["data"]["manifest"]).expanduser().resolve()
-        digest = hashlib.sha256()
-        with manifest.open("rb") as handle:
-            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                digest.update(chunk)
-        runtime["manifest_sha256"] = digest.hexdigest()
+        runtime["manifest_sha256"] = _sha256_file(manifest)
         table = pd.read_csv(manifest, dtype=str).fillna("")
         runtime["group_ids_by_split"] = {
             str(split): sorted(part["group_id"].astype(str).unique().tolist())
@@ -341,6 +345,14 @@ class Trainer:
                 part["group_id"].astype(str).unique().tolist()
             )
             runtime["effective_rows"][role] = int(len(part))
+        split_payload = "\n".join(
+            f"{role}:{group_id}"
+            for role in ("train", "val")
+            for group_id in runtime["effective_groups"][role]
+        ).encode("utf-8")
+        runtime["effective_split_sha256"] = hashlib.sha256(
+            split_payload
+        ).hexdigest()
         pretrained = self.config["train"].get("pretrained") or runtime.get(
             "pretrained_source"
         )
@@ -353,6 +365,46 @@ class Trainer:
                 runtime["initialization_checkpoint_mtime_ns"] = int(
                     stat.st_mtime_ns
                 )
+                runtime["initialization_checkpoint_sha256"] = _sha256_file(
+                    checkpoint
+                )
+
+    def _write_run_metadata(
+        self, best_epoch: int, monitor: str, best_checkpoint: Path
+    ) -> None:
+        evaluation = self.config.get("evaluation", {})
+        metadata = {
+            "git_commit": self.config.get("runtime", {}).get("git_commit"),
+            "manifest_sha256": self.config.get("runtime", {}).get(
+                "manifest_sha256"
+            ),
+            "effective_split_sha256": self.config.get("runtime", {}).get(
+                "effective_split_sha256"
+            ),
+            "effective_groups": self.config.get("runtime", {}).get(
+                "effective_groups", {}
+            ),
+            "initialization_checkpoint": self.config.get("runtime", {}).get(
+                "initialization_checkpoint"
+            ),
+            "initialization_checkpoint_sha256": self.config.get(
+                "runtime", {}
+            ).get("initialization_checkpoint_sha256"),
+            "best_epoch": int(best_epoch),
+            "monitor": monitor,
+            "best_metric": float(self.best_metric),
+            "layer_threshold": float(
+                evaluation.get("layer_threshold", evaluation.get("threshold", 0.5))
+            ),
+            "vessel_threshold": float(
+                evaluation.get("vessel_threshold", evaluation.get("threshold", 0.5))
+            ),
+            "best_checkpoint": str(best_checkpoint.resolve()),
+            "best_checkpoint_sha256": (
+                _sha256_file(best_checkpoint) if best_checkpoint.is_file() else None
+            ),
+        }
+        write_json(metadata, self.output_dir / "run_metadata.json")
 
     @torch.no_grad()
     def _initialize_denoise_probe(self) -> None:
@@ -505,6 +557,14 @@ class Trainer:
         seen_groups = set()
         layer_supervised_samples = 0
         vessel_supervised_samples = 0
+        d2s_scale_start = {
+            name: parameter.detach().clone()
+            for name, parameter in self.model.named_parameters()
+            if parameter.requires_grad
+            and (name.endswith("layer_scale") or name.endswith("vessel_scale"))
+        }
+        d2s_gradient_norm_total = 0.0
+        d2s_scale_gradient_total = 0.0
         accumulation_steps = max(
             1, int(self.config["train"].get("gradient_accumulation_steps", 1))
         )
@@ -565,6 +625,37 @@ class Trainer:
             )
             if should_step:
                 self.scaler.unscale_(self.optimizer)
+                d2s_gradients = [
+                    parameter.grad.detach().float().reshape(-1)
+                    for name, parameter in self.model.named_parameters()
+                    if parameter.grad is not None
+                    and "interactions" in name
+                    and any(
+                        token in name
+                        for token in (
+                            "noise_head",
+                            "restoration_context",
+                            "denoise_to_layer",
+                            "denoise_to_vessel",
+                            "layer_scale",
+                            "vessel_scale",
+                        )
+                    )
+                ]
+                if d2s_gradients:
+                    d2s_gradient_norm_total += float(
+                        torch.linalg.vector_norm(torch.cat(d2s_gradients)).item()
+                    )
+                scale_gradients = [
+                    parameter.grad.detach().float().abs().mean()
+                    for name, parameter in self.model.named_parameters()
+                    if parameter.grad is not None
+                    and (name.endswith("layer_scale") or name.endswith("vessel_scale"))
+                ]
+                if scale_gradients:
+                    d2s_scale_gradient_total += float(
+                        torch.stack(scale_gradients).mean().item()
+                    )
                 gradient_norm = clip_grad_norm_(
                     self.model.parameters(),
                     float(self.config["train"].get("gradient_clip", 1.0)),
@@ -590,12 +681,20 @@ class Trainer:
                 for name in (
                     "denoise_to_layer_injection_abs_mean",
                     "denoise_to_vessel_injection_abs_mean",
+                    "denoise_to_layer_injection_relative_rms",
+                    "denoise_to_vessel_injection_relative_rms",
                     "layer_scale_abs_mean",
                     "vessel_scale_abs_mean",
                 ):
                     values = [float(item[name].item()) for item in auxiliary if name in item]
                     if values:
                         totals[f"interaction_{name}"] += float(np.mean(values))
+                    for item in auxiliary:
+                        if name in item and "level" in item:
+                            level = int(item["level"].item())
+                            totals[
+                                f"interaction_level{level}_{name}"
+                            ] += float(item[name].item())
             progress.set_postfix(loss=totals["total"] / steps)
             del output, repeat_output, clean_output, teacher_output, losses
         result = {key: value / max(steps, 1) for key, value in totals.items()}
@@ -606,8 +705,21 @@ class Trainer:
                 "unique_groups_seen": float(len(seen_groups)),
                 "layer_supervised_samples": float(layer_supervised_samples),
                 "vessel_supervised_samples": float(vessel_supervised_samples),
+                "d2s_gradient_norm": d2s_gradient_norm_total
+                / max(optimizer_steps, 1),
+                "d2s_scale_gradient_abs_mean": d2s_scale_gradient_total
+                / max(optimizer_steps, 1),
             }
         )
+        if d2s_scale_start:
+            named_parameters = dict(self.model.named_parameters())
+            deltas = [
+                (named_parameters[name].detach() - initial).float().abs().mean()
+                for name, initial in d2s_scale_start.items()
+            ]
+            result["d2s_scale_update_abs_mean"] = float(
+                torch.stack(deltas).mean().item()
+            )
         return result
 
     @torch.no_grad()
@@ -634,12 +746,44 @@ class Trainer:
             output = evaluation_model(
                 image, return_features=False, return_auxiliary=False
             )
+            d2s_disabled_vessel_probability = None
+            if bool(self.config["train"].get("monitor_d2s_sensitivity", False)):
+                interactions = list(evaluation_model.interactions.values())
+                original_states = [
+                    interaction.enable_denoise_to_seg
+                    for interaction in interactions
+                ]
+                try:
+                    for interaction in interactions:
+                        interaction.enable_denoise_to_seg = False
+                    disabled_output = evaluation_model(
+                        image, return_features=False, return_auxiliary=False
+                    )
+                    d2s_disabled_vessel_probability = (
+                        disabled_output["vessel_prob"].cpu().numpy()
+                    )
+                finally:
+                    for interaction, enabled in zip(
+                        interactions, original_states
+                    ):
+                        interaction.enable_denoise_to_seg = enabled
             layer_probability = output["layer_prob"].cpu().numpy()
             vessel_probability = output["vessel_prob"].cpu().numpy()
             layer = layer_probability >= layer_threshold
             vessel = vessel_probability >= vessel_threshold
             for index, group_id in enumerate(batch["group_id"]):
                 valid = batch["valid_mask"][index, 0].numpy() > 0.5
+                if d2s_disabled_vessel_probability is not None:
+                    group_values[group_id][
+                        "d2s_vessel_probability_mean_abs_change"
+                    ].append(
+                        float(
+                            np.abs(
+                                vessel_probability[index, 0][valid]
+                                - d2s_disabled_vessel_probability[index, 0][valid]
+                            ).mean()
+                        )
+                    )
                 if bool(batch["has_layer"][index]):
                     target = batch["layer_mask"][index, 0].numpy() > 0.5
                     layer_metrics = binary_metrics(
@@ -659,6 +803,16 @@ class Trainer:
                     vessel_valid = valid & (
                         batch["vessel_valid_mask"][index, 0].numpy() > 0.5
                     )
+                    if d2s_disabled_vessel_probability is not None:
+                        group_values[group_id][
+                            "d2s_disabled_vessel_soft_dice"
+                        ].append(
+                            soft_dice_score(
+                                d2s_disabled_vessel_probability[index, 0],
+                                target,
+                                vessel_valid,
+                            )
+                        )
                     if bool(batch["has_layer"][index]):
                         diagnostics = vessel_diagnostic_metrics(
                             vessel_probability[index, 0],
@@ -846,8 +1000,9 @@ class Trainer:
                 ema_state,
             )
             if improved:
+                best_path = self.output_dir / "best.pth"
                 save_checkpoint(
-                    self.output_dir / "best.pth",
+                    best_path,
                     self.model,
                     self.optimizer,
                     self.scheduler,
@@ -857,6 +1012,7 @@ class Trainer:
                     self.scaler,
                     ema_state,
                 )
+                self._write_run_metadata(epoch + 1, monitor, best_path)
             print(
                 f"Epoch {epoch + 1:03d} | monitor={monitored:.5f} | "
                 f"best={self.best_metric:.5f} | bad_epochs={self.bad_epochs}"
