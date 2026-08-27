@@ -1,4 +1,4 @@
-# SABIDS-Net 2.0
+# SABIDS-Net
 
 **Sparse-Annotation-aware Bidirectional Interaction Denoising–Segmentation Network**
 
