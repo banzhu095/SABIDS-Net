@@ -422,3 +422,8 @@ Populate one row per independent fold after validation threshold selection.
   found the local Stage 2 fold-0 manifest is the historical 8/2/3 protocol (100
   validation frames, 2 groups), not the recorded cloud 13/3/4 protocol; no new
   inference or performance result is claimed.
+- Cloud resume exposed a legacy/incomplete float-cache schema during denoising
+  drift aggregation (`denoised_clipped` absent). Resume now validates required
+  NPZ keys/shapes, rewrites incomplete caches atomically, accepts documented
+  legacy denoised keys for drift-only comparison, and records incompatible
+  caches without aborting the completed inference archive.

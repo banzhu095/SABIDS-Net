@@ -8,11 +8,19 @@ import cv2
 import torch
 
 from sabids.metrics import binary_metrics, psnr
-from tools.export_stage12_results import build_inventory, make_scope_manifest, predict_only
+from tools.export_stage12_results import (
+    build_inventory, float_cache_complete, make_scope_manifest, predict_only,
+    write_denoise_drift,
+)
 
 
 class _FakeStage2(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.calls = 0
+
     def forward(self, image, **kwargs):
+        self.calls += 1
         layer = torch.zeros_like(image); layer[:, :, 1:3, :] = 0.9
         vessel = torch.zeros_like(image); vessel[:, :, 1:3, 1:3] = 0.8
         return {"denoised": image * 0.9, "denoised_raw": image * 0.9,
@@ -67,7 +75,8 @@ class Stage12ExportTests(unittest.TestCase):
                 "dataset": ["synthetic"], "source_split": ["val"], "group_id": ["g1"],
                 "sample_id": ["s1"], "original_path": [str(root / "Data" / "s1.png")],
             }
-            table = predict_only(_FakeStage2(), [batch], torch.device("cpu"),
+            model = _FakeStage2()
+            table = predict_only(model, [batch], torch.device("cpu"),
                                  root / "predictions", root, root, "E3b", "segment", False, False)
             denoised = cv2.imdecode(np.fromfile(root / table.iloc[0]["denoised"], dtype=np.uint8), cv2.IMREAD_UNCHANGED)
             layer = cv2.imdecode(np.fromfile(root / table.iloc[0]["layer_final"], dtype=np.uint8), cv2.IMREAD_UNCHANGED) > 0
@@ -77,6 +86,27 @@ class Stage12ExportTests(unittest.TestCase):
             npz = root / "predictions" / "E3b" / "synthetic" / "val" / "g1" / "s1" / "raw_outputs_float32.npz"
             with np.load(npz) as arrays:
                 self.assertEqual(arrays["layer_probability"].dtype, np.float32)
+            self.assertTrue(float_cache_complete(npz, "segment"))
+            predict_only(model, [batch], torch.device("cpu"), root / "predictions",
+                         root, root, "E3b", "segment", False, True)
+            self.assertEqual(model.calls, 1)
+
+    def test_denoise_drift_accepts_legacy_raw_key_and_reports_bad_cache(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            relative = Path("synthetic/val/g1/s1/raw_outputs_float32.npz")
+            reference = root / "predictions" / "S1-Denoise" / relative
+            legacy = root / "predictions" / "E1-current" / relative
+            broken = root / "predictions" / "E3-current" / relative
+            reference.parent.mkdir(parents=True); legacy.parent.mkdir(parents=True); broken.parent.mkdir(parents=True)
+            np.savez_compressed(reference, denoised_clipped=np.full((2, 2), 0.5, np.float32))
+            np.savez_compressed(legacy, denoised_raw=np.full((2, 2), 0.5, np.float32))
+            np.savez_compressed(broken, layer_probability=np.ones((2, 2), np.float32))
+            write_denoise_drift(root)
+            drift = pd.read_csv(root / "denoise_drift.csv")
+            self.assertEqual(drift.loc[drift.experiment == "E1-current", "status"].iloc[0], "compared")
+            self.assertEqual(drift.loc[drift.experiment == "E3-current", "status"].iloc[0],
+                             "incompatible_or_corrupt_cache")
 
 
 if __name__ == "__main__":

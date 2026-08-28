@@ -381,6 +381,30 @@ def write_gray16(path: Path, image: np.ndarray) -> None:
     encoded.tofile(str(path))
 
 
+def float_cache_complete(path: Path, stage: str) -> bool:
+    required = {"denoised_raw", "denoised_clipped", "valid_mask"}
+    if stage != "denoise":
+        required.update({"layer_probability", "vessel_probability"})
+    if not path.is_file():
+        return False
+    try:
+        with np.load(path, allow_pickle=False) as data:
+            if not required.issubset(data.files):
+                return False
+            shapes = {tuple(data[key].shape) for key in required}
+            return len(shapes) == 1
+    except (OSError, ValueError, KeyError, EOFError):
+        return False
+
+
+def write_float_cache(path: Path, arrays: Dict[str, np.ndarray]) -> None:
+    """Write NPZ atomically so an interrupted run cannot look complete."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp.npz")
+    np.savez_compressed(temporary, **arrays)
+    os.replace(temporary, path)
+
+
 def restore(array: np.ndarray, valid: np.ndarray, height: int, width: int,
             is_mask: bool = False) -> np.ndarray:
     coordinates = np.argwhere(valid)
@@ -393,12 +417,53 @@ def restore(array: np.ndarray, valid: np.ndarray, height: int, width: int,
     return array > 0.5 if is_mask else array
 
 
+def prediction_index_record(batch: Dict[str, Any], index: int, output: Path,
+                            report_root: Path, project_root: Path, alias: str,
+                            stage: str) -> Dict[str, Any]:
+    dataset, split = str(batch["dataset"][index]), str(batch["source_split"][index])
+    group, sample = str(batch["group_id"][index]), str(batch["sample_id"][index])
+    sample_root = output / alias / dataset / split / group / sample
+    source = Path(str(batch["original_path"][index]))
+    return {
+        "experiment": alias, "dataset": dataset, "split": split, "group_id": group,
+        "sample_id": sample,
+        "source_image": source.relative_to(project_root).as_posix()
+        if source.is_relative_to(project_root) else "external_path_redacted",
+        "denoised": (sample_root / "denoised_clipped_u16.png").relative_to(report_root).as_posix(),
+        "layer_p0": "" if stage == "denoise" else (sample_root / "layer_mask_p0.png").relative_to(report_root).as_posix(),
+        "vessel_p0": "" if stage == "denoise" else (sample_root / "vessel_mask_p0.png").relative_to(report_root).as_posix(),
+        "layer_p2a": "" if stage == "denoise" else (sample_root / "layer_mask_p2a.png").relative_to(report_root).as_posix(),
+        "layer_final": "" if stage == "denoise" else (sample_root / "layer_mask_final_p2b.png").relative_to(report_root).as_posix(),
+        "vessel_p3": "" if stage == "denoise" else (sample_root / "vessel_mask_p3.png").relative_to(report_root).as_posix(),
+        "threshold_layer": 0.5 if stage != "denoise" else None,
+        "threshold_vessel": 0.5 if stage != "denoise" else None,
+        "forward_grid": "training_grid", "export_grid": "restored_original_grid",
+    }
+
+
 @torch.inference_mode()
 def predict_only(model: torch.nn.Module, data_loader: DataLoader, device: torch.device,
                  output: Path, report_root: Path, project_root: Path, alias: str,
                  stage: str, save_all_float: bool, resume: bool) -> pd.DataFrame:
     rows = []
     for batch in data_loader:
+        if resume:
+            complete = []
+            for index in range(len(batch["sample_id"])):
+                dataset, split = str(batch["dataset"][index]), str(batch["source_split"][index])
+                group, sample = str(batch["group_id"][index]), str(batch["sample_id"][index])
+                sample_root = output / alias / dataset / split / group / sample
+                final_path = sample_root / ("denoised_clipped_u16.png" if stage == "denoise" else "vessel_mask_p3.png")
+                requires_float = split == "val" or save_all_float
+                complete.append(final_path.is_file() and (
+                    not requires_float or float_cache_complete(sample_root / "raw_outputs_float32.npz", stage)
+                ))
+            if all(complete):
+                rows.extend(
+                    prediction_index_record(batch, index, output, report_root, project_root, alias, stage)
+                    for index in range(len(batch["sample_id"]))
+                )
+                continue
         result = model(batch["image"].to(device, non_blocking=True),
                        return_features=False, return_auxiliary=False)
         denoised = result["denoised"].cpu().numpy()
@@ -410,9 +475,14 @@ def predict_only(model: torch.nn.Module, data_loader: DataLoader, device: torch.
             group, sample = str(batch["group_id"][index]), str(batch["sample_id"][index])
             sample_root = output / alias / dataset / split / group / sample
             final_path = sample_root / ("denoised_clipped_u16.png" if stage == "denoise" else "vessel_mask_p3.png")
+            float_path = sample_root / "raw_outputs_float32.npz"
             valid_canvas = batch["valid_mask"][index, 0].numpy() > 0.5
             height, width = int(batch["original_height"][index]), int(batch["original_width"][index])
-            if not (resume and final_path.is_file()):
+            requires_float = split == "val" or save_all_float
+            cache_complete = final_path.is_file() and (
+                not requires_float or float_cache_complete(float_path, stage)
+            )
+            if not (resume and cache_complete):
                 noisy = restore(batch["image"][index, 0].numpy(), valid_canvas, height, width)
                 den = restore(denoised[index, 0], valid_canvas, height, width)
                 den_raw = restore(denoised_raw[index, 0], valid_canvas, height, width)
@@ -441,25 +511,10 @@ def predict_only(model: torch.nn.Module, data_loader: DataLoader, device: torch.
                     if stage != "denoise":
                         arrays.update(layer_probability=p_layer.astype(np.float32),
                                       vessel_probability=p_vessel.astype(np.float32))
-                    np.savez_compressed(sample_root / "raw_outputs_float32.npz", **arrays)
-            rows.append({
-                "experiment": alias, "dataset": dataset, "split": split, "group_id": group,
-                "sample_id": sample,
-                "source_image": (
-                    Path(str(batch["original_path"][index])).relative_to(project_root).as_posix()
-                    if Path(str(batch["original_path"][index])).is_relative_to(project_root)
-                    else "external_path_redacted"
-                ),
-                "denoised": (sample_root / "denoised_clipped_u16.png").relative_to(report_root).as_posix(),
-                "layer_p0": "" if stage == "denoise" else (sample_root / "layer_mask_p0.png").relative_to(report_root).as_posix(),
-                "vessel_p0": "" if stage == "denoise" else (sample_root / "vessel_mask_p0.png").relative_to(report_root).as_posix(),
-                "layer_p2a": "" if stage == "denoise" else (sample_root / "layer_mask_p2a.png").relative_to(report_root).as_posix(),
-                "layer_final": "" if stage == "denoise" else (sample_root / "layer_mask_final_p2b.png").relative_to(report_root).as_posix(),
-                "vessel_p3": "" if stage == "denoise" else (sample_root / "vessel_mask_p3.png").relative_to(report_root).as_posix(),
-                "threshold_layer": 0.5 if stage != "denoise" else None,
-                "threshold_vessel": 0.5 if stage != "denoise" else None,
-                "forward_grid": "training_grid", "export_grid": "restored_original_grid",
-            })
+                    write_float_cache(float_path, arrays)
+            rows.append(prediction_index_record(
+                batch, index, output, report_root, project_root, alias, stage
+            ))
     return pd.DataFrame(rows)
 
 
@@ -576,15 +631,36 @@ def write_denoise_drift(output: Path) -> None:
             if not candidate.is_file():
                 rows.append({"experiment": alias, "sample": relative.as_posix(), "status": "missing_candidate"})
                 continue
-            with np.load(reference) as ref_data, np.load(candidate) as cand_data:
-                difference = np.abs(
-                    ref_data["denoised_clipped"].astype(np.float64)
-                    - cand_data["denoised_clipped"].astype(np.float64)
-                )
+            try:
+                with np.load(reference, allow_pickle=False) as ref_data, np.load(candidate, allow_pickle=False) as cand_data:
+                    reference_array, reference_key = denoised_clipped_from_cache(ref_data)
+                    candidate_array, candidate_key = denoised_clipped_from_cache(cand_data)
+                if reference_array.shape != candidate_array.shape:
+                    rows.append({"experiment": alias, "sample": relative.as_posix(),
+                                 "status": "shape_mismatch", "reference_shape": str(reference_array.shape),
+                                 "candidate_shape": str(candidate_array.shape)})
+                    continue
+                difference = np.abs(reference_array.astype(np.float64) - candidate_array.astype(np.float64))
+            except (OSError, ValueError, KeyError, EOFError) as error:
+                rows.append({"experiment": alias, "sample": relative.as_posix(),
+                             "status": "incompatible_or_corrupt_cache",
+                             "detail": f"{type(error).__name__}: {error}"})
+                continue
             rows.append({"experiment": alias, "sample": relative.as_posix(), "status": "compared",
                          "max_abs": float(difference.max()), "mean_abs": float(difference.mean()),
-                         "exact_equal": bool(np.array_equal(difference, np.zeros_like(difference)))})
+                         "exact_equal": bool(np.all(difference == 0)),
+                         "reference_array_key": reference_key, "candidate_array_key": candidate_key})
     pd.DataFrame(rows).to_csv(output / "denoise_drift.csv", index=False, encoding="utf-8-sig")
+
+
+def denoised_clipped_from_cache(data: Any) -> tuple[np.ndarray, str]:
+    """Read current or legacy denoising cache without changing metric values."""
+    for key in ("denoised_clipped", "denoised"):
+        if key in data.files:
+            return np.asarray(data[key]), key
+    if "denoised_raw" in data.files:
+        return np.clip(np.asarray(data["denoised_raw"]), 0.0, 1.0), "clip(denoised_raw)"
+    raise KeyError(f"No denoised array; available keys={sorted(data.files)}")
 
 
 def write_validation_gallery(output: Path) -> None:
@@ -664,12 +740,21 @@ def main() -> None:
         config = load_config(run_dir / "resolved_config.yaml")
         model, audit = load_model(config, run_dir / "best.pth", device)
         load_audit.append({"alias": alias, "checkpoint_sha256": item["checkpoint_sha256"], **audit})
-        validation_loader = loader(config, resolve_path(config["data"]["manifest"], root), "val", root, args.batch_size, args.num_workers)
         tasks = ("denoise",) if item["stage"] == "denoise" else ("denoise", "layer", "vessel")
-        evaluate_model(model, validation_loader, device, output_dir=output / "validation" / alias,
-                       layer_threshold=0.5, vessel_threshold=0.5, save_predictions=True,
-                       stage=item["stage"], input_normalization=config["data"].get("normalization", "fixed"),
-                       tasks=tasks, postprocess_modes=("p0", "p1", "p2", "p3"), restore_original_geometry=True)
+        validation_dir = output / "validation" / alias
+        validation_complete = all(
+            (validation_dir / name).is_file()
+            for name in ("frame_metrics.csv", "group_metrics.csv", "summary.json")
+        )
+        if not (args.resume and validation_complete):
+            validation_loader = loader(
+                config, resolve_path(config["data"]["manifest"], root), "val",
+                root, args.batch_size, args.num_workers,
+            )
+            evaluate_model(model, validation_loader, device, output_dir=validation_dir,
+                           layer_threshold=0.5, vessel_threshold=0.5, save_predictions=True,
+                           stage=item["stage"], input_normalization=config["data"].get("normalization", "fixed"),
+                           tasks=tasks, postprocess_modes=("p0", "p1", "p2", "p3"), restore_original_geometry=True)
         if args.full_non_test and not args.validation_only:
             inference_loader = loader(config, non_test_manifest, "non_test_inference", root, args.batch_size, args.num_workers)
             prediction_indices.append(predict_only(
