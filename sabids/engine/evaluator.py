@@ -172,6 +172,12 @@ def evaluate_model(
                 row["rmse"] = rmse(denoised_crop, target)
                 row["rmse_noisy"] = rmse(noisy_crop, target)
                 row["rmse_reduction"] = row["rmse_noisy"] - row["rmse"]
+                row["mse"] = float(np.mean((denoised_crop[valid_eval].astype(np.float64) - target[valid_eval]) ** 2))
+                row["mse_noisy"] = float(np.mean((noisy_crop[valid_eval].astype(np.float64) - target[valid_eval]) ** 2))
+                row["mse_reduction"] = row["mse_noisy"] - row["mse"]
+                row["mae"] = float(np.mean(np.abs(denoised_crop[valid_eval].astype(np.float64) - target[valid_eval])))
+                row["mae_noisy"] = float(np.mean(np.abs(noisy_crop[valid_eval].astype(np.float64) - target[valid_eval])))
+                row["mae_reduction"] = row["mae_noisy"] - row["mae"]
                 row["epi"] = edge_preservation_index(denoised_crop, target)
                 row["epi_noisy"] = edge_preservation_index(noisy_crop, target)
                 row["epi_gain"] = row["epi"] - row["epi_noisy"]

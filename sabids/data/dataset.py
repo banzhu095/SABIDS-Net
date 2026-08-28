@@ -163,6 +163,8 @@ class OCTManifestDataset(Dataset):
             "patient_id": str(row.get("patient_id", group_id)),
             "dataset": str(row["dataset"]),
             "scan_protocol": str(row.get("scan_protocol", "unknown")),
+            "source_split": str(row.get("original_split", row.get("split", "unknown"))),
+            "input_role": str(row.get("input_role", "noisy_input")),
             "original_path": str(self._resolve(row["image_path"])),
             "clean_path": str(self._resolve(row.get("clean_path", "")) or ""),
             "layer_mask_path": str(

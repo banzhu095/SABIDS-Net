@@ -15,7 +15,7 @@ from scipy.ndimage import (
 def psnr(prediction: np.ndarray, target: np.ndarray, data_range: float = 1.0) -> float:
     mse = float(np.mean((prediction - target) ** 2))
     if mse <= 1e-12:
-        return 99.0
+        return float("inf")
     return float(10.0 * np.log10(data_range * data_range / mse))
 
 
@@ -53,6 +53,8 @@ def binary_metrics(prediction: np.ndarray, target: np.ndarray) -> Dict[str, floa
         "recall": (tp + 1e-6) / (tp + fn + 1e-6),
         "specificity": (tn + 1e-6) / (tn + fp + 1e-6),
         "accuracy": (tp + tn + 1e-6) / (tp + tn + fp + fn + 1e-6),
+        "tp": tp, "fp": fp, "fn": fn, "tn": tn,
+        "valid_pixels": tp + fp + fn + tn,
     }
 
 

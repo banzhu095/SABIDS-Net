@@ -1157,3 +1157,17 @@ summary.json
 ### 16.7 标签迁移的重要前提
 
 同一位置的人工标签可以关联到该位置的全部noisy帧，但前提是这些重复帧与clean平均图已经完成可靠配准。如果原始重复扫描存在明显的轴向位移、眼动或局部形变，直接复制标签会产生边界监督噪声。正式训练前建议随机可视化每个有标签位置的5–10张noisy帧与标签叠加图，对位移严重的帧进行配准或剔除。
+# Stage 1/2 full non-test inference and validation archive
+
+`tools/export_stage12_results.py` registers the current Stage 1 and four Stage 2
+best checkpoints, audits manifest/Data coverage, evaluates the complete labelled
+validation split at fixed P0 thresholds, and can export predictions for every
+manifest-indexed non-test B-scan. Reserved test positions and linked clean assets
+are excluded by default. Run `--dry-run` first; the tool never substitutes
+`last.pth` for a missing `best.pth` and never starts training.
+
+```bash
+python tools/export_stage12_results.py --project-root /mnt/SABIDS-Net \
+  --output /mnt/SABIDS-Net/runs/reports/stage12_validation_$(date +%Y%m%d_%H%M%S) \
+  --dry-run --skip-input-hashes
+```

@@ -410,3 +410,15 @@ Populate one row per independent fold after validation threshold selection.
   V2 inventory; its self-audit returned identity/protocol/causal=`matched`.
   The local Python environment does not contain pytest, so the required
   complete `pytest -q` run remains for the cloud/CI environment.
+# CODE-20260828-STAGE12-EXPORT
+
+- Added a records-first Stage 1/2 registry and full non-test inference entry,
+  fixed-threshold complete-validation evaluation, original-grid probability
+  restoration, 16-bit denoised PNG and independent layer/vessel mask export.
+- Reserved test and associated clean assets are excluded through manifest
+  metadata by default. The sealed-test option is pure forward only and is not
+  included in metrics, ranking, calibration or gallery outputs.
+- Local dry-run found Data/Manifests but no current best checkpoints. It also
+  found the local Stage 2 fold-0 manifest is the historical 8/2/3 protocol (100
+  validation frames, 2 groups), not the recorded cloud 13/3/4 protocol; no new
+  inference or performance result is claimed.
