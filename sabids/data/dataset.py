@@ -105,11 +105,20 @@ class OCTManifestDataset(Dataset):
         has_clean = clean is not None
         has_layer = layer is not None
         has_vessel = vessel is not None
+        label_valid = self._load_optional(
+            row.get("label_valid_mask_path", ""), mask=True
+        )
+        if label_valid is None:
+            label_valid = (
+                np.ones_like(image, dtype=np.float32)
+                if has_layer
+                else np.zeros_like(image, dtype=np.float32)
+            )
         vessel_valid = self._load_optional(
             row.get("vessel_valid_mask_path", ""), mask=True
         )
         if vessel_valid is None:
-            vessel_valid = (
+            vessel_valid = label_valid.copy() if has_vessel and has_layer else (
                 np.ones_like(image, dtype=np.float32)
                 if has_vessel
                 else np.zeros_like(image, dtype=np.float32)
@@ -124,6 +133,7 @@ class OCTManifestDataset(Dataset):
             masks={
                 "layer_mask": layer,
                 "vessel_mask": vessel,
+                "label_valid_mask": label_valid,
                 "vessel_valid_mask": vessel_valid,
                 "valid_mask": np.ones_like(image, dtype=np.float32),
             },
@@ -140,6 +150,7 @@ class OCTManifestDataset(Dataset):
             "clean": transformed.get("clean", zeros.clone()),
             "layer_mask": transformed.get("layer_mask", zeros.clone()),
             "vessel_mask": transformed.get("vessel_mask", zeros.clone()),
+            "label_valid_mask": transformed["label_valid_mask"],
             "vessel_valid_mask": transformed["vessel_valid_mask"],
             "valid_mask": transformed["valid_mask"],
             "has_clean": torch.tensor(has_clean, dtype=torch.bool),
@@ -159,6 +170,9 @@ class OCTManifestDataset(Dataset):
             ),
             "vessel_mask_path": str(
                 self._resolve(row.get("vessel_mask_path", "")) or ""
+            ),
+            "label_valid_mask_path": str(
+                self._resolve(row.get("label_valid_mask_path", "")) or ""
             ),
             "original_height": int(original_height),
             "original_width": int(original_width),

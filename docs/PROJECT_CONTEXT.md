@@ -1,6 +1,6 @@
 # SABIDS-Net project context
 
-Last consolidated: 2026-08-27
+Last consolidated: 2026-08-28
 
 ## 1. Research objective
 
@@ -218,15 +218,34 @@ cross-protocol differences establishes a loss or interaction effect. The
 implemented next step is the three current-split controls above; Joint remains
 deferred.
 
+The current validity-audit implementation adds a versioned Stage 2 fingerprint
+(`stage2-fingerprint-v2`). It stores both raw-file and decoded-pixel label
+hashes, shapes, value counts and stable group/label identities. Protocol
+comparison now reports `matched`, `different` or `unknown`; an old history or
+metadata file without the required snapshot remains unknown and is never
+retroactively declared comparable.
+
+Offline V0 evaluation can explicitly select `denoise`, `layer` and/or `vessel`
+and restores predictions from the resize/pad canvas to source geometry before
+final metrics. It reports denoising gains and anatomical ROI/CNR measures,
+layer boundary bias/shape diagnostics, and vessel error partitions. Optional
+deployable postprocessing is isolated from training and checkpoint selection:
+P0 is the immutable raw mask, P1 retains/fills only the main layer component,
+P2 regularizes only the lower layer boundary, and P3 strictly intersects the
+raw vessel mask with the final predicted layer and vessel-valid region. It
+never applies largest-component cleanup to vessels and records removed true
+and false positives.
+
 ## 6. Immediate experiment sequence
 
 The next decision gate is a fresh fold-0 public baseline:
 
-1. Regenerate and audit manifests and binary masks.
+1. Regenerate and audit manifests and binary masks; require a V2 protocol
+   fingerprint before making a single-factor claim.
 2. Reuse Stage 1 only if its resolved configuration and target size are
    compatible.
 3. Run E0 on 2--4 training groups, then compare E1, E2 and E3 at 512x512.
-4. Continue to Joint only if one Stage 2 vessel prediction is distinct from the
+4. Run the frozen V0/P0--P3 validity report; continue to Joint only if one Stage 2 vessel prediction is distinct from the
    layer and vessel area is plausible.
 5. Retrain Joint at 512x512 with batch 1 and accumulation 2.
 6. Calibrate the vessel threshold on validation data only.

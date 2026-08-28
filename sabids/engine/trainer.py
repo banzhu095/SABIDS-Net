@@ -12,6 +12,7 @@ from typing import Dict, Optional
 import numpy as np
 import pandas as pd
 import torch
+import cv2
 from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader, Subset
 try:
@@ -53,6 +54,30 @@ def _sha256_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _inspect_label_asset(path: Path) -> Dict[str, object]:
+    raw_sha256 = _sha256_file(path)
+    buffer = np.fromfile(str(path), dtype=np.uint8)
+    decoded = cv2.imdecode(buffer, cv2.IMREAD_UNCHANGED)
+    if decoded is None:
+        raise RuntimeError(f"OpenCV failed to decode label asset: {path}")
+    decoded = np.ascontiguousarray(decoded)
+    content_digest = hashlib.sha256()
+    content_digest.update(str(decoded.dtype).encode("utf-8"))
+    content_digest.update(str(tuple(decoded.shape)).encode("utf-8"))
+    content_digest.update(decoded.tobytes())
+    values, counts = np.unique(decoded, return_counts=True)
+    return {
+        "raw_sha256": raw_sha256,
+        "decoded_sha256": content_digest.hexdigest(),
+        "shape": list(decoded.shape),
+        "dtype": str(decoded.dtype),
+        "value_counts": {
+            str(value.item() if hasattr(value, "item") else value): int(count)
+            for value, count in zip(values, counts)
+        },
+    }
 
 
 def _make_transform(config: Dict, training: bool) -> JointOCTTransform:
@@ -337,33 +362,58 @@ class Trainer:
         for column in (
             "layer_mask_path",
             "vessel_mask_path",
+            "label_valid_mask_path",
             "vessel_valid_mask_path",
             "multiclass_label_path",
         ):
             if column not in table.columns:
                 continue
-            for value in sorted({str(item) for item in table[column] if str(item)}):
+            logical_assets = (
+                table.loc[table[column].astype(str) != "", ["group_id", column]]
+                .drop_duplicates()
+                .sort_values(["group_id", column])
+            )
+            group_ordinals: Dict[str, int] = defaultdict(int)
+            for _, asset_row in logical_assets.iterrows():
+                value = str(asset_row[column])
+                group_id = str(asset_row["group_id"])
+                ordinal = group_ordinals[group_id]
+                group_ordinals[group_id] += 1
                 asset = Path(value).expanduser()
                 if not asset.is_absolute():
                     asset = (root / asset).resolve()
+                inspection = _inspect_label_asset(asset) if asset.is_file() else {}
                 label_assets.append(
                     {
+                        "asset_id": f"{group_id}|{column}|{ordinal}",
+                        "group_id": group_id,
                         "column": column,
                         "path": str(asset),
-                        "sha256": _sha256_file(asset) if asset.is_file() else None,
+                        **inspection,
                     }
                 )
-        label_payload = "\n".join(
-            f"{item['column']}|{item['path']}|{item['sha256']}"
+        raw_payload = "\n".join(
+            f"{item['asset_id']}|{item.get('raw_sha256')}"
             for item in label_assets
         ).encode("utf-8")
-        runtime["label_assets_sha256"] = hashlib.sha256(
-            label_payload
+        decoded_payload = "\n".join(
+            f"{item['asset_id']}|{item.get('decoded_sha256')}"
+            for item in label_assets
+        ).encode("utf-8")
+        runtime["hash_schema_version"] = "stage2-fingerprint-v2"
+        runtime["metadata_version"] = 2
+        runtime["label_assets_raw_sha256"] = hashlib.sha256(
+            raw_payload
         ).hexdigest()
+        runtime["label_assets_decoded_sha256"] = hashlib.sha256(
+            decoded_payload
+        ).hexdigest()
+        runtime["label_assets_sha256"] = runtime["label_assets_raw_sha256"]
         runtime["label_asset_count"] = len(label_assets)
         runtime["missing_label_assets"] = [
-            item["path"] for item in label_assets if item["sha256"] is None
+            item["path"] for item in label_assets if item.get("raw_sha256") is None
         ]
+        write_json(label_assets, self.output_dir / "label_asset_inventory.json")
         data_config = self.config.get("data", {})
         runtime["effective_groups"] = {}
         runtime["effective_rows"] = {}
@@ -408,6 +458,12 @@ class Trainer:
         evaluation = self.config.get("evaluation", {})
         metadata = {
             "git_commit": self.config.get("runtime", {}).get("git_commit"),
+            "metadata_version": self.config.get("runtime", {}).get(
+                "metadata_version"
+            ),
+            "hash_schema_version": self.config.get("runtime", {}).get(
+                "hash_schema_version"
+            ),
             "manifest_sha256": self.config.get("runtime", {}).get(
                 "manifest_sha256"
             ),
@@ -425,6 +481,15 @@ class Trainer:
             ),
             "label_assets_sha256": self.config.get("runtime", {}).get(
                 "label_assets_sha256"
+            ),
+            "label_assets_raw_sha256": self.config.get("runtime", {}).get(
+                "label_assets_raw_sha256"
+            ),
+            "label_assets_decoded_sha256": self.config.get("runtime", {}).get(
+                "label_assets_decoded_sha256"
+            ),
+            "label_asset_inventory": str(
+                (self.output_dir / "label_asset_inventory.json").resolve()
             ),
             "label_asset_count": self.config.get("runtime", {}).get(
                 "label_asset_count"

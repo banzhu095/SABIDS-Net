@@ -4,6 +4,7 @@ from typing import Dict, Tuple
 
 import numpy as np
 from scipy.ndimage import (
+    binary_fill_holes,
     binary_erosion,
     distance_transform_edt,
     label as connected_components,
@@ -169,6 +170,79 @@ def layer_boundary_mae(
     )
 
 
+def surface_dice(
+    prediction: np.ndarray,
+    target: np.ndarray,
+    tolerance: float = 3.0,
+    spacing: Tuple[float, float] = (1.0, 1.0),
+) -> float:
+    pred_surface, target_surface = _surface(prediction), _surface(target)
+    if not pred_surface.any() and not target_surface.any():
+        return 1.0
+    if not pred_surface.any() or not target_surface.any():
+        return 0.0
+    target_distance = distance_transform_edt(~target_surface, sampling=spacing)
+    pred_distance = distance_transform_edt(~pred_surface, sampling=spacing)
+    matched = float((target_distance[pred_surface] <= tolerance).sum())
+    matched += float((pred_distance[target_surface] <= tolerance).sum())
+    return matched / float(pred_surface.sum() + target_surface.sum())
+
+
+def layer_shape_metrics(
+    prediction: np.ndarray,
+    target: np.ndarray,
+    axial_spacing: float = 1.0,
+    surface_tolerance: float = 3.0,
+    spacing: Tuple[float, float] = (1.0, 1.0),
+) -> Dict[str, float]:
+    """Boundary bias and anatomical-shape diagnostics for a layer mask."""
+    pred, true = prediction.astype(bool), target.astype(bool)
+    labelled, count = connected_components(pred)
+    areas = np.bincount(labelled.ravel())[1:] if count else np.array([])
+    extra_area = float(areas.sum() - areas.max()) if areas.size else 0.0
+    holes = binary_fill_holes(pred) & ~pred
+    upper_bias, lower_bias, thickness_bias = [], [], []
+    pred_lower_series, true_lower_series = [], []
+    for column in range(pred.shape[1]):
+        pred_idx, true_idx = np.flatnonzero(pred[:, column]), np.flatnonzero(true[:, column])
+        if pred_idx.size == 0 or true_idx.size == 0:
+            continue
+        pu, pl, tu, tl = pred_idx[0], pred_idx[-1], true_idx[0], true_idx[-1]
+        upper_bias.append((pu - tu) * axial_spacing)
+        lower_bias.append((pl - tl) * axial_spacing)
+        thickness_bias.append(((pl - pu) - (tl - tu)) * axial_spacing)
+        pred_lower_series.append(pl * axial_spacing)
+        true_lower_series.append(tl * axial_spacing)
+
+    def roughness(values: list[float]) -> float:
+        return float(np.mean(np.abs(np.diff(values, n=2)))) if len(values) >= 3 else float("nan")
+
+    return {
+        "layer_surface_dice": surface_dice(pred, true, surface_tolerance, spacing),
+        "upper_boundary_signed_bias": float(np.mean(upper_bias)) if upper_bias else float("nan"),
+        "lower_boundary_signed_bias": float(np.mean(lower_bias)) if lower_bias else float("nan"),
+        "thickness_signed_bias": float(np.mean(thickness_bias)) if thickness_bias else float("nan"),
+        "layer_component_count": float(count),
+        "layer_extra_component_area_ratio": extra_area / max(float(pred.sum()), 1.0),
+        "layer_hole_pixels": float(holes.sum()),
+        "layer_hole_area_ratio": float(holes.sum()) / max(float(pred.sum() + holes.sum()), 1.0),
+        "lower_boundary_roughness_pred": roughness(pred_lower_series),
+        "lower_boundary_roughness_true": roughness(true_lower_series),
+        "layer_valid_column_fraction": float(len(upper_bias)) / max(float(pred.shape[1]), 1.0),
+    }
+
+
+def region_cnr(image: np.ndarray, first_roi: np.ndarray, second_roi: np.ndarray) -> float:
+    first = image[first_roi.astype(bool)].astype(np.float64)
+    second = image[second_roi.astype(bool)].astype(np.float64)
+    if first.size < 2 or second.size < 2:
+        return float("nan")
+    denominator = np.sqrt(first.var() + second.var())
+    if denominator <= 1e-12:
+        return float("nan")
+    return float(abs(first.mean() - second.mean()) / denominator)
+
+
 def vessel_area_fraction(mask: np.ndarray, layer: np.ndarray) -> float:
     denominator = float((layer > 0).sum())
     if denominator <= 0:
@@ -324,6 +398,13 @@ def vessel_diagnostic_metrics(
                 float(np.logical_and(vessel_prediction, component_mask).sum())
                 / max(pixels, 1.0)
             )
+            detected = sum(
+                bool(np.logical_and(vessel_prediction, labelled == component_id).any())
+                for component_id in component_ids
+            )
+            result[f"vessel_gt_component_{name}_detection_recall"] = (
+                float(detected) / max(float(len(component_ids)), 1.0)
+            )
 
     target_surface = _surface(vessel_target & valid)
     if target_surface.any() and boundary_band_width > 0:
@@ -337,6 +418,12 @@ def vessel_diagnostic_metrics(
                     vessel_target[boundary_band],
                 ).items()
             }
+        )
+        result["vessel_boundary_band_fp_pixels"] = float(
+            (vessel_prediction & ~vessel_target & boundary_band).sum()
+        )
+        result["vessel_boundary_band_fn_pixels"] = float(
+            (~vessel_prediction & vessel_target & boundary_band).sum()
         )
     overlap = float(
         np.logical_and(vessel_prediction, layer_prediction & valid).sum()

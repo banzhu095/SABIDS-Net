@@ -114,6 +114,9 @@ class SABIDSLoss(nn.Module):
         vessel_outside = _zero(output)
         vessel_outside_valid_images = 0
         spatial_valid = batch["valid_mask"].float()
+        layer_annotation_valid = batch.get(
+            "label_valid_mask", spatial_valid
+        ).float() * spatial_valid
         vessel_annotation_valid = batch.get("vessel_valid_mask", spatial_valid).float()
         vessel_annotation_valid = vessel_annotation_valid * spatial_valid
         if bool(layer_valid.any()):
@@ -121,7 +124,7 @@ class SABIDSLoss(nn.Module):
                 output["layer_logits"][layer_valid],
                 batch["layer_mask"][layer_valid],
                 output["boundary_logits"][layer_valid],
-                spatial_valid[layer_valid],
+                layer_annotation_valid[layer_valid],
             )
         if bool(vessel_valid.any()):
             if self.vessel_supervision_mode in {
@@ -195,7 +198,7 @@ class SABIDSLoss(nn.Module):
                         auxiliary["layer_logit"][layer_valid],
                         target,
                         valid_mask=F.interpolate(
-                            spatial_valid[layer_valid],
+                            layer_annotation_valid[layer_valid],
                             size=auxiliary["layer_logit"].shape[-2:],
                             mode="nearest",
                         ),

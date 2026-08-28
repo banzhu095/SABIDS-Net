@@ -491,6 +491,7 @@ def _archive_run_outputs(output_dir: Path) -> None:
         output_dir / "parameter_audit.json",
         output_dir / "run_metadata.json",
         output_dir / "stage1_isolation_audit.json",
+        output_dir / "label_asset_inventory.json",
     ]
     existing = [path for path in candidates if path.exists()]
     if not existing:

@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Dict, Optional
 
+import cv2
 import numpy as np
 import pandas as pd
 import torch
@@ -14,14 +15,17 @@ from ..metrics import (
     binary_metrics,
     edge_preservation_index,
     layer_boundary_mae,
+    layer_shape_metrics,
     psnr,
     reconstruction_snr,
+    region_cnr,
     rmse,
     ssim,
     surface_distances,
     vessel_area_fraction,
     vessel_diagnostic_metrics,
 )
+from ..postprocessing import clean_layer_mask, hard_contain_vessel, regularize_lower_boundary
 from ..utils import mean_dict, write_json
 
 
@@ -41,12 +45,26 @@ def evaluate_model(
     input_normalization: Optional[str] = None,
     component_size_thresholds: Optional[tuple[int, int]] = None,
     boundary_band_width: float = 3.0,
+    tasks: Optional[tuple[str, ...]] = None,
+    postprocess_modes: tuple[str, ...] = ("p0",),
+    restore_original_geometry: bool = False,
+    layer_surface_tolerance: float = 3.0,
+    p1_minimum_main_fraction: float = 0.5,
+    p2_smoothness: float = 2.0,
+    p2_max_displacement: int = 8,
 ) -> Dict[str, object]:
     model.eval()
     layer_threshold = threshold if layer_threshold is None else layer_threshold
     vessel_threshold = threshold if vessel_threshold is None else vessel_threshold
-    evaluate_denoising = stage not in {"segment", "private_seg"}
-    evaluate_segmentation = stage != "denoise"
+    requested = set(tasks) if tasks is not None else None
+    evaluate_denoising = "denoise" in requested if requested is not None else stage not in {"segment", "private_seg"}
+    evaluate_layer = "layer" in requested if requested is not None else stage != "denoise"
+    evaluate_vessel = "vessel" in requested if requested is not None else stage != "denoise"
+    evaluate_segmentation = evaluate_layer or evaluate_vessel
+    modes = tuple(dict.fromkeys(mode.lower() for mode in postprocess_modes))
+    invalid_modes = set(modes) - {"p0", "p1", "p2", "p3"}
+    if invalid_modes:
+        raise ValueError(f"Unknown postprocess modes: {sorted(invalid_modes)}")
     rows = []
     output_path = Path(output_dir) if output_dir else None
     if output_path:
@@ -77,6 +95,10 @@ def evaluate_model(
                 "clean_path": batch["clean_path"][index],
                 "layer_mask_path": batch["layer_mask_path"][index],
                 "vessel_mask_path": batch["vessel_mask_path"][index],
+                "label_valid_mask_path": (
+                    batch["label_valid_mask_path"][index]
+                    if "label_valid_mask_path" in batch else ""
+                ),
                 "original_height": int(batch["original_height"][index]),
                 "original_width": int(batch["original_width"][index]),
                 "model_input_height": int(image.shape[-2]),
@@ -93,8 +115,32 @@ def evaluate_model(
             else:
                 y0, x0, y1, x1 = 0, 0, valid.shape[0], valid.shape[1]
             crop = np.s_[y0:y1, x0:x1]
-            layer_pred = layer_probability[index, 0][crop] >= layer_threshold
-            vessel_pred = vessel_probability[index, 0][crop] >= vessel_threshold
+            layer_prob_eval = layer_probability[index, 0][crop]
+            vessel_prob_eval = vessel_probability[index, 0][crop]
+            noisy_eval = batch["image"][index, 0].numpy()[crop]
+            denoised_eval = denoised[index, 0][crop]
+            valid_eval = valid[crop]
+            original_size = (row["original_width"], row["original_height"])
+
+            def restored(array: np.ndarray, is_mask: bool = False) -> np.ndarray:
+                if not restore_original_geometry or array.shape == original_size[::-1]:
+                    return array
+                interpolation = cv2.INTER_NEAREST if is_mask else cv2.INTER_LINEAR
+                resized = cv2.resize(array.astype(np.float32), original_size, interpolation=interpolation)
+                return resized > 0.5 if is_mask else resized
+
+            layer_prob_eval = restored(layer_prob_eval)
+            vessel_prob_eval = restored(vessel_prob_eval)
+            noisy_eval = restored(noisy_eval)
+            denoised_eval = restored(denoised_eval)
+            valid_eval = restored(valid_eval, True)
+            layer_valid_eval = (
+                restored(batch["label_valid_mask"][index, 0].numpy()[crop], True)
+                if "label_valid_mask" in batch else valid_eval.copy()
+            ) & valid_eval
+            layer_pred = (layer_prob_eval >= layer_threshold) & valid_eval
+            vessel_pred = (vessel_prob_eval >= vessel_threshold) & valid_eval
+            row["evaluation_height"], row["evaluation_width"] = layer_pred.shape
             vessel_tp = None
             vessel_fp = None
             vessel_fn = None
@@ -115,11 +161,10 @@ def evaluate_model(
                     predicted_vessel_pixels - intersection
                 ) / max(predicted_vessel_pixels, 1.0)
             if evaluate_denoising and bool(batch["has_clean"][index]):
-                target = batch["clean"][index, 0].numpy()[crop]
-                denoised_crop = denoised[index, 0][crop]
-                noisy_crop = batch["image"][index, 0].numpy()[crop]
-                row["psnr"] = psnr(denoised_crop, target)
-                row["psnr_noisy"] = psnr(noisy_crop, target)
+                target = restored(batch["clean"][index, 0].numpy()[crop])
+                denoised_crop, noisy_crop = denoised_eval, noisy_eval
+                row["psnr"] = psnr(denoised_crop[valid_eval], target[valid_eval])
+                row["psnr_noisy"] = psnr(noisy_crop[valid_eval], target[valid_eval])
                 row["psnr_gain_db"] = row["psnr"] - row["psnr_noisy"]
                 row["ssim"] = ssim(denoised_crop, target)
                 row["ssim_noisy"] = ssim(noisy_crop, target)
@@ -128,6 +173,8 @@ def evaluate_model(
                 row["rmse_noisy"] = rmse(noisy_crop, target)
                 row["rmse_reduction"] = row["rmse_noisy"] - row["rmse"]
                 row["epi"] = edge_preservation_index(denoised_crop, target)
+                row["epi_noisy"] = edge_preservation_index(noisy_crop, target)
+                row["epi_gain"] = row["epi"] - row["epi_noisy"]
                 row["snr_noisy_db"] = reconstruction_snr(noisy_crop, target)
                 row["snr_denoised_db"] = reconstruction_snr(denoised_crop, target)
                 row["snr_gain_db"] = row["snr_denoised_db"] - row["snr_noisy_db"]
@@ -137,40 +184,47 @@ def evaluate_model(
                 row["cnr_error_auto"] = abs(
                     row["cnr_denoised_auto"] - row["cnr_clean_auto"]
                 )
-            if evaluate_segmentation and bool(batch["has_layer"][index]):
-                layer_true = batch["layer_mask"][index, 0].numpy()[crop] > 0.5
-                for key, value in binary_metrics(layer_pred, layer_true).items():
-                    row[f"layer_{key}"] = value
-                hd95, assd = surface_distances(
-                    layer_pred, layer_true, (axial_spacing, lateral_spacing)
-                )
-                upper, lower, thickness = layer_boundary_mae(
-                    layer_pred, layer_true, axial_spacing
-                )
-                row.update(
-                    {
-                        "layer_hd95": hd95,
-                        "layer_assd": assd,
-                        "upper_boundary_mae": upper,
-                        "lower_boundary_mae": lower,
-                        "thickness_mae": thickness,
-                    }
-                )
+            if (evaluate_segmentation or evaluate_denoising) and bool(batch["has_layer"][index]):
+                layer_true = restored(batch["layer_mask"][index, 0].numpy()[crop], True) & layer_valid_eval
+                if evaluate_denoising and bool(batch["has_clean"][index]):
+                    roi = layer_true & valid_eval
+                    if roi.any():
+                        row["layer_roi_mse"] = float(np.mean((denoised_eval[roi] - target[roi]) ** 2))
+                        row["layer_roi_mse_noisy"] = float(np.mean((noisy_eval[roi] - target[roi]) ** 2))
+                        row["layer_roi_psnr"] = psnr(denoised_eval[roi], target[roi])
+                        row["layer_roi_psnr_noisy"] = psnr(noisy_eval[roi], target[roi])
+                if evaluate_layer:
+                    layer_pred_metric = layer_pred & layer_valid_eval
+                    for key, value in binary_metrics(layer_pred[layer_valid_eval], layer_true[layer_valid_eval]).items():
+                        row[f"layer_{key}"] = value
+                    hd95, assd = surface_distances(layer_pred_metric, layer_true, (axial_spacing, lateral_spacing))
+                    upper, lower, thickness = layer_boundary_mae(layer_pred_metric, layer_true, axial_spacing)
+                    row.update({"layer_hd95": hd95, "layer_assd": assd,
+                                "upper_boundary_mae": upper, "lower_boundary_mae": lower,
+                                "thickness_mae": thickness})
+                    row.update(layer_shape_metrics(
+                        layer_pred_metric, layer_true, axial_spacing, layer_surface_tolerance,
+                        (axial_spacing, lateral_spacing),
+                    ))
             else:
                 layer_true = layer_pred
-            if evaluate_segmentation and bool(batch["has_vessel"][index]):
-                vessel_true = batch["vessel_mask"][index, 0].numpy()[crop] > 0.5
-                vessel_valid = (
-                    batch["vessel_valid_mask"][index, 0].numpy()[crop] > 0.5
-                )
+            if bool(batch["has_vessel"][index]):
+                vessel_true = restored(batch["vessel_mask"][index, 0].numpy()[crop], True)
+                vessel_valid = restored(batch["vessel_valid_mask"][index, 0].numpy()[crop], True) & valid_eval
+                if evaluate_denoising and bool(batch["has_clean"][index]) and bool(batch["has_layer"][index]):
+                    stroma = layer_true & ~vessel_true & vessel_valid
+                    vessel_roi = vessel_true & vessel_valid
+                    for name, image_eval in (("noisy", noisy_eval), ("denoised", denoised_eval), ("clean", target)):
+                        row[f"vessel_stroma_cnr_{name}"] = region_cnr(image_eval, vessel_roi, stroma)
+            if evaluate_vessel and bool(batch["has_vessel"][index]):
                 vessel_tp = vessel_pred & vessel_true & vessel_valid
                 vessel_fp = vessel_pred & ~vessel_true & vessel_valid
                 vessel_fn = ~vessel_pred & vessel_true & vessel_valid
                 if bool(batch["has_layer"][index]):
                     row.update(
                         vessel_diagnostic_metrics(
-                            vessel_probability[index, 0][crop],
-                            layer_probability[index, 0][crop],
+                            vessel_prob_eval,
+                            layer_prob_eval,
                             vessel_true,
                             layer_true,
                             vessel_valid,
@@ -191,8 +245,8 @@ def evaluate_model(
                     )
                     vessel_oracle_gt_layer = vessel_pred & layer_true
                     vessel_pred_layer_soft_gate = (
-                        vessel_probability[index, 0][crop]
-                        * layer_probability[index, 0][crop]
+                        vessel_prob_eval
+                        * layer_prob_eval
                         >= vessel_threshold
                     )
                     gt_roi = layer_true & vessel_valid
@@ -217,6 +271,40 @@ def evaluate_model(
                 row["vessel_area_fraction_pred"] = predicted_fraction
                 row["vessel_area_fraction_true"] = true_fraction
                 row["vessel_area_fraction_mae"] = abs(predicted_fraction - true_fraction)
+
+            # P0 is always the immutable raw threshold result. P1/P2 affect only
+            # the layer; P3 strictly clips the raw vessel prediction to P2/P1.
+            layer_p1, p1_stats = clean_layer_mask(
+                layer_pred, layer_valid_eval, p1_minimum_main_fraction
+            )
+            layer_p2, p2_stats = regularize_lower_boundary(
+                layer_p1, layer_valid_eval, p2_smoothness, p2_max_displacement
+            )
+            row.update({key: value for key, value in p1_stats.items() if "p1" in modes})
+            row.update({key: value for key, value in p2_stats.items() if "p2" in modes})
+            if evaluate_layer and bool(batch["has_layer"][index]):
+                for mode, prediction in (("p0", layer_pred), ("p1", layer_p1), ("p2", layer_p2)):
+                    if mode not in modes:
+                        continue
+                    for key, value in binary_metrics(prediction[layer_valid_eval], layer_true[layer_valid_eval]).items():
+                        row[f"{mode}_layer_{key}"] = value
+                    upper, lower, thickness = layer_boundary_mae(prediction, layer_true, axial_spacing)
+                    row[f"{mode}_upper_boundary_mae"] = upper
+                    row[f"{mode}_lower_boundary_mae"] = lower
+                    row[f"{mode}_thickness_mae"] = thickness
+            vessel_p3 = None
+            if evaluate_vessel and bool(batch["has_vessel"][index]):
+                final_layer = layer_p2
+                vessel_p3, p3_stats = hard_contain_vessel(
+                    vessel_pred, final_layer, vessel_valid, vessel_true
+                )
+                if "p0" in modes:
+                    for key, value in binary_metrics(vessel_pred[vessel_valid], vessel_true[vessel_valid]).items():
+                        row[f"p0_vessel_{key}"] = value
+                if "p3" in modes:
+                    row.update(p3_stats)
+                    for key, value in binary_metrics(vessel_p3[vessel_valid], vessel_true[vessel_valid]).items():
+                        row[f"p3_vessel_{key}"] = value
             rows.append(row)
 
             if output_path and save_predictions:
@@ -224,20 +312,20 @@ def evaluate_model(
                 sample_id = str(batch["sample_id"][index])
                 write_gray(
                     sample_dir / f"{sample_id}_noisy.png",
-                    batch["image"][index, 0].numpy()[crop],
+                    noisy_eval,
                 )
                 write_gray(
                     sample_dir / f"{sample_id}_denoised.png",
-                    denoised[index, 0][crop],
+                    denoised_eval,
                 )
                 if evaluate_segmentation:
                     write_gray(
                         sample_dir / f"{sample_id}_layer_prob.png",
-                        layer_probability[index, 0][crop],
+                        layer_prob_eval,
                     )
                     write_gray(
                         sample_dir / f"{sample_id}_vessel_prob.png",
-                        vessel_probability[index, 0][crop],
+                        vessel_prob_eval,
                     )
                     write_gray(
                         sample_dir / f"{sample_id}_layer_mask.png",
@@ -247,6 +335,12 @@ def evaluate_model(
                         sample_dir / f"{sample_id}_vessel_mask.png",
                         vessel_pred.astype(np.float32),
                     )
+                    if "p1" in modes:
+                        write_gray(sample_dir / f"{sample_id}_p1_layer_mask.png", layer_p1.astype(np.float32))
+                    if "p2" in modes:
+                        write_gray(sample_dir / f"{sample_id}_p2_layer_mask.png", layer_p2.astype(np.float32))
+                    if "p3" in modes and vessel_p3 is not None:
+                        write_gray(sample_dir / f"{sample_id}_p3_vessel_mask.png", vessel_p3.astype(np.float32))
                     if bool(batch["has_layer"][index]):
                         write_gray(
                             sample_dir / f"{sample_id}_layer_gt.png",
@@ -277,7 +371,7 @@ def evaluate_model(
                                 diagnostic.astype(np.float32),
                             )
                     if error_outside_both is not None:
-                        base = batch["image"][index, 0].numpy()[crop]
+                        base = noisy_eval
                         overlay = np.repeat(base[..., None], 3, axis=2)
                         # Red: vessel outside both anatomical masks. Orange:
                         # vessel outside GT but admitted by predicted layer.
@@ -318,11 +412,15 @@ def evaluate_model(
         else None
     )
     summary["boundary_band_width_pixels"] = float(boundary_band_width)
+    summary["postprocess_modes"] = list(modes)
+    summary["restored_original_geometry"] = bool(restore_original_geometry)
+    summary["layer_surface_tolerance"] = float(layer_surface_tolerance)
     summary["evaluated_tasks"] = [
         name
         for name, enabled in (
             ("denoise", evaluate_denoising),
-            ("segment", evaluate_segmentation),
+            ("layer", evaluate_layer),
+            ("vessel", evaluate_vessel),
         )
         if enabled
     ]

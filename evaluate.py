@@ -37,6 +37,19 @@ def parse_args() -> argparse.Namespace:
         help="Training-defined GT component-area thresholds in model pixels.",
     )
     parser.add_argument("--boundary-band-width", type=float, default=None)
+    parser.add_argument(
+        "--tasks", nargs="+", choices=("denoise", "layer", "vessel"), default=None,
+        help="Explicit V0 task selection; otherwise use the stage-aware default.",
+    )
+    parser.add_argument(
+        "--postprocess-modes", nargs="+", choices=("p0", "p1", "p2", "p3"),
+        default=("p0",), help="Evaluate immutable raw P0 and selected anatomical postprocessing modes.",
+    )
+    parser.add_argument("--no-restore-original-geometry", action="store_true")
+    parser.add_argument("--layer-surface-tolerance", type=float, default=None)
+    parser.add_argument("--p1-minimum-main-fraction", type=float, default=0.5)
+    parser.add_argument("--p2-smoothness", type=float, default=2.0)
+    parser.add_argument("--p2-max-displacement", type=int, default=8)
     return parser.parse_args()
 
 
@@ -106,6 +119,16 @@ def main() -> None:
             if args.boundary_band_width is not None
             else float(evaluation.get("boundary_band_width", 3.0))
         ),
+        tasks=tuple(args.tasks) if args.tasks is not None else None,
+        postprocess_modes=tuple(args.postprocess_modes),
+        restore_original_geometry=not args.no_restore_original_geometry,
+        layer_surface_tolerance=(
+            args.layer_surface_tolerance if args.layer_surface_tolerance is not None
+            else float(evaluation.get("layer_surface_tolerance", 3.0))
+        ),
+        p1_minimum_main_fraction=args.p1_minimum_main_fraction,
+        p2_smoothness=args.p2_smoothness,
+        p2_max_displacement=args.p2_max_displacement,
     )
     print(summary)
 

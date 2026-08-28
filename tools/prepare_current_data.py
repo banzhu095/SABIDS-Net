@@ -27,6 +27,8 @@ MANIFEST_COLUMNS = [
     "clean_path",
     "layer_mask_path",
     "vessel_mask_path",
+    "label_valid_mask_path",
+    "vessel_valid_mask_path",
     "multiclass_label_path",
     "has_manual_label",
     "is_clean",
@@ -94,6 +96,8 @@ def make_row(
         "clean_path": relative(clean_path, root),
         "layer_mask_path": "",
         "vessel_mask_path": "",
+        "label_valid_mask_path": "",
+        "vessel_valid_mask_path": "",
         "multiclass_label_path": "",
         "has_manual_label": 0,
         "is_clean": 0,
@@ -194,8 +198,10 @@ def split_multiclass_labels(
     reference_dir = root / "Label" / "voc_jpg"
     layer_dir = root / "Label" / "layer_binary"
     vessel_dir = root / "Label" / "vessel_binary"
+    valid_dir = root / "Label" / "label_valid_binary"
     layer_dir.mkdir(parents=True, exist_ok=True)
     vessel_dir.mkdir(parents=True, exist_ok=True)
+    valid_dir.mkdir(parents=True, exist_ok=True)
     labels: Dict[str, Dict[str, str]] = {}
     value_report: Dict[str, List[int]] = {}
     area_report: Dict[str, Dict[str, float]] = {}
@@ -224,6 +230,7 @@ def split_multiclass_labels(
             )
         layer_mask = np.logical_or(label == layer_class, label == vessel_class)
         vessel_mask = label == vessel_class
+        label_valid_mask = np.isin(label, [0, layer_class, vessel_class])
         layer_pixels = int(layer_mask.sum())
         vessel_pixels = int(vessel_mask.sum())
         area_report[position_id] = {
@@ -235,10 +242,13 @@ def split_multiclass_labels(
         }
         layer_path = layer_dir / f"{position_id}.png"
         vessel_path = vessel_dir / f"{position_id}.png"
+        valid_path = valid_dir / f"{position_id}.png"
         if overwrite or not layer_path.exists():
             Image.fromarray((layer_mask * 255).astype(np.uint8), mode="L").save(layer_path)
         if overwrite or not vessel_path.exists():
             Image.fromarray((vessel_mask * 255).astype(np.uint8), mode="L").save(vessel_path)
+        if overwrite or not valid_path.exists():
+            Image.fromarray((label_valid_mask * 255).astype(np.uint8), mode="L").save(valid_path)
 
         reference_path = reference_dir / f"{position_id}.jpg"
         if not reference_path.exists():
@@ -246,6 +256,8 @@ def split_multiclass_labels(
         labels[position_id] = {
             "layer_mask_path": relative(layer_path, root),
             "vessel_mask_path": relative(vessel_path, root),
+            "label_valid_mask_path": relative(valid_path, root),
+            "vessel_valid_mask_path": relative(valid_path, root),
             "multiclass_label_path": relative(label_path, root),
         }
     report = {
@@ -503,6 +515,10 @@ def main() -> None:
             "ignore": args.ignore_class,
             "layer_binary_rule": f"class in {{{args.layer_class}, {args.vessel_class}}}",
             "vessel_binary_rule": f"class == {args.vessel_class}",
+            "label_valid_rule": (
+                f"class in {{0, {args.layer_class}, {args.vessel_class}}}; "
+                f"class {args.ignore_class} and allowed unknown classes are invalid"
+            ),
         },
         "label_report": label_report,
         "frames_per_pku_position": frames_per_position,

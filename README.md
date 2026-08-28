@@ -433,7 +433,10 @@ python run_current_pipeline.py --project-root /mnt/SABIDS-Net --fold 0 \
   --device cuda --skip-test --force
 ```
 
-正式比较前运行协议审计；只有`comparable=True`才允许作单因素归因：
+正式比较前运行协议审计。审计同时比较manifest/split/初始化、原始标签文件、
+解码后的标签像素和完整训练配置，状态为`matched`、`different`或`unknown`。
+旧run缺少V2快照时必须保持`unknown`，不能事后补写指纹；只有
+`causal_comparison_status=matched`才允许作已声明的单因素归因：
 
 ```bash
 python tools/compare_stage2_protocols.py \
@@ -443,8 +446,14 @@ python tools/compare_stage2_protocols.py \
     E3b_no_D2S=runs/current/stage2_segment_roi_outside_no_d2s_fold0 \
     E1_current=runs/current/stage2_segment_safe_current_fold0 \
   --reference E3b \
+  --allowed-differences E3_current=loss.weights.vessel_outside \
+  --allowed-differences E3b_no_D2S=model.enable_denoise_to_seg,model.stage2_train_denoise_to_seg,train.monitor_d2s_sensitivity \
   --output runs/current/stage2_protocol_comparison_fold0
 ```
+
+每个新run保存`label_asset_inventory.json`，逐个记录稳定group/标签类型、文件
+SHA256、解码像素SHA256、shape和value counts；审计同时输出逐文件差异，能区分
+仅序列化不同与实际像素不同。
 
 原始输出与预测层软门控必须分别在validation上校准一个全局阈值。使用
 `--prediction-mode raw`或`soft_gate`，禁止按group或test调阈值。连通域
@@ -582,13 +591,34 @@ python evaluate.py \
 - `summary.json`：以独立group为单位的总体结果；
 - `predictions/`：降噪图、概率图和二值掩膜。
 
-评估器按阶段输出任务指标：Stage 1只报告降噪，Stage 2/私有分割只报告分割，Joint同时报告两类指标。未训练的随机分割头不再出现在Stage 1结果中。
+评估器默认按阶段输出任务指标，也可用`--tasks denoise layer vessel`显式运行
+V0有效性报告。独立`evaluate.py`默认在去除pad后把概率图线性恢复到原图几何，
+mask/valid区域使用最近邻恢复，再计算指标与保存最终结果；训练期checkpoint监控
+仍使用模型坐标，不改变既有选择口径。
 
 已实现指标包括：
 
-- 降噪：PSNR、SSIM、RMSE、EPI、SNR、CNR，以及noisy基线和改善量；
-- 层分割：Dice、IoU、Precision、Recall、HD95、ASSD、上下边界MAE、厚度MAE；
-- 血管分割：Dice、IoU、Precision、Recall、HD95、ASSD、血管面积比例误差。
+- 降噪：PSNR、SSIM、RMSE、EPI、SNR及noisy改善量，GT层ROI MSE/PSNR，
+  有血管标签时的血管-基质CNR；
+- 层分割：Dice、IoU、HD95、ASSD、surface Dice、上下边界/厚度MAE与有符号
+  bias、额外连通域、孔洞和下边界粗糙度；
+- 血管分割：全图/GT层ROI指标、预测层与GT层外错误分区、训练定义的尺度召回、
+  边界带FP/FN和血管面积比例误差。
+
+固定checkpoint、帧和阈值比较P0--P3：
+
+```bash
+python evaluate.py \
+  --config runs/current/stage2_segment_roi_outside_fold0/resolved_config.yaml \
+  --checkpoint runs/current/stage2_segment_roi_outside_fold0/best.pth \
+  --split val --tasks denoise layer vessel \
+  --postprocess-modes p0 p1 p2 p3 --save-predictions \
+  --output runs/current/stage2_segment_roi_outside_fold0/validity_v0
+```
+
+P0永远是未覆盖的原始阈值mask；P1只对层保留主连通域并填封闭孔洞；P2仅平滑
+层下边界且限制位移；P3执行`raw_vessel & final_pred_layer & vessel_valid`并记录
+移除TP/FP。血管不会做最大连通域清理，也不会反向OR进层mask。
 
 训练期验证日志额外记录`val_pred_layer_vessel_dice`。该值接近1，同时
 `val_vessel_area_fraction_pred`明显高于真值且Precision低于Recall，是

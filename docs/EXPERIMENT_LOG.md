@@ -374,3 +374,39 @@ Populate one row per independent fold after validation threshold selection.
 - Local verification: all three new variants completed one real-manifest CPU
   smoke epoch. Their new metadata fingerprints were protocol-compatible with
   each other. Formal current 13/3/4 cloud runs remain pending.
+
+### CODE-20260828-VALIDITY-AUDIT-AND-ANATOMICAL-POSTPROCESS
+
+- Status: implementation and focused local verification completed; no new
+  training or performance result is claimed.
+- Protocol audit: new runs use `stage2-fingerprint-v2`, with ordered per-label
+  raw-file and decoded-pixel SHA256, decoded shape/dtype/value counts, metadata
+  version and inventory. Comparisons expose both values and distinguish
+  `matched`, `different` and `unknown`; incomplete historical artifacts remain
+  unknown and are not backfilled.
+- Causal audit: resolved training configs are flattened and compared against
+  explicit `--allowed-differences`; unlisted changes or declared-but-absent
+  changes fail the single-factor check. Per-file output distinguishes binary
+  serialization changes from decoded-pixel changes.
+- V0 evaluation: explicit task selection supports denoise/layer/vessel in one
+  frozen-checkpoint report. Independent evaluation restores the cropped canvas
+  to source geometry before final metrics and exports metric coverage.
+- Denoising diagnostics: noisy/denoised gain for PSNR, SSIM, RMSE, EPI and SNR;
+  GT-layer ROI MSE/PSNR; vessel-versus-stroma CNR where both labels exist.
+- Layer diagnostics: surface Dice, signed boundary/thickness bias, component and
+  hole area, lower-boundary roughness and valid-column coverage in addition to
+  Dice/IoU/HD95/ASSD/MAE.
+- P0--P3: P0 is immutable raw output; P1 cleans only the layer main component
+  and enclosed holes; P2 applies bounded quadratic smoothing only to the lower
+  boundary; P3 strictly clips raw vessel by final predicted layer and
+  vessel-valid pixels, recording removed TP/FP and empty outcomes. Vessel
+  connected components are never pruned.
+- Ignore semantics: public preparation now exports a shared label-valid mask;
+  class 255 and allowed unknown classes are excluded from both layer and vessel
+  supervision/evaluation instead of becoming background negatives.
+- Verification: `python -m compileall -q .` and 24 direct tests passed (14
+  existing plus 10 protocol/anatomical tests). A real-manifest one-epoch CPU
+  E3b smoke run passed with the backward-compatible old manifest and emitted a
+  V2 inventory; its self-audit returned identity/protocol/causal=`matched`.
+  The local Python environment does not contain pytest, so the required
+  complete `pytest -q` run remains for the cloud/CI environment.

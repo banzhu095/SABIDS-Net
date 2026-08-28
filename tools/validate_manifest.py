@@ -7,7 +7,10 @@ from pathlib import Path
 import pandas as pd
 
 
-PATH_COLUMNS = ["image_path", "clean_path", "layer_mask_path", "vessel_mask_path"]
+PATH_COLUMNS = [
+    "image_path", "clean_path", "layer_mask_path", "vessel_mask_path",
+    "label_valid_mask_path", "vessel_valid_mask_path", "multiclass_label_path",
+]
 
 
 def parse_args() -> argparse.Namespace:
