@@ -22,6 +22,12 @@ const sheets = [
   ["Evidence", "evidence_table.csv"],
   ["Missing", "missing_table.csv"],
 ];
+try {
+  await fs.access(path.join(inputDir, "test_results_index.csv"));
+  sheets.push(["Test_Index", "test_results_index.csv"]);
+} catch {
+  // Validation-only exports intentionally have no test index.
+}
 
 const workbook = Workbook.create();
 for (const [sheetName, csvName] of sheets) {

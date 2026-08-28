@@ -40,7 +40,12 @@ def parse_args() -> argparse.Namespace:
         "--legacy-history", action="append", default=[], metavar="ALIAS=CSV",
         help="Optional historical training CSV; kept separate from current protocol.",
     )
-    parser.add_argument("--strict-val-only", action="store_true", default=True)
+    scope = parser.add_mutually_exclusive_group()
+    scope.add_argument("--strict-val-only", action="store_true")
+    scope.add_argument(
+        "--include-test-results", action="store_true",
+        help="Archive existing test result files without using them for selection, calibration, or comparisons.",
+    )
     parser.add_argument("--records-only", action="store_true", default=True)
     return parser.parse_args()
 
@@ -58,12 +63,13 @@ def sha256_file(path: Path) -> str:
 
 
 class SafeArchive:
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, allow_test_results: bool = False):
         self.path = path
+        self.allow_test_results = allow_test_results
         self.tar = tarfile.open(path, "r:gz")
         self.names = set(self.tar.getnames())
         forbidden = [name for name in self.names if self._is_test_result(name)]
-        if forbidden:
+        if forbidden and not allow_test_results:
             self.tar.close()
             raise RuntimeError(f"Archive contains forbidden test result members: {forbidden[:5]}")
 
@@ -73,7 +79,7 @@ class SafeArchive:
         return any(part in {"test", "tests", "test_results", "predictions_test"} for part in parts)
 
     def read(self, name: str) -> bytes:
-        if self._is_test_result(name):
+        if self._is_test_result(name) and not self.allow_test_results:
             raise RuntimeError(f"Refusing test member: {name}")
         member = self.tar.getmember(name)
         if not member.isfile():
@@ -94,6 +100,40 @@ class SafeArchive:
 
     def close(self) -> None:
         self.tar.close()
+
+
+def export_test_results(archive: SafeArchive, output: Path) -> pd.DataFrame:
+    """Copy existing test artifacts verbatim and index them; never aggregate or rank test metrics."""
+    rows: list[Dict[str, Any]] = []
+    destination_root = output / "test_results" / "source_members"
+    excluded_suffixes = {".pth", ".pt", ".ckpt"}
+    for name in sorted(archive.names):
+        if not archive._is_test_result(name):
+            continue
+        member = archive.tar.getmember(name)
+        if not member.isfile() or PurePosixPath(name).suffix.lower() in excluded_suffixes:
+            continue
+        relative = PurePosixPath(name)
+        if relative.is_absolute() or ".." in relative.parts:
+            raise ValueError(f"Unsafe test result member: {name}")
+        payload = archive.read(name)
+        destination = destination_root.joinpath(*relative.parts)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(payload)
+        rows.append({
+            "scope": "test_archival_only",
+            "source_member": name,
+            "exported_path": destination.relative_to(output).as_posix(),
+            "bytes": len(payload),
+            "sha256": sha256_bytes(payload),
+            "selection_or_calibration_use": "forbidden",
+        })
+    table = pd.DataFrame(rows, columns=[
+        "scope", "source_member", "exported_path", "bytes", "sha256",
+        "selection_or_calibration_use",
+    ])
+    table.to_csv(output / "test_results_index.csv", index=False, encoding="utf-8-sig")
+    return table
 
 
 def archive_member(run_dir: str, filename: str) -> str:
@@ -730,7 +770,7 @@ def main() -> None:
     output.mkdir(parents=True, exist_ok=True)
     figures = output / "figures"
     figures.mkdir(exist_ok=True)
-    archive = SafeArchive(source)
+    archive = SafeArchive(source, allow_test_results=args.include_test_results)
     registry, training, histories = extract_current(archive)
     legacy_registry, legacy_training, legacy_histories = extract_legacy(parse_legacy(args.legacy_history))
     registry.extend(legacy_registry)
@@ -750,14 +790,23 @@ def main() -> None:
     plot_training(histories, registry, figures)
     plot_v0(group, post, thresholds, figures)
     qualitative = extract_images_and_gallery(archive, frame, output)
+    test_index = export_test_results(archive, output) if args.include_test_results else pd.DataFrame()
     write_narrative(output, registry_table, training_table, group, thresholds)
+    if args.include_test_results:
+        with (output / "README.md").open("a", encoding="utf-8") as handle:
+            handle.write(
+                f"\n## Test结果归档\n\n已原样归档 {len(test_index)} 个test结果文件。"
+                "这些文件未进入checkpoint选择、阈值校准、模型排名或当前证据结论。\n"
+            )
     write_workbook_sources(output, registry_table, protocol, training_table, group, post, thresholds, qualitative)
     commit, dirty = git_info(root)
     inputs = [{"name": source.name, "sha256": sha256_file(source), "size": source.stat().st_size}]
     inputs.extend({"name": path.name, "sha256": sha256_file(path), "size": path.stat().st_size}
                   for _, path in parse_legacy(args.legacy_history) if path.is_file())
     provenance = {
-        "scope": "records-only validation-only", "test_metrics_exported": False,
+        "scope": "records-only validation plus test archival" if args.include_test_results else "records-only validation-only",
+        "test_metrics_exported": bool(args.include_test_results),
+        "test_metrics_used_for_selection_or_calibration": False,
         "project_root_at_export": ".", "repository_name": root.name,
         "git_commit": commit, "git_dirty_status": dirty.splitlines(),
         "source_inputs": inputs, "source_archive_members_read": sorted(
@@ -767,7 +816,8 @@ def main() -> None:
         "metric_version": METRIC_VERSION, "postprocess_version": POSTPROCESS_VERSION,
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "counts": {"runs": len(registry_table), "metrics_long": len(metrics_table),
-                   "v0_frames": len(frame), "v0_groups": len(group), "qualitative_rows": len(qualitative)},
+                   "v0_frames": len(frame), "v0_groups": len(group), "qualitative_rows": len(qualitative),
+                   "test_artifacts_archived": len(test_index)},
     }
     write_json(provenance, output / "provenance.json")
     generated = []
