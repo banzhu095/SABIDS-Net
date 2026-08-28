@@ -259,6 +259,8 @@ def main() -> None:
         configs = {variant: resolved_config(root, variant, seed, args) for variant in args.variants}
         registry = validate_contract(configs)
         registry.update({
+            "registry_schema": "interaction-factorial-invocation-v2",
+            "invocation_mode": args.mode,
             "seed": seed, "variants": list(configs), "epochs": args.epochs,
             "component_size_thresholds_original_pixels": args.component_size_thresholds,
             "resolved_config_sha256_by_variant": {
@@ -268,7 +270,10 @@ def main() -> None:
                 for variant, config in configs.items()
             },
         })
-        registry_path = registry_dir / f"seed{seed}_registry.json"
+        # Audit/B0/train/evaluate may legitimately differ in device and other
+        # execution-only fields.  Keep each invocation immutable without
+        # treating a later phase as an attempted overwrite of the audit record.
+        registry_path = registry_dir / f"{args.mode}_seed{seed}_registry.json"
         if registry_path.is_file():
             existing = json.loads(registry_path.read_text(encoding="utf-8"))
             if existing != registry:

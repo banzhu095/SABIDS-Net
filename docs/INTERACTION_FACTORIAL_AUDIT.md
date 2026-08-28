@@ -23,6 +23,7 @@
 四组都计算 S0、去噪和最终分割，关闭方向返回零注入，因此 decoder 次数、Dropout/随机数消耗和 loss 次数一致。共享编码器及其运行统计被冻结。交互尺度为零初始化；第一步允许只有 scale 得到梯度，scale 离开零后映射参数必须开始更新。
 
 四组别名：J00=`d2s off/s2d off`，J10=`on/off`，J01=`off/on`，J11=`on/on`。每组独立从同一个 E3b-noD2S 文件加载，禁止串行微调。runner 对 checkpoint SHA、checkpoint 内协议、manifest、标签资产、split、模型初值和数据计划写指纹；缺失时直接失败且不搜索其他 run。B0 是该 checkpoint 在交互尺度清零后的零续训评价。
+注册表按 `audit/b0/train/evaluate` 分别保存，避免设备等运行字段的合法差异被误判为覆盖；同一 mode/seed 的不同内容仍会被拒绝。旧版 `seed42_registry.json` 可保留，新入口不会覆盖它。
 
 ## 评价、诊断与预留实验
 

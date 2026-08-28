@@ -448,3 +448,7 @@ Populate one row per independent fold after validation threshold selection.
   a synthetic forward/backward smoke passed. The local Python environment has
   PyTorch but no pytest package, so the complete test suite remains to run in
   the project conda/cloud environment.
+- Cloud B0 exposed a registry-key collision: the audit invocation and CUDA B0
+  invocation had legitimately different execution config hashes but shared
+  `seed42_registry.json`. Registry schema v2 now uses immutable
+  `{mode}_seed{seed}_registry.json` files. The legacy file is left untouched.
