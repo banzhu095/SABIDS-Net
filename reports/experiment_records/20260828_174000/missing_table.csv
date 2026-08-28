@@ -1,0 +1,7 @@
+﻿priority,issue,impact
+P0,"V0 only f01 for 3 groups, not 141 frames",coverage insufficient
+P0,threshold calibration 512 vs V0 640 coordinates,evaluation_comparable unknown
+P0,component bins 512 applied to 640,small/medium/large recall invalidly defined
+P0,P3 final pipeline not separately calibrated,postprocess estimate incomplete
+P1,patient_id duplicates group_id,patient isolation unverified
+P1,clean PNG and four-model matched images absent,qualitative comparison incomplete

@@ -1,0 +1,50 @@
+[
+  {
+    "reference": "E3b",
+    "candidate": "E3b",
+    "data_identity_match": "matched",
+    "training_contrast_status": "single_factor",
+    "declared_role": "self_reference",
+    "actual_differences": "{}",
+    "unexpected_differences": "{}",
+    "evaluation_comparable": "unknown: only E3b has V0 exported; history metrics share 0.5/model coordinates",
+    "patient_identity": "unverified",
+    "source_file": "runs/current/stage2_protocol_comparison_fold0/comparison.json"
+  },
+  {
+    "reference": "E3b",
+    "candidate": "E3-current",
+    "data_identity_match": "matched",
+    "training_contrast_status": "single_factor",
+    "declared_role": "single_factor: outside BCE",
+    "actual_differences": "{\"loss.weights.vessel_outside\": {\"reference\": 0.5, \"candidate\": 0.0}}",
+    "unexpected_differences": "{}",
+    "evaluation_comparable": "unknown: only E3b has V0 exported; history metrics share 0.5/model coordinates",
+    "patient_identity": "unverified",
+    "source_file": "runs/current/stage2_protocol_comparison_fold0/comparison.json"
+  },
+  {
+    "reference": "E3b",
+    "candidate": "E3b-no-D2S",
+    "data_identity_match": "matched",
+    "training_contrast_status": "single_factor",
+    "declared_role": "single_factor: D→S with necessary switches",
+    "actual_differences": "{\"model.enable_denoise_to_seg\": {\"reference\": true, \"candidate\": false}, \"model.stage2_train_denoise_to_seg\": {\"reference\": true, \"candidate\": false}, \"train.monitor_d2s_sensitivity\": {\"reference\": true, \"candidate\": false}}",
+    "unexpected_differences": "{}",
+    "evaluation_comparable": "unknown: only E3b has V0 exported; history metrics share 0.5/model coordinates",
+    "patient_identity": "unverified",
+    "source_file": "runs/current/stage2_protocol_comparison_fold0/comparison.json"
+  },
+  {
+    "reference": "E3b",
+    "candidate": "E1-current",
+    "data_identity_match": "matched",
+    "training_contrast_status": "multifactor_baseline",
+    "declared_role": "multifactor_baseline",
+    "actual_differences": "{\"loss.vessel_supervision_mode\": {\"reference\": \"roi_bce_dice_outside\", \"candidate\": null}, \"loss.weights.vessel_area\": {\"reference\": 0.0, \"candidate\": 0.2}, \"loss.weights.vessel_outside\": {\"reference\": 0.5, \"candidate\": 0.0}, \"loss.weights.vessel_stroma\": {\"reference\": 0.0, \"candidate\": 0.25}, \"model.enable_denoise_to_seg\": {\"reference\": true, \"candidate\": false}, \"model.stage2_train_denoise_to_seg\": {\"reference\": true, \"candidate\": false}, \"train.monitor_d2s_sensitivity\": {\"reference\": true, \"candidate\": null}}",
+    "unexpected_differences": "{\"loss.vessel_supervision_mode\": {\"reference\": \"roi_bce_dice_outside\", \"candidate\": null}, \"loss.weights.vessel_area\": {\"reference\": 0.0, \"candidate\": 0.2}, \"loss.weights.vessel_outside\": {\"reference\": 0.5, \"candidate\": 0.0}, \"loss.weights.vessel_stroma\": {\"reference\": 0.0, \"candidate\": 0.25}, \"model.enable_denoise_to_seg\": {\"reference\": true, \"candidate\": false}, \"model.stage2_train_denoise_to_seg\": {\"reference\": true, \"candidate\": false}, \"train.monitor_d2s_sensitivity\": {\"reference\": true, \"candidate\": null}}",
+    "evaluation_comparable": "unknown: only E3b has V0 exported; history metrics share 0.5/model coordinates",
+    "patient_identity": "unverified",
+    "source_file": "runs/current/stage2_protocol_comparison_fold0/comparison.json"
+  }
+]

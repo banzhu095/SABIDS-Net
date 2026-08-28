@@ -1,0 +1,495 @@
+{
+  "scope": "records-only validation-only",
+  "test_metrics_exported": false,
+  "project_root_at_export": ".",
+  "repository_name": "SABIDS-Net",
+  "git_commit": "unknown",
+  "git_dirty_status": [
+    "unknown"
+  ],
+  "source_inputs": [
+    {
+      "name": "stage2_validity_fold0_20260828.tar.gz",
+      "sha256": "7bbf228c47260af4c0c73a23b28fe69e26a806eabadd29f89b910111b77f8a07",
+      "size": 71003860
+    },
+    {
+      "name": "stage2_overfit_safe_fold0.csv",
+      "sha256": "5ad6c7b85529a87d9be5d8b037accd5200357c4f18a44d2217f4c92e05e6e40e",
+      "size": 128600
+    },
+    {
+      "name": "stage2_segment_safe_fold0.csv",
+      "sha256": "3f4c6d43974ba70013130eb347ebf2710437e67ccd11f19def759530b6c06d83",
+      "size": 71059
+    },
+    {
+      "name": "stage2_segment_d2s_fold0.csv",
+      "sha256": "3df86353ec8cad7e73c097f5d2d6e7bc50c13ecd6aa42f23c34d7b9ef80de3e0",
+      "size": 77441
+    },
+    {
+      "name": "stage2_segment_roi_fold0.csv",
+      "sha256": "efdac21776a6c2b1cd2869fa3ccd9cc7c39f38017be8d9902b24f692b7af4a28",
+      "size": 100296
+    },
+    {
+      "name": "stage2_segment_roi_outside_fold0.csv",
+      "sha256": "4df632148f35304df7e9386a3f8accbc911dd7994844632a52bf5bc39fdcdb5b",
+      "size": 219106
+    }
+  ],
+  "source_archive_members_read": [
+    "runs/current/stage2_protocol_comparison_fold0",
+    "runs/current/stage2_protocol_comparison_fold0/comparison.json",
+    "runs/current/stage2_protocol_comparison_fold0/label_differences_E1_current.json",
+    "runs/current/stage2_protocol_comparison_fold0/label_differences_E3_current.json",
+    "runs/current/stage2_protocol_comparison_fold0/label_differences_E3b.json",
+    "runs/current/stage2_protocol_comparison_fold0/label_differences_E3b_no_D2S.json",
+    "runs/current/stage2_protocol_comparison_fold0/protocols.csv",
+    "runs/current/stage2_segment_roi_current_fold0/history.csv",
+    "runs/current/stage2_segment_roi_current_fold0/label_asset_inventory.json",
+    "runs/current/stage2_segment_roi_current_fold0/resolved_config.yaml",
+    "runs/current/stage2_segment_roi_current_fold0/run_metadata.json",
+    "runs/current/stage2_segment_roi_outside_fold0/component_bins.json",
+    "runs/current/stage2_segment_roi_outside_fold0/history.csv",
+    "runs/current/stage2_segment_roi_outside_fold0/label_asset_inventory.json",
+    "runs/current/stage2_segment_roi_outside_fold0/resolved_config.yaml",
+    "runs/current/stage2_segment_roi_outside_fold0/run_metadata.json",
+    "runs/current/stage2_segment_roi_outside_fold0/threshold_calibration",
+    "runs/current/stage2_segment_roi_outside_fold0/threshold_calibration/best_vessel_threshold_raw.json",
+    "runs/current/stage2_segment_roi_outside_fold0/threshold_calibration/vessel_threshold_sweep_raw.csv",
+    "runs/current/stage2_segment_roi_outside_fold0/threshold_calibration_soft_gate",
+    "runs/current/stage2_segment_roi_outside_fold0/threshold_calibration_soft_gate/best_vessel_threshold_soft_gate.json",
+    "runs/current/stage2_segment_roi_outside_fold0/threshold_calibration_soft_gate/vessel_threshold_sweep_soft_gate.csv",
+    "runs/current/stage2_segment_roi_outside_fold0/validity_v0",
+    "runs/current/stage2_segment_roi_outside_fold0/validity_v0/frame_metrics.csv",
+    "runs/current/stage2_segment_roi_outside_fold0/validity_v0/group_metrics.csv",
+    "runs/current/stage2_segment_roi_outside_fold0/validity_v0/metric_definitions.json",
+    "runs/current/stage2_segment_roi_outside_fold0/validity_v0/predictions",
+    "runs/current/stage2_segment_roi_outside_fold0/validity_v0/predictions/PKU37",
+    "runs/current/stage2_segment_roi_outside_fold0/validity_v0/predictions/PKU37/pku_0006_f01_denoised.png",
+    "runs/current/stage2_segment_roi_outside_fold0/validity_v0/predictions/PKU37/pku_0006_f01_error_outside_gt_and_pred_layer.png",
+    "runs/current/stage2_segment_roi_outside_fold0/validity_v0/predictions/PKU37/pku_0006_f01_error_outside_gt_inside_pred_layer.png",
+    "runs/current/stage2_segment_roi_outside_fold0/validity_v0/predictions/PKU37/pku_0006_f01_error_overlay.png",
+    "runs/current/stage2_segment_roi_outside_fold0/validity_v0/predictions/PKU37/pku_0006_f01_gt_vessel_outside_pred_layer.png",
+    "runs/current/stage2_segment_roi_outside_fold0/validity_v0/predictions/PKU37/pku_0006_f01_layer_gt.png",
+    "runs/current/stage2_segment_roi_outside_fold0/validity_v0/predictions/PKU37/pku_0006_f01_layer_mask.png",
+    "runs/current/stage2_segment_roi_outside_fold0/validity_v0/predictions/PKU37/pku_0006_f01_layer_prob.png",
+    "runs/current/stage2_segment_roi_outside_fold0/validity_v0/predictions/PKU37/pku_0006_f01_noisy.png",
+    "runs/current/stage2_segment_roi_outside_fold0/validity_v0/predictions/PKU37/pku_0006_f01_p1_layer_mask.png",
+    "runs/current/stage2_segment_roi_outside_fold0/validity_v0/predictions/PKU37/pku_0006_f01_p2_layer_mask.png",
+    "runs/current/stage2_segment_roi_outside_fold0/validity_v0/predictions/PKU37/pku_0006_f01_p3_vessel_mask.png",
+    "runs/current/stage2_segment_roi_outside_fold0/validity_v0/predictions/PKU37/pku_0006_f01_vessel_fn.png",
+    "runs/current/stage2_segment_roi_outside_fold0/validity_v0/predictions/PKU37/pku_0006_f01_vessel_fp.png",
+    "runs/current/stage2_segment_roi_outside_fold0/validity_v0/predictions/PKU37/pku_0006_f01_vessel_gt.png",
+    "runs/current/stage2_segment_roi_outside_fold0/validity_v0/predictions/PKU37/pku_0006_f01_vessel_gt_layer_roi_fn.png",
+    "runs/current/stage2_segment_roi_outside_fold0/validity_v0/predictions/PKU37/pku_0006_f01_vessel_gt_layer_roi_fp.png",
+    "runs/current/stage2_segment_roi_outside_fold0/validity_v0/predictions/PKU37/pku_0006_f01_vessel_gt_layer_roi_tp.png",
+    "runs/current/stage2_segment_roi_outside_fold0/validity_v0/predictions/PKU37/pku_0006_f01_vessel_mask.png",
+    "runs/current/stage2_segment_roi_outside_fold0/validity_v0/predictions/PKU37/pku_0006_f01_vessel_oracle_gt_layer.png",
+    "runs/current/stage2_segment_roi_outside_fold0/validity_v0/predictions/PKU37/pku_0006_f01_vessel_pred_layer_soft_gate.png",
+    "runs/current/stage2_segment_roi_outside_fold0/validity_v0/predictions/PKU37/pku_0006_f01_vessel_prob.png",
+    "runs/current/stage2_segment_roi_outside_fold0/validity_v0/predictions/PKU37/pku_0006_f01_vessel_tp.png",
+    "runs/current/stage2_segment_roi_outside_fold0/validity_v0/predictions/PKU37/pku_0012_f01_denoised.png",
+    "runs/current/stage2_segment_roi_outside_fold0/validity_v0/predictions/PKU37/pku_0012_f01_error_outside_gt_and_pred_layer.png",
+    "runs/current/stage2_segment_roi_outside_fold0/validity_v0/predictions/PKU37/pku_0012_f01_error_outside_gt_inside_pred_layer.png",
+    "runs/current/stage2_segment_roi_outside_fold0/validity_v0/predictions/PKU37/pku_0012_f01_error_overlay.png",
+    "runs/current/stage2_segment_roi_outside_fold0/validity_v0/predictions/PKU37/pku_0012_f01_gt_vessel_outside_pred_layer.png",
+    "runs/current/stage2_segment_roi_outside_fold0/validity_v0/predictions/PKU37/pku_0012_f01_layer_gt.png",
+    "runs/current/stage2_segment_roi_outside_fold0/validity_v0/predictions/PKU37/pku_0012_f01_layer_mask.png",
+    "runs/current/stage2_segment_roi_outside_fold0/validity_v0/predictions/PKU37/pku_0012_f01_layer_prob.png",
+    "runs/current/stage2_segment_roi_outside_fold0/validity_v0/predictions/PKU37/pku_0012_f01_noisy.png",
+    "runs/current/stage2_segment_roi_outside_fold0/validity_v0/predictions/PKU37/pku_0012_f01_p1_layer_mask.png",
+    "runs/current/stage2_segment_roi_outside_fold0/validity_v0/predictions/PKU37/pku_0012_f01_p2_layer_mask.png",
+    "runs/current/stage2_segment_roi_outside_fold0/validity_v0/predictions/PKU37/pku_0012_f01_p3_vessel_mask.png",
+    "runs/current/stage2_segment_roi_outside_fold0/validity_v0/predictions/PKU37/pku_0012_f01_vessel_fn.png",
+    "runs/current/stage2_segment_roi_outside_fold0/validity_v0/predictions/PKU37/pku_0012_f01_vessel_fp.png",
+    "runs/current/stage2_segment_roi_outside_fold0/validity_v0/predictions/PKU37/pku_0012_f01_vessel_gt.png",
+    "runs/current/stage2_segment_roi_outside_fold0/validity_v0/predictions/PKU37/pku_0012_f01_vessel_gt_layer_roi_fn.png",
+    "runs/current/stage2_segment_roi_outside_fold0/validity_v0/predictions/PKU37/pku_0012_f01_vessel_gt_layer_roi_fp.png",
+    "runs/current/stage2_segment_roi_outside_fold0/validity_v0/predictions/PKU37/pku_0012_f01_vessel_gt_layer_roi_tp.png",
+    "runs/current/stage2_segment_roi_outside_fold0/validity_v0/predictions/PKU37/pku_0012_f01_vessel_mask.png",
+    "runs/current/stage2_segment_roi_outside_fold0/validity_v0/predictions/PKU37/pku_0012_f01_vessel_oracle_gt_layer.png",
+    "runs/current/stage2_segment_roi_outside_fold0/validity_v0/predictions/PKU37/pku_0012_f01_vessel_pred_layer_soft_gate.png",
+    "runs/current/stage2_segment_roi_outside_fold0/validity_v0/predictions/PKU37/pku_0012_f01_vessel_prob.png",
+    "runs/current/stage2_segment_roi_outside_fold0/validity_v0/predictions/PKU37/pku_0012_f01_vessel_tp.png",
+    "runs/current/stage2_segment_roi_outside_fold0/validity_v0/predictions/PKU37/pku_0040_f01_denoised.png",
+    "runs/current/stage2_segment_roi_outside_fold0/validity_v0/predictions/PKU37/pku_0040_f01_error_outside_gt_and_pred_layer.png",
+    "runs/current/stage2_segment_roi_outside_fold0/validity_v0/predictions/PKU37/pku_0040_f01_error_outside_gt_inside_pred_layer.png",
+    "runs/current/stage2_segment_roi_outside_fold0/validity_v0/predictions/PKU37/pku_0040_f01_error_overlay.png",
+    "runs/current/stage2_segment_roi_outside_fold0/validity_v0/predictions/PKU37/pku_0040_f01_gt_vessel_outside_pred_layer.png",
+    "runs/current/stage2_segment_roi_outside_fold0/validity_v0/predictions/PKU37/pku_0040_f01_layer_gt.png",
+    "runs/current/stage2_segment_roi_outside_fold0/validity_v0/predictions/PKU37/pku_0040_f01_layer_mask.png",
+    "runs/current/stage2_segment_roi_outside_fold0/validity_v0/predictions/PKU37/pku_0040_f01_layer_prob.png",
+    "runs/current/stage2_segment_roi_outside_fold0/validity_v0/predictions/PKU37/pku_0040_f01_noisy.png",
+    "runs/current/stage2_segment_roi_outside_fold0/validity_v0/predictions/PKU37/pku_0040_f01_p1_layer_mask.png",
+    "runs/current/stage2_segment_roi_outside_fold0/validity_v0/predictions/PKU37/pku_0040_f01_p2_layer_mask.png",
+    "runs/current/stage2_segment_roi_outside_fold0/validity_v0/predictions/PKU37/pku_0040_f01_p3_vessel_mask.png",
+    "runs/current/stage2_segment_roi_outside_fold0/validity_v0/predictions/PKU37/pku_0040_f01_vessel_fn.png",
+    "runs/current/stage2_segment_roi_outside_fold0/validity_v0/predictions/PKU37/pku_0040_f01_vessel_fp.png",
+    "runs/current/stage2_segment_roi_outside_fold0/validity_v0/predictions/PKU37/pku_0040_f01_vessel_gt.png",
+    "runs/current/stage2_segment_roi_outside_fold0/validity_v0/predictions/PKU37/pku_0040_f01_vessel_gt_layer_roi_fn.png",
+    "runs/current/stage2_segment_roi_outside_fold0/validity_v0/predictions/PKU37/pku_0040_f01_vessel_gt_layer_roi_fp.png",
+    "runs/current/stage2_segment_roi_outside_fold0/validity_v0/predictions/PKU37/pku_0040_f01_vessel_gt_layer_roi_tp.png",
+    "runs/current/stage2_segment_roi_outside_fold0/validity_v0/predictions/PKU37/pku_0040_f01_vessel_mask.png",
+    "runs/current/stage2_segment_roi_outside_fold0/validity_v0/predictions/PKU37/pku_0040_f01_vessel_oracle_gt_layer.png",
+    "runs/current/stage2_segment_roi_outside_fold0/validity_v0/predictions/PKU37/pku_0040_f01_vessel_pred_layer_soft_gate.png",
+    "runs/current/stage2_segment_roi_outside_fold0/validity_v0/predictions/PKU37/pku_0040_f01_vessel_prob.png",
+    "runs/current/stage2_segment_roi_outside_fold0/validity_v0/predictions/PKU37/pku_0040_f01_vessel_tp.png",
+    "runs/current/stage2_segment_roi_outside_fold0/validity_v0/summary.json",
+    "runs/current/stage2_segment_roi_outside_no_d2s_fold0/history.csv",
+    "runs/current/stage2_segment_roi_outside_no_d2s_fold0/label_asset_inventory.json",
+    "runs/current/stage2_segment_roi_outside_no_d2s_fold0/resolved_config.yaml",
+    "runs/current/stage2_segment_roi_outside_no_d2s_fold0/run_metadata.json",
+    "runs/current/stage2_segment_safe_current_fold0/history.csv",
+    "runs/current/stage2_segment_safe_current_fold0/label_asset_inventory.json",
+    "runs/current/stage2_segment_safe_current_fold0/resolved_config.yaml",
+    "runs/current/stage2_segment_safe_current_fold0/run_metadata.json"
+  ],
+  "excluded_members": [
+    "runs/current/stage2_segment_roi_outside_fold0/best.pth"
+  ],
+  "metric_version": "sabids-evaluator-v0-20260828",
+  "postprocess_version": "p0-p3-v1",
+  "created_at": "2026-08-28T16:37:35",
+  "counts": {
+    "runs": 9,
+    "metrics_long": 1628,
+    "v0_frames": 3,
+    "v0_groups": 3,
+    "qualitative_rows": 36
+  },
+  "generated_files": [
+    {
+      "path": "denoising_val.csv",
+      "sha256": "c9aabfd540f4499671cc398caaff560a23c324806526bd3d2356c743d197c6af",
+      "size": 1794
+    },
+    {
+      "path": "evidence_ledger.md",
+      "sha256": "b2998837084ebac228f68c00d0de681ca4d0a901bfe4629fb695da87024b71c7",
+      "size": 998
+    },
+    {
+      "path": "evidence_table.csv",
+      "sha256": "5c68767174a328dd6b5048a1cf58467056cbb999e384a667c3d9fb194ee15dc3",
+      "size": 564
+    },
+    {
+      "path": "experiment_registry.csv",
+      "sha256": "06a27712f4e742dde8ee2f7ceacf6f03e8e4050ae4f5256bce88f45451b0ffc0",
+      "size": 4769
+    },
+    {
+      "path": "experiment_registry.json",
+      "sha256": "dea940071aea8e677e1b28ee8e5252e7a41303113ef9b8196fda43c4cd0699d9",
+      "size": 9343
+    },
+    {
+      "path": "figures/postprocess_dice.png",
+      "sha256": "cd70f30609d29f1fffa50e1ec65869e37571b557f210c7883b778c75942aecc7",
+      "size": 9489
+    },
+    {
+      "path": "figures/training_curves_current.png",
+      "sha256": "c6ced543d38e9f36123b5974d4596b5678fa0d1237c71feddfe668268512fae0",
+      "size": 37815
+    },
+    {
+      "path": "figures/v0_group_and_thresholds.png",
+      "sha256": "f8ec9b4738adddefb1be7f990ba04e918708eb53ea7ba59baf764c62939ece26",
+      "size": 10311
+    },
+    {
+      "path": "frame_metrics.csv",
+      "sha256": "ed021d35e5cb8780fefa37e655e3315e4e4bc8196b5eac303e118cab075de5a0",
+      "size": 14483
+    },
+    {
+      "path": "gallery.html",
+      "sha256": "bade819992b50bbd48b5fe8ff6c88ecd97ee27142dc1d43002a2377d777c349e",
+      "size": 1106
+    },
+    {
+      "path": "group_metrics.csv",
+      "sha256": "ea935bc162daea28c6d75fd81d4301a6016dec2a4422f0c7f7cf72494deed480",
+      "size": 13808
+    },
+    {
+      "path": "layer_val.csv",
+      "sha256": "679c5eb8db0c243afea983c8e0fdf4a75061bb32fe1b68c1b810970477e70a58",
+      "size": 1593
+    },
+    {
+      "path": "methods.md",
+      "sha256": "824acdd0c98638ca2c1ea5e54157d175ae423612361a64d9e6b75bc398304401",
+      "size": 2954
+    },
+    {
+      "path": "methods_table.csv",
+      "sha256": "725480a8c54a8f8b22fdb8e829adb6278e7aa111bd3aef2c4bf004bbd89e8ba6",
+      "size": 665
+    },
+    {
+      "path": "metrics_long.csv",
+      "sha256": "1982d25afee4f2d098dc728389ce0c3a2723a4b59b921cb57a9d9f041b111bcb",
+      "size": 866308
+    },
+    {
+      "path": "missing_and_issues.md",
+      "sha256": "1bcb86953968dbcef52f125bcc395dd090751c0fdcc7a3a62aad0511d5c76949",
+      "size": 1433
+    },
+    {
+      "path": "missing_table.csv",
+      "sha256": "13598f3ab61261a637cbacb018f0df3ce33cd34f6ac84177fdaeb6671eb4665c",
+      "size": 488
+    },
+    {
+      "path": "next_experiments.md",
+      "sha256": "9ddb69630786940dec9f47e651a17ca6a9a0651ba03ad46b5ff16749208a5e6c",
+      "size": 463
+    },
+    {
+      "path": "postprocess_comparison.csv",
+      "sha256": "8a90abee77bb1f84bf388f4e61f6befbf029ade163338e8fd2ffc95624ee8ed2",
+      "size": 7385
+    },
+    {
+      "path": "protocol_comparison.csv",
+      "sha256": "b3261540d6c48ebf5a79f8c5b20c99aa15451abb91de485e2a22c537dedb2f79",
+      "size": 2507
+    },
+    {
+      "path": "protocol_comparison.json",
+      "sha256": "9476be697a16cc022cafe8f9b7bcb1e5671dd03d3ee6c4846ca8db88e5251bbe",
+      "size": 3490
+    },
+    {
+      "path": "qualitative/pku_0006_f01_contact.png",
+      "sha256": "7537000e7ac1cc6c9320f503043a5b5f425cded1050c4b843072ac93f72df17b",
+      "size": 280448
+    },
+    {
+      "path": "qualitative/pku_0006_f01_denoised.png",
+      "sha256": "497f764c9ce53b08df562c6e0ab8c532f709bc4577ee3f04b883b3869f7046a5",
+      "size": 107310
+    },
+    {
+      "path": "qualitative/pku_0006_f01_error_overlay.png",
+      "sha256": "2f0ad72a87722d4498adf51f014b0001ebbf4b4662ad4c1358b36be8155c40f2",
+      "size": 843599
+    },
+    {
+      "path": "qualitative/pku_0006_f01_layer_gt.png",
+      "sha256": "01fd637e53d6ee4d6e24159ec33c97d292784fffa1ac2e97fe114c7457d7a687",
+      "size": 2629
+    },
+    {
+      "path": "qualitative/pku_0006_f01_layer_mask.png",
+      "sha256": "d498657b07f2fe0557d6b5aaacb87afe4cc961378305d26900f7e3acd6d886b8",
+      "size": 3035
+    },
+    {
+      "path": "qualitative/pku_0006_f01_noisy.png",
+      "sha256": "8fab73a8f7d4c145e44c6eca5e27d7d9e1db262d958b58f7ee2d962d5165552d",
+      "size": 291431
+    },
+    {
+      "path": "qualitative/pku_0006_f01_p1_layer_mask.png",
+      "sha256": "c4f49d852f11b2cca17c1bc40f3fda51bcbe249866e8d11bde74d54de2f73b51",
+      "size": 2959
+    },
+    {
+      "path": "qualitative/pku_0006_f01_p2_layer_mask.png",
+      "sha256": "61161de5ffefeb4ffbfa1ff3f5da39edd17e87d148f2ec7b39a4712e890584a2",
+      "size": 2961
+    },
+    {
+      "path": "qualitative/pku_0006_f01_p3_vessel_mask.png",
+      "sha256": "3bc4235d04d30be795ef434d846ae925623ad27b62abc9fefe4afd01779b4931",
+      "size": 5083
+    },
+    {
+      "path": "qualitative/pku_0006_f01_vessel_fn.png",
+      "sha256": "bfd8b30fe74e4864730031f8b667bdce09ce9a65dfa1ef902d318e30894c82b8",
+      "size": 3594
+    },
+    {
+      "path": "qualitative/pku_0006_f01_vessel_fp.png",
+      "sha256": "10d66327ab66c797a59d8626a41ba4916665d3d707376ff8ca210ee7bec971fa",
+      "size": 6105
+    },
+    {
+      "path": "qualitative/pku_0006_f01_vessel_gt.png",
+      "sha256": "cd3b721b5859724137650855c9caa318a1afe17401b0c9f1d8e8e96b9b822a7e",
+      "size": 5669
+    },
+    {
+      "path": "qualitative/pku_0006_f01_vessel_mask.png",
+      "sha256": "a2a1528b4fb8bd09b2c84bb2332ca6504ee91843edb959956db9ef3c8910ffa7",
+      "size": 5132
+    },
+    {
+      "path": "qualitative/pku_0012_f01_contact.png",
+      "sha256": "105006a8391b8cd25ece779d968380e6f85922c81eea84a452b0c3d7125ccd14",
+      "size": 283230
+    },
+    {
+      "path": "qualitative/pku_0012_f01_denoised.png",
+      "sha256": "42b00ef9868473f36f004ed2f73900bde0878e8178784a52007635ffad80bcc9",
+      "size": 111664
+    },
+    {
+      "path": "qualitative/pku_0012_f01_error_overlay.png",
+      "sha256": "46f6c39ed52f758208fe87d8ff14cd68cde65b71d28d418aa82ef8f425fde499",
+      "size": 854465
+    },
+    {
+      "path": "qualitative/pku_0012_f01_layer_gt.png",
+      "sha256": "0e5360fd060b6dc70a5c548698978f04f5b411d3a8e8fdc2762953d800c6c939",
+      "size": 3128
+    },
+    {
+      "path": "qualitative/pku_0012_f01_layer_mask.png",
+      "sha256": "ff383d3247acd03aba894fbaefd7cb3dbc04d3230e7b8c14fbd257d7223d1fbc",
+      "size": 3203
+    },
+    {
+      "path": "qualitative/pku_0012_f01_noisy.png",
+      "sha256": "e6382855a92d484b9b8f5312ea0a25fece3b0e46bba81a9f28b641b29d5fa71c",
+      "size": 294735
+    },
+    {
+      "path": "qualitative/pku_0012_f01_p1_layer_mask.png",
+      "sha256": "9a09b9976225d4e2f29926151ba1940d05950216d35f8844e9503834975483e2",
+      "size": 3115
+    },
+    {
+      "path": "qualitative/pku_0012_f01_p2_layer_mask.png",
+      "sha256": "e36e2f8411ef31bce2e4971bfc65f161817e6912257e472fdb58de5e454ca419",
+      "size": 3115
+    },
+    {
+      "path": "qualitative/pku_0012_f01_p3_vessel_mask.png",
+      "sha256": "716046302c0580412c1fa48955e4d0b4bec48029c1f9e5e773f043881f871ac9",
+      "size": 4599
+    },
+    {
+      "path": "qualitative/pku_0012_f01_vessel_fn.png",
+      "sha256": "7f2376c149ec03b15bdb185eec1ba64f31079ca8fa2922ea5f9f1c61f2edeeca",
+      "size": 3948
+    },
+    {
+      "path": "qualitative/pku_0012_f01_vessel_fp.png",
+      "sha256": "4670936c4f511b761771ed9e36bcfb19208fdd99482dc20b3a63c594a71f36b0",
+      "size": 5432
+    },
+    {
+      "path": "qualitative/pku_0012_f01_vessel_gt.png",
+      "sha256": "0c837d615f5506a739894f0955cb3fd8a1aa0664c427e88b7cf80edb6f5a0f40",
+      "size": 5462
+    },
+    {
+      "path": "qualitative/pku_0012_f01_vessel_mask.png",
+      "sha256": "f19ee30ae8a259638555982122f080f6172d5539fec1ad53441c5a9ac59f8512",
+      "size": 5185
+    },
+    {
+      "path": "qualitative/pku_0040_f01_contact.png",
+      "sha256": "564c6feae64879ff6f9abfd455295bec19b035d52248c7c6db98fb8d831410b1",
+      "size": 291892
+    },
+    {
+      "path": "qualitative/pku_0040_f01_denoised.png",
+      "sha256": "46ec5a8cdc1d77d3a950d1821be94f37fa26a21dc426fde1301dfe826c751886",
+      "size": 115315
+    },
+    {
+      "path": "qualitative/pku_0040_f01_error_overlay.png",
+      "sha256": "a149db00b8cd7b500e82c17c4bb11be72383966b068537473d61d0ce2acf6371",
+      "size": 863003
+    },
+    {
+      "path": "qualitative/pku_0040_f01_layer_gt.png",
+      "sha256": "e79ac150f32aae93babbb6b2412280fd84af33f307ea009a538a14f998289be1",
+      "size": 3220
+    },
+    {
+      "path": "qualitative/pku_0040_f01_layer_mask.png",
+      "sha256": "c31194e4d1cde1fa9fabb46f79774cd8afe6b062cfa1d2149e2ccb11b190c6f7",
+      "size": 3390
+    },
+    {
+      "path": "qualitative/pku_0040_f01_noisy.png",
+      "sha256": "40f49f69acc833bcd4313697f948dc9ed5310c019c84371660cce8fada6ea128",
+      "size": 297018
+    },
+    {
+      "path": "qualitative/pku_0040_f01_p1_layer_mask.png",
+      "sha256": "1cea28739a52884081b1f22cfdb9dc78db9b322c12be243f81e2a18114d0c4de",
+      "size": 3372
+    },
+    {
+      "path": "qualitative/pku_0040_f01_p2_layer_mask.png",
+      "sha256": "074c69f16d4493e8e16b557c9f334597a85c6ac10fd3dcba767aea81d543b871",
+      "size": 3366
+    },
+    {
+      "path": "qualitative/pku_0040_f01_p3_vessel_mask.png",
+      "sha256": "bfb8fd0ff13745c2aa1cf4be565e0f89fa3f66af322ded67c407cc601a60ab5d",
+      "size": 5298
+    },
+    {
+      "path": "qualitative/pku_0040_f01_vessel_fn.png",
+      "sha256": "b930e83f9fbec3b5fb9fb785538f70cf31f46f0643e9905ab71ee12044fdd278",
+      "size": 4218
+    },
+    {
+      "path": "qualitative/pku_0040_f01_vessel_fp.png",
+      "sha256": "4acddf288678327857c5fa3a2426b9aec578a64ab83da12a256776610171bc0a",
+      "size": 5412
+    },
+    {
+      "path": "qualitative/pku_0040_f01_vessel_gt.png",
+      "sha256": "7fec4443eb3f78072b89c9318d03545ef1f89c550fd4571a77c892561985ede2",
+      "size": 5768
+    },
+    {
+      "path": "qualitative/pku_0040_f01_vessel_mask.png",
+      "sha256": "42786a47957e3bd2a5e3f855efd6d2ed00b5f4acda78e810441129f42033d680",
+      "size": 5489
+    },
+    {
+      "path": "qualitative_index.csv",
+      "sha256": "60abf0b294f3453e6a401683de5d565341f35525a28a750f15dad5e951e04c65",
+      "size": 13502
+    },
+    {
+      "path": "README.md",
+      "sha256": "0f77f08ef36dfb8d1eb29f8b2fa3a876281aea56a77912e293321f743f2c7764",
+      "size": 1417
+    },
+    {
+      "path": "threshold_comparison.csv",
+      "sha256": "02ee044d9bb3c8b1adc87014408dfabcbf481f7655fda1e0686509a78c795d2f",
+      "size": 883
+    },
+    {
+      "path": "training_best.csv",
+      "sha256": "2bdc58ab6a002fa655226e01aaa8a15c73ccaf1307184624a531d1f9e196b66e",
+      "size": 5704
+    },
+    {
+      "path": "vessel_val.csv",
+      "sha256": "e81dd81036def6da6eac0c17e0a8d66b563388f6b6f049d7eed64cb7abaeaec3",
+      "size": 2226
+    },
+    {
+      "path": "workbook_readme.csv",
+      "sha256": "db1acd2e95f62e52d712f6dbd7f1af55fabf539b6a178d13f8e64fbfd0188067",
+      "size": 367
+    }
+  ]
+}

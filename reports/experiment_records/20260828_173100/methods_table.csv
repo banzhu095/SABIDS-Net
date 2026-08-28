@@ -1,0 +1,9 @@
+﻿method,proposed,implemented,run_evidence,validation_supported,source
+Shared encoder + three decoders,yes,yes,yes,Stage 2 only,sabids/models/sabids_net.py
+Denoising residual head,yes,yes,yes,limited 3 groups,sabids/models/sabids_net.py
+D->S UGBI,yes,yes,E3b/no-D2S,not stable/significant,sabids/models/ugbi.py
+S->D uncertainty gate,yes,yes,disabled in current four,no,sabids/models/ugbi.py
+E3b ROI+outside,yes,yes,yes,limited,sabids/losses/total.py
+RMAC,yes,yes,no completed Joint,no,sabids/losses/rmac.py
+EMA dark-lumen pseudo,yes,yes,no formal Stage 5,no,sabids/losses/pseudo.py
+P0-P3 postprocess,later,yes,V0,limited 3 frames,sabids/postprocessing.py

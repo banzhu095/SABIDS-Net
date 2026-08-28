@@ -1,0 +1,6 @@
+﻿scope,item,value
+Archive,Evaluation scope,records-only; validation-only; no test
+Archive,Current runs,E3b; E3-current; E3b-no-D2S; E1-current
+Archive,V0 coverage,3 groups; one f01 frame/group; 640x640 evaluation
+Archive,Primary limitation,not the complete 141-frame validation
+Archive,Threshold mismatch,calibration 512x512; V0 raw threshold 0.35 at 640x640

@@ -1,0 +1,6 @@
+﻿claim,evidence,status,limitation
+fixed validation samples denoising improved,PSNR/EPI paired gain on 3 groups,supported_limited,one frame/group; frozen denoising
+outside BCE suppresses exterior FP,matched E3b vs E3-current histories,supported_limited,single seed; model coordinates
+D->S is stably beneficial,E3b and no-D2S are close,not_supported,no repeated seeds
+P1/P2/P3 improve fixed-frame Dice,V0 group metrics,supported_limited,3 frames; P3 not separately calibrated
+Joint/RMAC outperforms Stage 2,none in current package,no_evidence,Joint deferred
