@@ -32,6 +32,10 @@ train:
   strict_pretrained: true
   resume: null
   monitor: vessel_soft_dice
+  # The denoising decoder is intentionally trainable in this factorial.  The
+  # inherited Stage-2 invariant that requires an unchanged denoising function
+  # is therefore inapplicable; encoder freezing is audited separately.
+  monitor_denoise_drift: false
   early_stopping_patience: 100
   evaluate_epoch0: true
   save_initial_checkpoint: true

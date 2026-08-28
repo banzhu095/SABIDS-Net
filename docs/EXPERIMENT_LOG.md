@@ -450,5 +450,13 @@ Populate one row per independent fold after validation threshold selection.
   the project conda/cloud environment.
 - Cloud B0 exposed a registry-key collision: the audit invocation and CUDA B0
   invocation had legitimately different execution config hashes but shared
-  `seed42_registry.json`. Registry schema v2 now uses immutable
-  `{mode}_seed{seed}_registry.json` files. The legacy file is left untouched.
+  `seed42_registry.json`. Registry schema v2 separated invocation modes; v3
+  additionally uses content-addressed filenames so corrected execution configs
+  coexist without mutating earlier records. Legacy files are left untouched.
+- The first single-seed train reached validation but inherited Stage-2
+  `monitor_denoise_drift=true`; this incorrectly rejected the intentional
+  denoising-decoder update (`max_abs_diff=0.026565209`). The factorial common
+  config now disables that inapplicable invariant, while Trainer also enables
+  it only when the denoising decoder/head are actually frozen. Registry v3 uses
+  content-addressed filenames, and `--resume-partial` safely accepts only an
+  epoch0-only failure with no last checkpoint/history.

@@ -4,8 +4,10 @@ import argparse
 import copy
 import hashlib
 import json
+import shutil
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Dict
 
@@ -49,6 +51,13 @@ def parse_args() -> argparse.Namespace:
         help="Pre-registered component-area bins in restored original-image pixels.",
     )
     parser.add_argument("--smoke-test", action="store_true")
+    parser.add_argument(
+        "--resume-partial", action="store_true",
+        help=(
+            "Resume only a pre-first-checkpoint failure from epoch0.pth. "
+            "Refuses runs that already contain last.pth or non-empty history.csv."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -259,8 +268,9 @@ def main() -> None:
         configs = {variant: resolved_config(root, variant, seed, args) for variant in args.variants}
         registry = validate_contract(configs)
         registry.update({
-            "registry_schema": "interaction-factorial-invocation-v2",
+            "registry_schema": "interaction-factorial-invocation-v3",
             "invocation_mode": args.mode,
+            "resume_partial": bool(args.resume_partial),
             "seed": seed, "variants": list(configs), "epochs": args.epochs,
             "component_size_thresholds_original_pixels": args.component_size_thresholds,
             "resolved_config_sha256_by_variant": {
@@ -273,7 +283,12 @@ def main() -> None:
         # Audit/B0/train/evaluate may legitimately differ in device and other
         # execution-only fields.  Keep each invocation immutable without
         # treating a later phase as an attempted overwrite of the audit record.
-        registry_path = registry_dir / f"{args.mode}_seed{seed}_registry.json"
+        registry_digest = hashlib.sha256(
+            json.dumps(registry, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest()[:12]
+        registry_path = registry_dir / (
+            f"{args.mode}_seed{seed}_{registry_digest}_registry.json"
+        )
         if registry_path.is_file():
             existing = json.loads(registry_path.read_text(encoding="utf-8"))
             if existing != registry:
@@ -306,7 +321,36 @@ def main() -> None:
             output = Path(config["train"]["output_dir"])
             if args.mode == "train":
                 if output.exists() and any(output.iterdir()):
-                    raise FileExistsError(f"Run already exists; refusing to overwrite: {output}")
+                    if not args.resume_partial:
+                        raise FileExistsError(
+                            f"Run already exists; use --resume-partial only for an "
+                            f"epoch0-only failed attempt: {output}"
+                        )
+                    epoch0 = output / "epoch0.pth"
+                    last = output / "last.pth"
+                    history = output / "history.csv"
+                    if not epoch0.is_file():
+                        raise FileNotFoundError(
+                            f"Partial resume requires epoch0.pth: {epoch0}"
+                        )
+                    if last.exists() or (history.exists() and history.stat().st_size > 3):
+                        raise RuntimeError(
+                            "--resume-partial is restricted to failures before the first "
+                            f"completed epoch; found last/history in {output}"
+                        )
+                    archive = output / (
+                        "partial_failure_archive_"
+                        + datetime.now().strftime("%Y%m%d_%H%M%S")
+                    )
+                    archive.mkdir(parents=False, exist_ok=False)
+                    for child in list(output.iterdir()):
+                        if child == epoch0 or child == archive:
+                            continue
+                        shutil.move(str(child), str(archive / child.name))
+                    config["train"]["resume"] = str(epoch0.resolve())
+                    config["train"]["evaluate_epoch0"] = False
+                    print(f"Resuming epoch0-only partial run: {output}")
+                    print(f"Archived partial diagnostics without deletion: {archive}")
                 trainer = Trainer(config)
                 save_config(config, output / "resolved_config.yaml")
                 audit = json.loads((output / "initialization_audit.json").read_text(encoding="utf-8"))

@@ -153,6 +153,7 @@ def test_factorial_configs_fix_protocol_and_do_not_enable_auxiliary_losses():
         config = load_config(root / "configs" / "current" / f"interaction_{variant}_fold0.yaml")
         assert config["train"]["stage"] == "interaction"
         assert config["train"]["epochs"] == 20
+        assert config["train"]["monitor_denoise_drift"] is False
         assert config["model"]["d2s_enabled"] is d2s
         assert config["model"]["s2d_enabled"] is s2d
         assert config["model"]["freeze_shared_encoder"] is True

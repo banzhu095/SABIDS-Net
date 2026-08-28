@@ -362,7 +362,31 @@ class Trainer:
         self._write_initialization_audit()
         self._denoise_probe_image: Optional[torch.Tensor] = None
         self._denoise_probe_reference: Optional[torch.Tensor] = None
-        if bool(config["train"].get("monitor_denoise_drift", False)):
+        denoising_path_trainable = any(
+            parameter.requires_grad
+            for module in (
+                self.model.adapters["denoise"],
+                self.model.decoders["denoise"],
+                self.model.residual_head,
+            )
+            for parameter in module.parameters()
+        )
+        requested_denoise_drift_monitor = bool(
+            config["train"].get("monitor_denoise_drift", False)
+        )
+        self.monitor_denoise_drift = (
+            requested_denoise_drift_monitor and not denoising_path_trainable
+        )
+        config.setdefault("runtime", {})["effective_monitor_denoise_drift"] = bool(
+            self.monitor_denoise_drift
+        )
+        if requested_denoise_drift_monitor and denoising_path_trainable:
+            warnings.warn(
+                "monitor_denoise_drift was disabled because the denoising decoder/head "
+                "is trainable in this stage; encoder freezing remains independently audited.",
+                RuntimeWarning,
+            )
+        if self.monitor_denoise_drift:
             self._initialize_denoise_probe()
 
     def _write_initialization_audit(self) -> None:

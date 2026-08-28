@@ -23,7 +23,7 @@
 四组都计算 S0、去噪和最终分割，关闭方向返回零注入，因此 decoder 次数、Dropout/随机数消耗和 loss 次数一致。共享编码器及其运行统计被冻结。交互尺度为零初始化；第一步允许只有 scale 得到梯度，scale 离开零后映射参数必须开始更新。
 
 四组别名：J00=`d2s off/s2d off`，J10=`on/off`，J01=`off/on`，J11=`on/on`。每组独立从同一个 E3b-noD2S 文件加载，禁止串行微调。runner 对 checkpoint SHA、checkpoint 内协议、manifest、标签资产、split、模型初值和数据计划写指纹；缺失时直接失败且不搜索其他 run。B0 是该 checkpoint 在交互尺度清零后的零续训评价。
-注册表按 `audit/b0/train/evaluate` 分别保存，避免设备等运行字段的合法差异被误判为覆盖；同一 mode/seed 的不同内容仍会被拒绝。旧版 `seed42_registry.json` 可保留，新入口不会覆盖它。
+注册表按 `audit/b0/train/evaluate`、seed 和内容指纹分别保存，避免设备等运行字段的合法差异被误判为覆盖。旧版 `seed42_registry.json` 和 v2 注册表可保留，新入口不会覆盖它们；真正的训练/评价输出目录仍使用独立防覆盖检查。
 
 ## 评价、诊断与预留实验
 
@@ -65,6 +65,23 @@ python tools/diagnose_interactions.py \
 ```bash
 python tools/run_interaction_factorial.py --project-root . --mode train --seeds 42 --smoke-test --device cpu
 ```
+
+若旧版配置在第一轮 validation 因 `Frozen denoising function drifted`
+中断，这是继承的 Stage-2 监控与本实验“去噪解码器可训练”
+冲突，不是数值崩溃。更新代码后可仅从未训练的
+`epoch0.pth` 安全恢复：
+
+```bash
+python tools/run_interaction_factorial.py \
+  --project-root . --mode train --seeds 42 --epochs 20 --device cuda \
+  --resume-partial
+```
+
+`--resume-partial` 只接受存在 `epoch0.pth` 且不存在 `last.pth`/非空
+`history.csv` 的首轮前失败；已完成至少一轮的 run 会被拒绝，
+防止非预期覆盖或重放。恢复前会把旧诊断、TensorBoard 和配置移到
+`partial_failure_archive_YYYYmmdd_HHMMSS/`，不删除；原 `epoch0.pth`
+作为安全恢复点保留，且不重写 epoch-0 评价。
 
 ## 成功与失败判据
 
