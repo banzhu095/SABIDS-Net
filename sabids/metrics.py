@@ -88,6 +88,19 @@ def edge_preservation_index(prediction: np.ndarray, target: np.ndarray) -> float
     return float(np.corrcoef(predicted_edge, target_edge)[0, 1])
 
 
+def reference_edge_mae(prediction: np.ndarray, target: np.ndarray) -> float:
+    """Mean absolute gradient-magnitude error relative to the clean reference."""
+    def magnitude(image: np.ndarray) -> np.ndarray:
+        image = image.astype(np.float64)
+        gx = np.zeros_like(image)
+        gy = np.zeros_like(image)
+        gx[:, :-1] = image[:, 1:] - image[:, :-1]
+        gy[:-1, :] = image[1:, :] - image[:-1, :]
+        return np.sqrt(gx * gx + gy * gy)
+
+    return float(np.mean(np.abs(magnitude(prediction) - magnitude(target))))
+
+
 def otsu_threshold(image: np.ndarray, bins: int = 256) -> float:
     values = np.clip(image.astype(np.float64), 0.0, 1.0)
     histogram, edges = np.histogram(values.ravel(), bins=bins, range=(0.0, 1.0))

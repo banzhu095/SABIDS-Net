@@ -1,0 +1,65 @@
+_base_: stage2_segment_roi_outside_no_d2s.yaml
+
+# First attributable denoising/segmentation interaction experiment. Historical
+# Stage 2 and Stage 4 configs remain unchanged.
+seed: 42
+deterministic: true
+
+model:
+  causal_interaction_experiment: true
+  freeze_shared_encoder: true
+  detach_d2s_source: true
+  detach_s2d_source: true
+  interaction_scale_init: 0.0
+  reset_interaction_scales_after_pretrained: true
+  dropout: 0.0
+
+data:
+  manifest: Manifests/joint_folds/manifest_joint_fold0.csv
+  root: .
+  target_size: [512, 512]
+  normalization: fixed
+  vessel_oversample_fraction: 0.35
+
+train:
+  stage: interaction
+  epochs: 20
+  batch_size: 1
+  gradient_accumulation_steps: 2
+  num_workers: 4
+  learning_rate: 0.00005
+  pretrained: runs/current/stage2_segment_roi_outside_no_d2s_fold0/best.pth
+  strict_pretrained: true
+  resume: null
+  monitor: vessel_soft_dice
+  early_stopping_patience: 100
+  evaluate_epoch0: true
+  save_initial_checkpoint: true
+  detach_cross_epochs: 0
+  ramp_epochs: 1
+  use_ema: false
+  memory_safe_joint: true
+  stopgrad_repeat_teacher: true
+  clean_teacher_no_grad: true
+
+loss:
+  definition_version: interaction-factorial-e3b-detached-v1
+  auxiliary_weight: 0.0
+  vessel_supervision_mode: roi_bce_dice_outside
+  weights:
+    reconstruction: 1.0
+    residual: 0.5
+    layer: 1.0
+    vessel: 1.0
+    vessel_stroma: 0.0
+    vessel_area: 0.0
+    vessel_outside: 0.5
+    containment: 0.1
+    identity: 0.0
+    rmac: 0.0
+    pseudo: 0.0
+
+evaluation:
+  threshold: 0.5
+  layer_threshold: 0.5
+  vessel_threshold: 0.5

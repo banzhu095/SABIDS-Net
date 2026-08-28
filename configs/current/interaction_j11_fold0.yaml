@@ -1,0 +1,6 @@
+_base_: ../interaction_factorial_common.yaml
+model:
+  d2s_enabled: true
+  s2d_enabled: true
+train:
+  output_dir: runs/current/interaction_j11_fold0_seed42

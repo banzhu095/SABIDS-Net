@@ -256,11 +256,11 @@ class SABIDSLoss(nn.Module):
     ) -> Dict[str, torch.Tensor | float]:
         losses: Dict[str, torch.Tensor | float] = {}
         zero = _zero(output)
-        if stage in {"denoise", "warmup", "joint", "private"}:
+        if stage in {"denoise", "warmup", "joint", "private", "interaction"}:
             reconstruction, residual = self._restoration(output, batch)
         else:
             reconstruction, residual = zero, zero
-        if stage in {"segment", "warmup", "joint", "private", "private_seg"}:
+        if stage in {"segment", "warmup", "joint", "private", "private_seg", "interaction"}:
             (
                 layer,
                 vessel,
@@ -290,7 +290,7 @@ class SABIDSLoss(nn.Module):
         )
 
         containment = zero
-        if stage in {"segment", "warmup", "joint", "private", "private_seg"}:
+        if stage in {"segment", "warmup", "joint", "private", "private_seg", "interaction"}:
             has_layer = batch["has_layer"].view(-1, 1, 1, 1)
             layer_reference = torch.where(
                 has_layer,
@@ -390,6 +390,10 @@ class SABIDSLoss(nn.Module):
                 "reconstruction", "residual", "layer", "vessel",
                 "vessel_stroma", "vessel_area", "vessel_outside",
                 "containment", "identity", "rmac"
+            },
+            "interaction": {
+                "reconstruction", "residual", "layer", "vessel",
+                "vessel_stroma", "vessel_area", "vessel_outside", "containment"
             },
             "private": {
                 "reconstruction", "residual", "layer", "vessel",

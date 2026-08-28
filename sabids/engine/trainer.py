@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import hashlib
+import json
 import time
 import warnings
 from collections import defaultdict
@@ -136,6 +137,9 @@ def build_loaders(config: Dict) -> tuple[DataLoader, DataLoader, object]:
             samples_per_epoch=data_cfg.get("samples_per_epoch"),
             seed=int(config.get("seed", 42)),
         )
+    data_seed = int(config.get("seed", 42)) + 1_000_003
+    train_generator = torch.Generator().manual_seed(data_seed)
+    val_generator = torch.Generator().manual_seed(data_seed + 1)
     loader_args = {
         "batch_size": int(config["train"].get("batch_size", 2)),
         "num_workers": int(config["train"].get("num_workers", 4)),
@@ -146,12 +150,14 @@ def build_loaders(config: Dict) -> tuple[DataLoader, DataLoader, object]:
         train_dataset,
         sampler=train_sampler,
         drop_last=True,
+        generator=train_generator,
         **loader_args,
     )
     val_loader = DataLoader(
         val_dataset,
         shuffle=False,
         drop_last=False,
+        generator=val_generator,
         **loader_args,
     )
     return train_loader, val_loader, train_sampler
@@ -206,14 +212,19 @@ def build_model(config: Dict) -> SABIDSNet:
         encoder_depths=tuple(model_cfg.get("encoder_depths", [2, 2, 4, 6])),
         decoder_depth=int(model_cfg.get("decoder_depth", 2)),
         interaction_levels=tuple(model_cfg.get("interaction_levels", [3, 2, 1])),
-        enable_seg_to_denoise=bool(model_cfg.get("enable_seg_to_denoise", True)),
-        enable_denoise_to_seg=bool(model_cfg.get("enable_denoise_to_seg", True)),
+        enable_seg_to_denoise=bool(model_cfg.get("s2d_enabled", model_cfg.get("enable_seg_to_denoise", True))),
+        enable_denoise_to_seg=bool(model_cfg.get("d2s_enabled", model_cfg.get("enable_denoise_to_seg", True))),
         use_uncertainty=bool(model_cfg.get("use_uncertainty", True)),
         detach_denoise_to_seg_source=bool(
-            model_cfg.get("detach_denoise_to_seg_source", False)
+            model_cfg.get("detach_d2s_source", model_cfg.get("detach_denoise_to_seg_source", False))
         ),
         dropout=float(model_cfg.get("dropout", 0.0)),
         residual_scale=float(model_cfg.get("residual_scale", 0.5)),
+        causal_interaction_experiment=bool(model_cfg.get("causal_interaction_experiment", False)),
+        detach_seg_to_denoise_source=bool(model_cfg.get("detach_s2d_source", False)),
+        interaction_scale_init=float(model_cfg.get("interaction_scale_init", 0.1)),
+        s2d_source_mode=str(model_cfg.get("s2d_source_mode", "cross")),
+        d2s_source_mode=str(model_cfg.get("d2s_source_mode", "cross")),
     )
 
 
@@ -230,6 +241,13 @@ class Trainer:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.train_loader, self.val_loader, self.train_sampler = build_loaders(config)
         self._record_run_inputs()
+        if str(config.get("train", {}).get("stage", "")) == "interaction":
+            missing_labels = config.get("runtime", {}).get("missing_label_assets", [])
+            if missing_labels:
+                raise FileNotFoundError(
+                    "Referenced train/validation label assets are missing: "
+                    + ", ".join(str(path) for path in missing_labels[:10])
+                )
         train_eval_every = int(config["train"].get("train_eval_every", 0) or 0)
         self.train_eval_every = train_eval_every
         self.train_eval_loader = (
@@ -249,7 +267,10 @@ class Trainer:
                 "private_train_encoder_levels", []
             ),
             freeze_shared_encoder=bool(
-                config.get("model", {}).get("stage2_freeze_shared_encoder", False)
+                config.get("model", {}).get(
+                    "freeze_shared_encoder",
+                    config.get("model", {}).get("stage2_freeze_shared_encoder", False),
+                )
             ),
             train_denoise_to_seg=bool(
                 config.get("model", {}).get("stage2_train_denoise_to_seg", False)
@@ -338,10 +359,82 @@ class Trainer:
         self.best_metric = -math.inf
         self.bad_epochs = 0
         self._resume_if_needed()
+        self._write_initialization_audit()
         self._denoise_probe_image: Optional[torch.Tensor] = None
         self._denoise_probe_reference: Optional[torch.Tensor] = None
         if bool(config["train"].get("monitor_denoise_drift", False)):
             self._initialize_denoise_probe()
+
+    def _write_initialization_audit(self) -> None:
+        """Fingerprint the exact post-load, pre-training state for paired runs."""
+        tensor_digests: Dict[str, str] = {}
+        aggregate = hashlib.sha256()
+        common = hashlib.sha256()
+        interaction = hashlib.sha256()
+        for name, tensor in sorted(self.model.state_dict().items()):
+            value = tensor.detach().cpu().contiguous()
+            digest = hashlib.sha256()
+            digest.update(str(value.dtype).encode("utf-8"))
+            digest.update(str(tuple(value.shape)).encode("utf-8"))
+            digest.update(value.numpy().tobytes())
+            hexdigest = digest.hexdigest()
+            tensor_digests[name] = hexdigest
+            payload = f"{name}|{hexdigest}\n".encode("utf-8")
+            aggregate.update(payload)
+            (interaction if name.startswith("interactions.") else common).update(payload)
+
+        optimizer_ids = [
+            id(parameter)
+            for group in self.optimizer.param_groups
+            for parameter in group["params"]
+        ]
+        if len(optimizer_ids) != len(set(optimizer_ids)):
+            raise RuntimeError("Optimizer contains duplicate parameter objects")
+        sampler_plan = []
+        for epoch in range(int(self.config.get("train", {}).get("epochs", 1))):
+            self.train_sampler.set_epoch(epoch)
+            sampler_plan.append(list(iter(self.train_sampler)))
+        self.train_sampler.set_epoch(0)
+        plan_payload = json.dumps(
+            {
+                "sampler_indices": sampler_plan,
+                "data_seed": int(self.config.get("seed", 42)) + 1_000_003,
+                "num_workers": int(self.config.get("train", {}).get("num_workers", 4)),
+                "augmentation": self.config.get("data", {}).get("augmentation", {}),
+            },
+            sort_keys=True,
+        ).encode("utf-8")
+        write_json(
+            {
+                "seed": int(self.config.get("seed", 42)),
+                "stage": self.stage,
+                "model_state_sha256": aggregate.hexdigest(),
+                "common_state_sha256": common.hexdigest(),
+                "interaction_state_sha256": interaction.hexdigest(),
+                "tensor_sha256": tensor_digests,
+                "initialization_checkpoint": self.config.get("runtime", {}).get(
+                    "initialization_checkpoint"
+                ),
+                "initialization_checkpoint_sha256": self.config.get("runtime", {}).get(
+                    "initialization_checkpoint_sha256"
+                ),
+                "manifest_sha256": self.config.get("runtime", {}).get("manifest_sha256"),
+                "effective_split_sha256": self.config.get("runtime", {}).get(
+                    "effective_split_sha256"
+                ),
+                "label_assets_decoded_sha256": self.config.get("runtime", {}).get(
+                    "label_assets_decoded_sha256"
+                ),
+                "optimizer_parameter_objects": len(optimizer_ids),
+                "optimizer_parameter_elements": int(
+                    sum(parameter.numel() for group in self.optimizer.param_groups for parameter in group["params"])
+                ),
+                "data_plan_sha256": hashlib.sha256(plan_payload).hexdigest(),
+                "data_rng_seed": int(self.config.get("seed", 42)) + 1_000_003,
+                "model_rng_seed": int(self.config.get("seed", 42)),
+            },
+            self.output_dir / "initialization_audit.json",
+        )
 
     def _record_run_inputs(self) -> None:
         runtime = self.config.setdefault("runtime", {})
@@ -357,6 +450,14 @@ class Trainer:
             for key, value in table["split"].value_counts().items()
         }
         label_assets = []
+        asset_table = table
+        if str(self.config.get("train", {}).get("stage", "")) == "interaction":
+            allowed_splits = {
+                str(self.config.get("data", {}).get("train_split", "train")),
+                str(self.config.get("data", {}).get("val_split", "val")),
+            }
+            asset_table = table[table["split"].astype(str).isin(allowed_splits)]
+            runtime["label_inventory_splits"] = sorted(allowed_splits)
         data_root = self.config.get("data", {}).get("root")
         root = Path(data_root).expanduser().resolve() if data_root else manifest.parent
         for column in (
@@ -366,10 +467,10 @@ class Trainer:
             "vessel_valid_mask_path",
             "multiclass_label_path",
         ):
-            if column not in table.columns:
+            if column not in asset_table.columns:
                 continue
             logical_assets = (
-                table.loc[table[column].astype(str) != "", ["group_id", column]]
+                asset_table.loc[asset_table[column].astype(str) != "", ["group_id", column]]
                 .drop_duplicates()
                 .sort_values(["group_id", column])
             )
@@ -559,6 +660,12 @@ class Trainer:
                 strict=bool(self.config["train"].get("strict_pretrained", False)),
                 map_location=self.device,
             )
+            if bool(self.config.get("model", {}).get("reset_interaction_scales_after_pretrained", False)):
+                value = float(self.config.get("model", {}).get("interaction_scale_init", 0.0))
+                with torch.no_grad():
+                    for name, parameter in self.model.named_parameters():
+                        if name.endswith(("seg_scale", "layer_scale", "vessel_scale")):
+                            parameter.fill_(value)
             if self.ema is not None:
                 # ModelEMA is constructed before checkpoint loading. Synchronize
                 # it here so private pseudo-labels and validation start from the
@@ -662,6 +769,8 @@ class Trainer:
     def train_epoch(self, epoch: int) -> Dict[str, float]:
         self.model.train()
         self.model.enforce_frozen_eval()
+        if self.device.type == "cuda":
+            torch.cuda.reset_peak_memory_stats(self.device)
         self.train_sampler.set_epoch(epoch)
         totals = defaultdict(float)
         steps = 0
@@ -676,7 +785,27 @@ class Trainer:
             if parameter.requires_grad
             and (name.endswith("layer_scale") or name.endswith("vessel_scale"))
         }
+        s2d_scale_start = {
+            name: parameter.detach().clone()
+            for name, parameter in self.model.named_parameters()
+            if parameter.requires_grad and name.endswith("seg_scale")
+        }
+        d2s_mapping_start = {
+            name: parameter.detach().clone()
+            for name, parameter in self.model.named_parameters()
+            if parameter.requires_grad and "interactions" in name
+            and any(token in name for token in (
+                "noise_head", "restoration_context", "denoise_to_layer", "denoise_to_vessel"
+            )) and not name.endswith(("layer_scale", "vessel_scale"))
+        }
+        s2d_mapping_start = {
+            name: parameter.detach().clone()
+            for name, parameter in self.model.named_parameters()
+            if parameter.requires_grad and "interactions" in name
+            and any(token in name for token in ("layer_anatomy", "vessel_anatomy", "seg_to_denoise_gate"))
+        }
         d2s_gradient_norm_total = 0.0
+        s2d_gradient_norm_total = 0.0
         d2s_scale_gradient_total = 0.0
         accumulation_steps = max(
             1, int(self.config["train"].get("gradient_accumulation_steps", 1))
@@ -759,6 +888,18 @@ class Trainer:
                     d2s_gradient_norm_total += float(
                         torch.linalg.vector_norm(torch.cat(d2s_gradients)).item()
                     )
+                s2d_gradients = [
+                    parameter.grad.detach().float().reshape(-1)
+                    for name, parameter in self.model.named_parameters()
+                    if parameter.grad is not None and "interactions" in name
+                    and any(token in name for token in (
+                        "layer_anatomy", "vessel_anatomy", "seg_to_denoise_gate", "seg_scale"
+                    ))
+                ]
+                if s2d_gradients:
+                    s2d_gradient_norm_total += float(
+                        torch.linalg.vector_norm(torch.cat(s2d_gradients)).item()
+                    )
                 scale_gradients = [
                     parameter.grad.detach().float().abs().mean()
                     for name, parameter in self.model.named_parameters()
@@ -792,12 +933,26 @@ class Trainer:
             auxiliary = output.get("auxiliary", [])
             if auxiliary:
                 for name in (
+                    "seg_to_denoise_injection_relative_rms",
                     "denoise_to_layer_injection_abs_mean",
                     "denoise_to_vessel_injection_abs_mean",
                     "denoise_to_layer_injection_relative_rms",
                     "denoise_to_vessel_injection_relative_rms",
                     "layer_scale_abs_mean",
                     "vessel_scale_abs_mean",
+                    "seg_scale_abs_mean",
+                    "guidance_layer_probability_mean",
+                    "guidance_vessel_probability_mean",
+                    "guidance_layer_probability_std",
+                    "guidance_vessel_probability_std",
+                    "guidance_layer_probability_min",
+                    "guidance_layer_probability_max",
+                    "guidance_vessel_probability_min",
+                    "guidance_vessel_probability_max",
+                    "guidance_finite",
+                    "denoise_guidance_mean",
+                    "denoise_guidance_std",
+                    "denoise_guidance_finite",
                 ):
                     values = [float(item[name].item()) for item in auxiliary if name in item]
                     if values:
@@ -820,10 +975,16 @@ class Trainer:
                 "vessel_supervised_samples": float(vessel_supervised_samples),
                 "d2s_gradient_norm": d2s_gradient_norm_total
                 / max(optimizer_steps, 1),
+                "s2d_gradient_norm": s2d_gradient_norm_total
+                / max(optimizer_steps, 1),
                 "d2s_scale_gradient_abs_mean": d2s_scale_gradient_total
                 / max(optimizer_steps, 1),
             }
         )
+        if self.device.type == "cuda":
+            result["cuda_peak_memory_bytes"] = float(
+                torch.cuda.max_memory_allocated(self.device)
+            )
         if d2s_scale_start:
             named_parameters = dict(self.model.named_parameters())
             deltas = [
@@ -833,6 +994,21 @@ class Trainer:
             result["d2s_scale_update_abs_mean"] = float(
                 torch.stack(deltas).mean().item()
             )
+        if s2d_scale_start:
+            named_parameters = dict(self.model.named_parameters())
+            deltas = [
+                (named_parameters[name].detach() - initial).float().abs().mean()
+                for name, initial in s2d_scale_start.items()
+            ]
+            result["s2d_scale_update_abs_mean"] = float(torch.stack(deltas).mean().item())
+        named_parameters = dict(self.model.named_parameters())
+        for direction, starts in (("d2s", d2s_mapping_start), ("s2d", s2d_mapping_start)):
+            if starts:
+                deltas = [
+                    (named_parameters[name].detach() - initial).float().abs().mean()
+                    for name, initial in starts.items()
+                ]
+                result[f"{direction}_mapping_update_abs_mean"] = float(torch.stack(deltas).mean().item())
         return result
 
     @torch.no_grad()

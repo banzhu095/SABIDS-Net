@@ -1,0 +1,3 @@
+_base_: ../interaction_factorial_common.yaml
+model: {d2s_enabled: true, s2d_enabled: true, detach_d2s_source: true, detach_s2d_source: false}
+train: {output_dir: runs/future/interaction_gs_fold0_seed42}

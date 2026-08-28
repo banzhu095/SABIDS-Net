@@ -1171,3 +1171,15 @@ python tools/export_stage12_results.py --project-root /mnt/SABIDS-Net \
   --output /mnt/SABIDS-Net/runs/reports/stage12_validation_$(date +%Y%m%d_%H%M%S) \
   --dry-run --skip-input-hashes
 ```
+
+# 可归因的 2×2 降噪—分割交互实验
+
+第一轮使用 `J00/J10/J01/J11` 分别表示 D→S/S→D 的
+off-off、on-off、off-on、on-on。四组从同一
+E3b-noD2S checkpoint 独立初始化，共享编码器冻结，两方向来源
+detach，关闭 RMAC/伪标签/新解剖监督。主分析用固定第 20 轮、
+validation 全帧、P0=0.5 和位置等权归约，不预设双向交互有益。
+
+完整审计、云端命令、输出文件和成功/失败判据见
+[`docs/INTERACTION_FACTORIAL_AUDIT.md`](docs/INTERACTION_FACTORIAL_AUDIT.md)。入口会严格
+检查 checkpoint 内的 E3b-noD2S 协议，缺失时不搜索或替换历史权重。

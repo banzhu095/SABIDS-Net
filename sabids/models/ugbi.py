@@ -34,6 +34,7 @@ class UGBIBlock(nn.Module):
         enable_seg_to_denoise: bool = True,
         enable_denoise_to_seg: bool = True,
         use_uncertainty: bool = True,
+        scale_init: float = 0.1,
     ):
         super().__init__()
         self.enable_seg_to_denoise = enable_seg_to_denoise
@@ -53,9 +54,93 @@ class UGBIBlock(nn.Module):
         self.denoise_to_layer = nn.Conv2d(channels, channels, 1)
         self.denoise_to_vessel = nn.Conv2d(channels, channels, 1)
 
-        self.seg_scale = nn.Parameter(torch.zeros(1, channels, 1, 1))
-        self.layer_scale = nn.Parameter(torch.zeros(1, channels, 1, 1))
-        self.vessel_scale = nn.Parameter(torch.zeros(1, channels, 1, 1))
+        self.seg_scale = nn.Parameter(torch.full((1, channels, 1, 1), float(scale_init)))
+        self.layer_scale = nn.Parameter(torch.full((1, channels, 1, 1), float(scale_init)))
+        self.vessel_scale = nn.Parameter(torch.full((1, channels, 1, 1), float(scale_init)))
+
+    def seg_to_denoise(
+        self,
+        denoise: torch.Tensor,
+        layer: torch.Tensor,
+        vessel: torch.Tensor,
+        layer_probability: Optional[torch.Tensor] = None,
+        vessel_probability: Optional[torch.Tensor] = None,
+        detach_source: bool = False,
+        strength: float = 1.0,
+    ) -> tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+        """Inject trained segmentation guidance into denoising without a cycle."""
+        source_l = layer.detach() if detach_source else layer
+        source_v = vessel.detach() if detach_source else vessel
+        layer_prob = torch.sigmoid(self.layer_head(source_l)) if layer_probability is None else layer_probability
+        vessel_prob = torch.sigmoid(self.vessel_head(source_v)) if vessel_probability is None else vessel_probability
+        if detach_source:
+            layer_prob, vessel_prob = layer_prob.detach(), vessel_prob.detach()
+        if layer_prob.shape[-2:] != source_l.shape[-2:]:
+            layer_prob = torch.nn.functional.interpolate(layer_prob, source_l.shape[-2:], mode="bilinear", align_corners=False)
+            vessel_prob = torch.nn.functional.interpolate(vessel_prob, source_v.shape[-2:], mode="bilinear", align_corners=False)
+        if self.use_uncertainty:
+            layer_conf = 1.0 - binary_entropy(layer_prob)
+            vessel_conf = 1.0 - binary_entropy(vessel_prob)
+        else:
+            layer_conf, vessel_conf = torch.ones_like(layer_prob), torch.ones_like(vessel_prob)
+        layer_anatomy = self.layer_anatomy(torch.cat([source_l, layer_prob], dim=1))
+        vessel_anatomy = self.vessel_anatomy(torch.cat([source_v, vessel_prob], dim=1))
+        anatomy = layer_conf * layer_anatomy + vessel_conf * vessel_anatomy
+        gate = torch.sigmoid(self.seg_to_denoise_gate(torch.cat([denoise, anatomy], dim=1)))
+        injection = strength * self.seg_scale * gate * anatomy if self.enable_seg_to_denoise else torch.zeros_like(denoise)
+        details = {
+            "seg_to_denoise_gate": gate, "seg_to_denoise_injection": injection,
+            "seg_to_denoise_injection_relative_rms": injection.float().square().mean().sqrt()
+            / (denoise.detach().float().square().mean().sqrt() + 1e-8),
+            "seg_scale_abs_mean": self.seg_scale.detach().abs().mean(),
+            "guidance_layer_probability_mean": layer_prob.detach().float().mean(),
+            "guidance_vessel_probability_mean": vessel_prob.detach().float().mean(),
+            "guidance_layer_probability_std": layer_prob.detach().float().std(),
+            "guidance_vessel_probability_std": vessel_prob.detach().float().std(),
+            "guidance_layer_probability_min": layer_prob.detach().float().amin(),
+            "guidance_layer_probability_max": layer_prob.detach().float().amax(),
+            "guidance_vessel_probability_min": vessel_prob.detach().float().amin(),
+            "guidance_vessel_probability_max": vessel_prob.detach().float().amax(),
+            "guidance_finite": (
+                torch.isfinite(source_l).all() & torch.isfinite(source_v).all()
+                & torch.isfinite(layer_prob).all() & torch.isfinite(vessel_prob).all()
+            ).detach().float(),
+        }
+        return denoise + injection, details
+
+    def denoise_to_seg(
+        self,
+        denoise: torch.Tensor,
+        layer: torch.Tensor,
+        vessel: torch.Tensor,
+        detach_source: bool = False,
+        strength: float = 1.0,
+    ) -> tuple[torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]]:
+        """Inject denoising features into segmentation after the S->D pass."""
+        source_d = denoise.detach() if detach_source else denoise
+        noise_hint = torch.abs(torch.tanh(self.noise_head(source_d)))
+        restoration = self.restoration_context(torch.cat([source_d, noise_hint], dim=1))
+        d2l_gate = torch.sigmoid(self.denoise_to_layer_gate(torch.cat([layer, restoration], dim=1)))
+        d2v_gate = torch.sigmoid(self.denoise_to_vessel_gate(torch.cat([vessel, restoration], dim=1)))
+        layer_injection = strength * self.layer_scale * d2l_gate * self.denoise_to_layer(restoration) if self.enable_denoise_to_seg else torch.zeros_like(layer)
+        vessel_injection = strength * self.vessel_scale * d2v_gate * self.denoise_to_vessel(restoration) if self.enable_denoise_to_seg else torch.zeros_like(vessel)
+        details = {
+            "noise_hint": noise_hint, "denoise_to_layer_gate": d2l_gate,
+            "denoise_to_vessel_gate": d2v_gate, "denoise_to_layer_injection": layer_injection,
+            "denoise_to_vessel_injection": vessel_injection,
+            "denoise_to_layer_injection_abs_mean": layer_injection.detach().abs().mean(),
+            "denoise_to_vessel_injection_abs_mean": vessel_injection.detach().abs().mean(),
+            "denoise_to_layer_injection_relative_rms": layer_injection.float().square().mean().sqrt()
+            / (layer.detach().float().square().mean().sqrt() + 1e-8),
+            "denoise_to_vessel_injection_relative_rms": vessel_injection.float().square().mean().sqrt()
+            / (vessel.detach().float().square().mean().sqrt() + 1e-8),
+            "layer_scale_abs_mean": self.layer_scale.detach().abs().mean(),
+            "vessel_scale_abs_mean": self.vessel_scale.detach().abs().mean(),
+            "denoise_guidance_mean": source_d.detach().float().mean(),
+            "denoise_guidance_std": source_d.detach().float().std(),
+            "denoise_guidance_finite": torch.isfinite(source_d).all().detach().float(),
+        }
+        return layer + layer_injection, vessel + vessel_injection, details
 
     def forward(
         self,

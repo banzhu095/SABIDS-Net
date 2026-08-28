@@ -1,0 +1,13 @@
+_base_: interaction_factorial_common.yaml
+
+# Reserved capacity control only. It is deliberately excluded from the first
+# J00/J10/J01/J11 run. The same interaction modules receive branch-local
+# features instead of cross-task sources, preserving parameter count/budget.
+model:
+  d2s_enabled: true
+  s2d_enabled: true
+  d2s_source_mode: receiver_capacity
+  s2d_source_mode: receiver_capacity
+
+train:
+  output_dir: runs/current/interaction_capacity_control_fold0_seed42

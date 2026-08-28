@@ -14,6 +14,7 @@ from ..metrics import (
     automatic_cnr,
     binary_metrics,
     edge_preservation_index,
+    reference_edge_mae,
     layer_boundary_mae,
     layer_shape_metrics,
     psnr,
@@ -66,6 +67,8 @@ def evaluate_model(
     if invalid_modes:
         raise ValueError(f"Unknown postprocess modes: {sorted(invalid_modes)}")
     rows = []
+    repeat_outputs = []
+    qualitative_crops = []
     output_path = Path(output_dir) if output_dir else None
     if output_path:
         output_path.mkdir(parents=True, exist_ok=True)
@@ -80,6 +83,9 @@ def evaluate_model(
         vessel_probability = output["vessel_prob"].cpu().numpy()
         batch_size = image.shape[0]
         for index in range(batch_size):
+            target = None
+            vessel_true = None
+            layer_true = None
             error_outside_both = None
             error_outside_gt_inside_pred = None
             gt_vessel_outside_pred_layer = None
@@ -181,6 +187,11 @@ def evaluate_model(
                 row["epi"] = edge_preservation_index(denoised_crop, target)
                 row["epi_noisy"] = edge_preservation_index(noisy_crop, target)
                 row["epi_gain"] = row["epi"] - row["epi_noisy"]
+                row["reference_edge_mae"] = reference_edge_mae(denoised_crop, target)
+                row["reference_edge_mae_noisy"] = reference_edge_mae(noisy_crop, target)
+                row["reference_edge_mae_reduction"] = (
+                    row["reference_edge_mae_noisy"] - row["reference_edge_mae"]
+                )
                 row["snr_noisy_db"] = reconstruction_snr(noisy_crop, target)
                 row["snr_denoised_db"] = reconstruction_snr(denoised_crop, target)
                 row["snr_gain_db"] = row["snr_denoised_db"] - row["snr_noisy_db"]
@@ -222,6 +233,12 @@ def evaluate_model(
                     vessel_roi = vessel_true & vessel_valid
                     for name, image_eval in (("noisy", noisy_eval), ("denoised", denoised_eval), ("clean", target)):
                         row[f"vessel_stroma_cnr_{name}"] = region_cnr(image_eval, vessel_roi, stroma)
+                    row["vessel_stroma_cnr_abs_error"] = abs(
+                        row["vessel_stroma_cnr_denoised"] - row["vessel_stroma_cnr_clean"]
+                    )
+                    row["vessel_stroma_cnr_noisy_abs_error"] = abs(
+                        row["vessel_stroma_cnr_noisy"] - row["vessel_stroma_cnr_clean"]
+                    )
             if evaluate_vessel and bool(batch["has_vessel"][index]):
                 vessel_tp = vessel_pred & vessel_true & vessel_valid
                 vessel_fp = vessel_pred & ~vessel_true & vessel_valid
@@ -312,6 +329,16 @@ def evaluate_model(
                     for key, value in binary_metrics(vessel_p3[vessel_valid], vessel_true[vessel_valid]).items():
                         row[f"p3_vessel_{key}"] = value
             rows.append(row)
+            repeat_outputs.append(
+                {
+                    "group_id": str(batch["group_id"][index]),
+                    "dataset": str(batch["dataset"][index]),
+                    "denoised": denoised_eval.astype(np.float32),
+                    "layer": layer_pred.astype(bool),
+                    "vessel": vessel_pred.astype(bool),
+                    "valid": valid_eval.astype(bool),
+                }
+            )
 
             if output_path and save_predictions:
                 sample_dir = output_path / "predictions" / str(batch["dataset"][index])
@@ -389,6 +416,34 @@ def evaluate_model(
                             sample_dir / f"{sample_id}_error_overlay.png",
                             overlay,
                         )
+                    if bool(batch["has_layer"][index]):
+                        boundary_overlay = np.repeat(noisy_eval[..., None], 3, axis=2)
+                        kernel = np.ones((3, 3), np.uint8)
+                        gt_boundary = layer_true & ~cv2.erode(layer_true.astype(np.uint8), kernel).astype(bool)
+                        pred_boundary = layer_pred & ~cv2.erode(layer_pred.astype(np.uint8), kernel).astype(bool)
+                        boundary_overlay[gt_boundary] = (0.0, 1.0, 0.0)
+                        boundary_overlay[pred_boundary] = (1.0, 0.0, 1.0)
+                        write_rgb(sample_dir / f"{sample_id}_boundary_overlay.png", boundary_overlay)
+                if target is not None:
+                    write_gray(sample_dir / f"{sample_id}_clean.png", target)
+                    write_gray(sample_dir / f"{sample_id}_reference_abs_error.png", np.abs(denoised_eval - target))
+                crop_mask = vessel_true if vessel_true is not None and vessel_true.any() else (
+                    layer_true if layer_true is not None and layer_true.any() else None
+                )
+                if crop_mask is not None:
+                    ys, xs = np.where(crop_mask)
+                    center_y, center_x = int(np.median(ys)), int(np.median(xs))
+                else:
+                    center_y, center_x = noisy_eval.shape[0] // 2, noisy_eval.shape[1] // 2
+                crop_h, crop_w = min(128, noisy_eval.shape[0]), min(128, noisy_eval.shape[1])
+                y0 = min(max(center_y - crop_h // 2, 0), noisy_eval.shape[0] - crop_h)
+                x0 = min(max(center_x - crop_w // 2, 0), noisy_eval.shape[1] - crop_w)
+                qualitative_crops.append({
+                    "dataset": str(batch["dataset"][index]), "sample_id": sample_id,
+                    "group_id": str(batch["group_id"][index]),
+                    "x": int(x0), "y": int(y0), "width": int(crop_w), "height": int(crop_h),
+                    "selection": "GT-vessel median, else GT-layer median, else image center",
+                })
 
     frame_table = pd.DataFrame(rows)
     numeric_columns = frame_table.select_dtypes(include=[np.number]).columns.tolist()
@@ -400,6 +455,37 @@ def evaluate_model(
     group_table = group_table.merge(
         evaluated_frames.reset_index(), on=group_columns, how="left"
     )
+    repeat_rows = []
+    repeat_index = pd.DataFrame(
+        [{"group_id": item["group_id"], "dataset": item["dataset"], "index": index}
+         for index, item in enumerate(repeat_outputs)]
+    )
+    repeat_groups = repeat_index.groupby(["group_id", "dataset"]) if not repeat_index.empty else []
+    for (group_id, dataset), items in repeat_groups:
+        indices = items["index"].tolist()
+        denoise_mae, layer_dice, vessel_dice = [], [], []
+        for left_pos, left_index in enumerate(indices):
+            for right_index in indices[left_pos + 1:]:
+                left, right = repeat_outputs[left_index], repeat_outputs[right_index]
+                if left["denoised"].shape != right["denoised"].shape:
+                    continue
+                valid_pair = left["valid"] & right["valid"]
+                if valid_pair.any():
+                    denoise_mae.append(float(np.mean(np.abs(
+                        left["denoised"][valid_pair] - right["denoised"][valid_pair]
+                    ))))
+                    layer_dice.append(binary_metrics(left["layer"][valid_pair], right["layer"][valid_pair])["dice"])
+                    vessel_dice.append(binary_metrics(left["vessel"][valid_pair], right["vessel"][valid_pair])["dice"])
+        repeat_rows.append({
+            "group_id": group_id, "dataset": dataset,
+            "repeat_pair_count": len(denoise_mae),
+            "repeat_denoised_mae": float(np.mean(denoise_mae)) if denoise_mae else float("nan"),
+            "repeat_layer_dice": float(np.mean(layer_dice)) if layer_dice else float("nan"),
+            "repeat_vessel_dice": float(np.mean(vessel_dice)) if vessel_dice else float("nan"),
+        })
+    if repeat_rows:
+        group_table = group_table.merge(pd.DataFrame(repeat_rows), on=group_columns, how="left")
+        numeric_columns = group_table.select_dtypes(include=[np.number]).columns.tolist()
     summary = mean_dict(group_table[numeric_columns].to_dict("records"))
     summary["n_frames"] = int(len(frame_table))
     summary["n_groups"] = int(frame_table["group_id"].nunique())
@@ -440,6 +526,10 @@ def evaluate_model(
     if output_path:
         frame_table.to_csv(output_path / "frame_metrics.csv", index=False, encoding="utf-8-sig")
         group_table.to_csv(output_path / "group_metrics.csv", index=False, encoding="utf-8-sig")
+        if qualitative_crops:
+            pd.DataFrame(qualitative_crops).drop_duplicates().to_csv(
+                output_path / "qualitative_crops.csv", index=False, encoding="utf-8-sig"
+            )
         write_json(summary, output_path / "summary.json")
         write_json(
             {

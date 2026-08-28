@@ -427,3 +427,24 @@ Populate one row per independent fold after validation threshold selection.
   NPZ keys/shapes, rewrites incomplete caches atomically, accepts documented
   legacy denoised keys for drift-only comparison, and records incompatible
   caches without aborting the completed inference archive.
+
+# CODE-20260828-INTERACTION-FACTORIAL
+
+- Implemented an acyclic, detached J00/J10/J01/J11 interaction path. S0 uses
+  the trained final segmentation heads; the unsupervised historical per-scale
+  probability heads are not used as reliable guidance.
+- Added zero-initialized residual interaction scales, frozen-encoder `interaction`
+  stage, explicit direction/detach aliases, independent data RNG, sampler-plan
+  and post-load state fingerprints, optimizer duplication audit, per-scale
+  injection/guidance diagnostics, mapping gradients/updates, elapsed time and
+  CUDA peak memory logging.
+- Added fixed-final validation evaluation, repeat-frame stability, reference
+  edge error, clean-relative vessel/stroma CNR error, fixed prediction gallery,
+  same-checkpoint perturbation diagnostics and group-first paired-gain reports.
+- The interaction input recorder opens/hashes only train/validation label assets;
+  reserved test assets are not opened and test is not evaluated or tuned.
+- Local source checkpoint is absent, so the real-manifest B0/training smoke is
+  intentionally blocked and no performance result is claimed. `compileall` and
+  a synthetic forward/backward smoke passed. The local Python environment has
+  PyTorch but no pytest package, so the complete test suite remains to run in
+  the project conda/cloud environment.
