@@ -460,3 +460,12 @@ Populate one row per independent fold after validation threshold selection.
   it only when the denoising decoder/head are actually frozen. Registry v3 uses
   content-addressed filenames, and `--resume-partial` safely accepts only an
   epoch0-only failure with no last checkpoint/history.
+- Cloud atlas generation exposed an empty-crop failure when a requested
+  clean/GT/diagnostic PNG was structurally absent: the placeholder was created
+  at crop size and then sliced again with original-grid coordinates. Atlas
+  loading now distinguishes missing/decode/OOB states, clamps valid original
+  coordinates, never sends an empty image to OpenCV, prioritizes samples with
+  B0 clean/layer/vessel availability, and exports an asset inventory plus a
+  missing/invalid checklist.
+  Rebuilding a partial atlas now requires `--archive-existing`, which moves the
+  prior directory to a timestamped sibling instead of overwriting it.

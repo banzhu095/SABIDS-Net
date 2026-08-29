@@ -60,6 +60,14 @@ python tools/diagnose_interactions.py \
   --split val --device cuda
 ```
 
+图册脚本优先选择 B0 中 clean/layer/vessel 可评价项最齐全的固定样本，
+然后才按 ID 排序，不使用模型得分挑图。输出还包含
+`atlas_asset_inventory.csv`、`atlas_missing_assets.csv` 和
+`atlas_build_summary.json`。对于本来就没有 clean 或分割 GT 的数据，
+图册会显示 `MISSING` 占位并记录原因，不再崩溃，也不伪造参考图。
+如果上次失败已留下非空 atlas 目录，重建时使用
+`--archive-existing`；旧目录会整体移到同级时间戳目录，不会删除或静默覆盖。
+
 短链路验证仍要求真实 E3b-noD2S checkpoint 和 train/val manifest：
 
 ```bash
