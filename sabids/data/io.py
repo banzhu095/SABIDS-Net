@@ -11,6 +11,18 @@ def read_gray(path: str | Path) -> np.ndarray:
     path = Path(path)
     if not path.is_file():
         raise FileNotFoundError(f"Image does not exist: {path}")
+    if path.suffix.lower() == ".npy":
+        image = np.load(path, allow_pickle=False)
+        if image.ndim != 2:
+            raise ValueError(f"Expected a 2-D float cache, got {image.shape}: {path}")
+        if not np.issubdtype(image.dtype, np.floating):
+            raise ValueError(f"Float cache must use a floating dtype, got {image.dtype}: {path}")
+        image = image.astype(np.float32, copy=False)
+        if not np.isfinite(image).all():
+            raise ValueError(f"Float cache contains non-finite values: {path}")
+        if float(image.min()) < -1e-6 or float(image.max()) > 1.0 + 1e-6:
+            raise ValueError(f"Float cache is outside [0,1]: {path}")
+        return np.clip(image, 0.0, 1.0)
     buffer = np.fromfile(str(path), dtype=np.uint8)
     image = cv2.imdecode(buffer, cv2.IMREAD_UNCHANGED)
     if image is None:

@@ -33,7 +33,7 @@
 
 `tools/diagnose_interactions.py` 生成同 checkpoint 单方向关闭、强度扫描、空间错位和跨位置引导，明确标记为“依赖/扰动诊断”。跨位置使用两个确定性不同位置的循环置换，不使用 batch-size-1 shuffle。
 
-`configs/interaction_capacity_control.yaml` 预留接收分支自身特征容量控制。`configs/future/interaction_g*.yaml` 预留两方向 detach/open 的 G0/GD/GS/GDS，不在第一轮 runner 内。I-noisy/I-denoised 仍要求先审计冻结 D0 的训练数据泄漏并实现离线 D0 输入 manifest，当前未伪装成可运行配置。
+`configs/interaction_capacity_control.yaml` 预留接收分支自身特征容量控制。`configs/future/interaction_g*.yaml` 预留两方向 detach/open 的 G0/GD/GS/GDS，不在第一轮 runner 内。I-noisy/I-denoised 已作为独立的图像级输入实验实现，其 D0 泄漏审计、float cache、公平初始化和固定评价见 `docs/INPUT_FACTORIAL_AUDIT.md`；不与 J 首轮训练混合。
 
 ## 运行顺序（Linux/矩池云）
 

@@ -326,6 +326,18 @@ def vessel_diagnostic_metrics(
         result["vessel_area_fraction_mae"] = abs(
             predicted_fraction - true_fraction
         )
+        result["vessel_roi_fp_pixels"] = float(
+            np.logical_and(vessel_prediction, ~vessel_target)[roi].sum()
+        )
+        result["vessel_roi_fn_pixels"] = float(
+            np.logical_and(~vessel_prediction, vessel_target)[roi].sum()
+        )
+        result["vessel_roi_fp_per_valid_pixel"] = (
+            result["vessel_roi_fp_pixels"] / max(roi_pixels, 1.0)
+        )
+        result["vessel_roi_fn_per_valid_pixel"] = (
+            result["vessel_roi_fn_pixels"] / max(roi_pixels, 1.0)
+        )
 
     predicted_pixels = float(np.logical_and(vessel_prediction, valid).sum())
     outside_pixels = float(
@@ -439,6 +451,13 @@ def vessel_diagnostic_metrics(
         )
         result["vessel_boundary_band_fn_pixels"] = float(
             (~vessel_prediction & vessel_target & boundary_band).sum()
+        )
+        boundary_pixels = float(boundary_band.sum())
+        result["vessel_boundary_band_fp_per_valid_pixel"] = (
+            result["vessel_boundary_band_fp_pixels"] / max(boundary_pixels, 1.0)
+        )
+        result["vessel_boundary_band_fn_per_valid_pixel"] = (
+            result["vessel_boundary_band_fn_pixels"] / max(boundary_pixels, 1.0)
         )
     overlap = float(
         np.logical_and(vessel_prediction, layer_prediction & valid).sum()

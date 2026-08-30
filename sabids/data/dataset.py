@@ -40,15 +40,19 @@ class OCTManifestDataset(Dataset):
         root: Optional[str | Path] = None,
         datasets: Optional[List[str]] = None,
         groups: Optional[List[str]] = None,
+        image_column: str = "image_path",
     ) -> None:
         self.manifest = Path(manifest).expanduser().resolve()
         self.root = Path(root).expanduser().resolve() if root else self.manifest.parent
         self.transform = transform
         self.sample_repeat = sample_repeat
+        self.image_column = str(image_column)
         table = pd.read_csv(self.manifest, dtype=str).fillna("")
         missing = REQUIRED_COLUMNS - set(table.columns)
         if missing:
             raise ValueError(f"Manifest is missing columns: {sorted(missing)}")
+        if self.image_column not in table.columns:
+            raise ValueError(f"Manifest is missing configured image column: {self.image_column}")
         table = table[table["split"].astype(str) == str(split)].copy()
         if datasets:
             table = table[table["dataset"].isin(datasets)].copy()
@@ -93,8 +97,8 @@ class OCTManifestDataset(Dataset):
         repeat_index, has_repeat = self._repeat_index(index, group_id)
         repeat_row = self.table.iloc[repeat_index]
 
-        image = self._load_optional(row["image_path"])
-        repeat = self._load_optional(repeat_row["image_path"])
+        image = self._load_optional(row[self.image_column])
+        repeat = self._load_optional(repeat_row[self.image_column])
         if image is None or repeat is None:
             raise RuntimeError(f"Missing required image for sample {row['sample_id']}")
         original_height, original_width = image.shape[-2:]
@@ -166,6 +170,7 @@ class OCTManifestDataset(Dataset):
             "source_split": str(row.get("original_split", row.get("split", "unknown"))),
             "input_role": str(row.get("input_role", "noisy_input")),
             "original_path": str(self._resolve(row["image_path"])),
+            "model_input_path": str(self._resolve(row[self.image_column])),
             "clean_path": str(self._resolve(row.get("clean_path", "")) or ""),
             "layer_mask_path": str(
                 self._resolve(row.get("layer_mask_path", "")) or ""

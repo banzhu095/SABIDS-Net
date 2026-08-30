@@ -1183,3 +1183,14 @@ validation 全帧、P0=0.5 和位置等权归约，不预设双向交互有益�
 完整审计、云端命令、输出文件和成功/失败判据见
 [`docs/INTERACTION_FACTORIAL_AUDIT.md`](docs/INTERACTION_FACTORIAL_AUDIT.md)。入口会严格
 检查 checkpoint 内的 E3b-noD2S 协议，缺失时不搜索或替换历史权重。
+
+## I_NOISY / I_DENOISED 图像级输入实验
+
+新增的配对实验从同一个 Stage 1 fold-0 pre-seg snapshot 独立完整训练两个
+相同分割网络，只比较 float32 原始 noisy 与冻结 D0(noisy) 输入。正式预算为
+60 轮，主结果固定读取 `last.pth`，使用完整 validation、原图坐标、P0=0.5；
+test、交互、RMAC、降噪 loss、pseudo、阈值校准和后处理均不参与。D0 checkpoint
+无法证明与当前 val/test 位置隔离时，准备工具会在生成缓存前停止。
+
+实现审计、缓存格式、公平性门禁、原图小血管分箱、全部运行命令与结果解释见
+[`docs/INPUT_FACTORIAL_AUDIT.md`](docs/INPUT_FACTORIAL_AUDIT.md)。

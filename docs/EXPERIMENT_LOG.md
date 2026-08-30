@@ -469,3 +469,36 @@ Populate one row per independent fold after validation threshold selection.
   missing/invalid checklist.
   Rebuilding a partial atlas now requires `--archive-existing`, which moves the
   prior directory to a timestamped sibling instead of overwriting it.
+
+# CODE-20260830-INTERACTION-SUPPRESSION-AND-INPUT-FACTORIAL
+
+- Status: implementation and local code/synthetic verification completed; no
+  cloud training or performance result is claimed.
+- Interaction diagnosis now records signed/absolute/RMS residual scales,
+  mapping RMS/update/gradient, source/transformed/receiver and injection RMS,
+  gate distribution/saturation/entropy, guidance confidence, dataset and
+  vessel-label strata, pre/post global clipping, clip coefficient and task/
+  interaction gradient groups. Existing histories are never backfilled.
+- Added fixed-checkpoint J10/J11 off/learned/target-RMS/shift/cross-position/
+  self-capacity diagnostics and selected-position threshold, TP/FP/FN, stroma,
+  boundary-band and original-area-derived small-vessel changes. These outputs
+  are explicitly dependence/perturbation diagnostics, not retraining gains.
+- Added `I_NOISY`/`I_DENOISED` using paired float32 noisy/D0 caches and a common
+  pre-segmentation snapshot made directly from fold-specific Stage 1. The new
+  `input_segment` stage trains the same shared encoder plus layer/vessel paths
+  in both variants while freezing the internal denoising and UGBI paths.
+- D0 cache generation is gated by checkpoint resolved-config, manifest/split
+  fingerprints and train-versus-segmentation-val/test group overlap. Unknown
+  identity or overlap blocks the experiment; test assets are not opened.
+- Main I protocol uses the audited 60-epoch E3b budget, fixed final checkpoint,
+  P0=0.5, restored original geometry and position-first paired aggregation.
+  Artificial noise/blur/intensity remapping are off; only paired horizontal
+  flip remains. Original-label-grid training components pre-register the small/
+  medium/large area bins.
+- Local verification: `python -m compileall -q sabids tools tests` passed and
+  six new focused tests were executed directly with the project Python (float
+  cache, selected input, parameter/loss isolation, paired config and D0 leakage
+  gate). The environment lacks the pytest package, so full `pytest -q` remains
+  required on cloud/CI. The real Stage 1 best and J run artifacts are absent
+  locally, so real cache/train smoke and numeric scientific conclusions remain
+  pending.

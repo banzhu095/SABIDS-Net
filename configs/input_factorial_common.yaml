@@ -1,0 +1,68 @@
+_base_: stage2_segment_roi_outside.yaml
+
+seed: 42
+deterministic: true
+
+model:
+  enable_seg_to_denoise: false
+  enable_denoise_to_seg: false
+  s2d_enabled: false
+  d2s_enabled: false
+  causal_interaction_experiment: false
+  dropout: 0.0
+
+data:
+  manifest: Manifests/input_factorial/manifest_input_fold0.csv
+  root: .
+  target_size: [512, 512]
+  normalization: fixed
+  samples_per_epoch: 64
+  augmentation:
+    horizontal_flip: 0.5
+    strong_private_only: false
+    gamma_range: [1.0, 1.0]
+    contrast_range: [1.0, 1.0]
+    speckle_std: 0.0
+    blur_probability: 0.0
+
+train:
+  stage: input_segment
+  epochs: 60
+  batch_size: 1
+  gradient_accumulation_steps: 1
+  num_workers: 4
+  learning_rate: 0.00005
+  scheduler: plateau
+  lr_plateau_patience: 4
+  lr_plateau_factor: 0.5
+  early_stopping_patience: 100
+  pretrained: runs/current/input_factorial_common_fold0/preseg_initialization.pth
+  strict_pretrained: true
+  resume: null
+  evaluate_epoch0: true
+  monitor: vessel_soft_dice
+  monitor_denoise_drift: false
+  train_eval_every: 0
+  use_ema: false
+
+loss:
+  definition_version: input-factorial-e3b-v1
+  auxiliary_weight: 0.0
+  vessel_supervision_mode: roi_bce_dice_outside
+  weights:
+    reconstruction: 0.0
+    residual: 0.0
+    layer: 1.0
+    vessel: 1.0
+    vessel_stroma: 0.0
+    vessel_area: 0.0
+    vessel_outside: 0.5
+    containment: 0.1
+    identity: 0.0
+    rmac: 0.0
+    pseudo: 0.0
+
+evaluation:
+  threshold: 0.5
+  layer_threshold: 0.5
+  vessel_threshold: 0.5

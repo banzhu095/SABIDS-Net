@@ -5,14 +5,14 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 from scipy.ndimage import label as connected_components
 
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from sabids.config import load_config
-from sabids.data import OCTManifestDataset
-from sabids.engine.trainer import _make_transform
+from sabids.data.io import read_mask
 from sabids.utils import write_json
 
 
@@ -32,25 +32,34 @@ def main() -> None:
     args = parse_args()
     config = load_config(args.config)
     data = config["data"]
-    dataset = OCTManifestDataset(
-        data["manifest"],
-        split=data.get("train_split", "train"),
-        transform=_make_transform(config, training=False),
-        sample_repeat=False,
-        root=data.get("root"),
-        datasets=data.get("train_datasets"),
-        groups=data.get("train_groups"),
-    )
+    manifest = Path(data["manifest"]).expanduser().resolve()
+    root = Path(data.get("root") or manifest.parent).expanduser().resolve()
+    table = pd.read_csv(manifest, dtype=str).fillna("")
+    table = table[table["split"] == str(data.get("train_split", "train"))].copy()
+    if data.get("train_datasets"):
+        table = table[table["dataset"].isin(data["train_datasets"])]
+    if data.get("train_groups"):
+        table = table[table["group_id"].isin([str(value) for value in data["train_groups"]])]
+
+    def resolve(value: str) -> Path:
+        path = Path(value).expanduser()
+        return path if path.is_absolute() else (root / path).resolve()
+
     areas = []
     sampled_groups = []
-    for group_id in sorted(dataset.groups):
-        sample = dataset[dataset.groups[group_id][0]]
-        if not bool(sample["has_vessel"]):
+    if "vessel_mask_path" not in table.columns:
+        raise ValueError("Manifest has no vessel_mask_path column")
+    for group_id, group in table.groupby("group_id", sort=True):
+        labelled_rows = group[group["vessel_mask_path"].astype(str) != ""]
+        if labelled_rows.empty:
             continue
-        valid = (
-            sample["valid_mask"][0].numpy() > 0.5
-        ) & (sample["vessel_valid_mask"][0].numpy() > 0.5)
-        target = (sample["vessel_mask"][0].numpy() > 0.5) & valid
+        row = labelled_rows.sort_values("sample_id").iloc[0]
+        target = read_mask(resolve(str(row["vessel_mask_path"]))) > 0.5
+        valid_path = str(row.get("vessel_valid_mask_path", "")).strip()
+        valid = read_mask(resolve(valid_path)) > 0.5 if valid_path else np.ones_like(target, dtype=bool)
+        if target.shape != valid.shape:
+            raise ValueError(f"Vessel/valid shape mismatch for training group {group_id}")
+        target &= valid
         labelled, count = connected_components(target)
         areas.extend(
             int((labelled == component_id).sum())
@@ -67,7 +76,7 @@ def main() -> None:
     medium_max = max(medium_max, small_max + 1)
     result = {
         "definition": (
-            "Connected-component pixel area after the resolved training resize/pad, "
+            "Connected-component pixel area in the original stored label grid, "
             "using the first manifest frame per labelled training group."
         ),
         "component_size_thresholds": [small_max, medium_max],
@@ -77,7 +86,8 @@ def main() -> None:
         "area_min": int(values.min()),
         "area_median": float(np.median(values)),
         "area_max": int(values.max()),
-        "target_size": data.get("target_size"),
+        "coordinate_system": "original_label_pixels",
+        "target_size_not_used": data.get("target_size"),
     }
     write_json(result, Path(args.output))
     print(result)

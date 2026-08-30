@@ -16,6 +16,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--project-root", default=".")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--samples-per-dataset", type=int, default=2)
+    parser.add_argument("--labelled-frames-per-group", type=int, default=1)
     parser.add_argument("--output", default="runs/interaction_factorial_report/atlas")
     parser.add_argument(
         "--archive-existing", action="store_true",
@@ -40,7 +41,11 @@ def read_crop(
     """Read an original-grid image and safely apply the shared atlas crop."""
     if not path.is_file():
         return _placeholder((height, width), "MISSING"), "missing"
-    image = cv2.imdecode(np.fromfile(str(path), dtype=np.uint8), cv2.IMREAD_COLOR)
+    if path.suffix.lower() == ".npy":
+        array = np.load(path, allow_pickle=False).astype(np.float32)
+        image = cv2.cvtColor(np.round(np.clip(array, 0.0, 1.0) * 255).astype(np.uint8), cv2.COLOR_GRAY2BGR)
+    else:
+        image = cv2.imdecode(np.fromfile(str(path), dtype=np.uint8), cv2.IMREAD_COLOR)
     if image is None:
         return _placeholder((height, width), "DECODE FAIL"), "decode_failed"
     image_height, image_width = image.shape[:2]
@@ -77,13 +82,21 @@ def main() -> None:
         frames[column].notna() & (frames[column].astype(str).str.strip() != "")
         for column in availability_columns
     ) if availability_columns else 0
-    selected = (
+    dataset_selected = (
         frames.sort_values(
             ["dataset", "_availability_score", "group_id", "sample_id"],
             ascending=[True, False, True, True],
         )
         .groupby("dataset", as_index=False, group_keys=False)
         .head(args.samples_per_dataset)
+    )
+    vessel_metric = "p0_vessel_dice" if "p0_vessel_dice" in frames else "vessel_dice"
+    labelled = frames[frames[vessel_metric].notna()].sort_values(["group_id", "sample_id"])
+    labelled_selected = labelled.groupby("group_id", as_index=False, group_keys=False).head(
+        args.labelled_frames_per_group
+    )
+    selected = pd.concat([dataset_selected, labelled_selected], ignore_index=True).drop_duplicates(
+        ["dataset", "sample_id"]
     )
     runs = {
         "B0": b0,

@@ -101,10 +101,25 @@ class UGBIBlock(nn.Module):
             "guidance_layer_probability_max": layer_prob.detach().float().amax(),
             "guidance_vessel_probability_min": vessel_prob.detach().float().amin(),
             "guidance_vessel_probability_max": vessel_prob.detach().float().amax(),
+            "guidance_layer_confidence_mean": layer_conf.detach().float().mean(),
+            "guidance_layer_confidence_std": layer_conf.detach().float().std(),
+            "guidance_vessel_confidence_mean": vessel_conf.detach().float().mean(),
+            "guidance_vessel_confidence_std": vessel_conf.detach().float().std(),
             "guidance_finite": (
                 torch.isfinite(source_l).all() & torch.isfinite(source_v).all()
                 & torch.isfinite(layer_prob).all() & torch.isfinite(vessel_prob).all()
             ).detach().float(),
+            "seg_scale_signed_mean": self.seg_scale.detach().float().mean(),
+            "seg_source_layer_rms": source_l.detach().float().square().mean().sqrt(),
+            "seg_source_vessel_rms": source_v.detach().float().square().mean().sqrt(),
+            "seg_transformed_anatomy_rms": anatomy.detach().float().square().mean().sqrt(),
+            "denoise_receiver_rms": denoise.detach().float().square().mean().sqrt(),
+            "s2d_gate_mean": gate.detach().float().mean(),
+            "s2d_gate_std": gate.detach().float().std(),
+            "s2d_gate_min": gate.detach().float().amin(),
+            "s2d_gate_max": gate.detach().float().amax(),
+            "s2d_gate_saturation_fraction": ((gate < 0.05) | (gate > 0.95)).detach().float().mean(),
+            "s2d_gate_entropy": binary_entropy(gate.detach().float()).mean(),
         }
         return denoise + injection, details
 
@@ -139,6 +154,24 @@ class UGBIBlock(nn.Module):
             "denoise_guidance_mean": source_d.detach().float().mean(),
             "denoise_guidance_std": source_d.detach().float().std(),
             "denoise_guidance_finite": torch.isfinite(source_d).all().detach().float(),
+            "layer_scale_signed_mean": self.layer_scale.detach().float().mean(),
+            "vessel_scale_signed_mean": self.vessel_scale.detach().float().mean(),
+            "denoise_source_rms": source_d.detach().float().square().mean().sqrt(),
+            "restoration_transformed_rms": restoration.detach().float().square().mean().sqrt(),
+            "layer_receiver_rms": layer.detach().float().square().mean().sqrt(),
+            "vessel_receiver_rms": vessel.detach().float().square().mean().sqrt(),
+            "d2l_gate_mean": d2l_gate.detach().float().mean(),
+            "d2l_gate_std": d2l_gate.detach().float().std(),
+            "d2l_gate_min": d2l_gate.detach().float().amin(),
+            "d2l_gate_max": d2l_gate.detach().float().amax(),
+            "d2l_gate_saturation_fraction": ((d2l_gate < 0.05) | (d2l_gate > 0.95)).detach().float().mean(),
+            "d2l_gate_entropy": binary_entropy(d2l_gate.detach().float()).mean(),
+            "d2v_gate_mean": d2v_gate.detach().float().mean(),
+            "d2v_gate_std": d2v_gate.detach().float().std(),
+            "d2v_gate_min": d2v_gate.detach().float().amin(),
+            "d2v_gate_max": d2v_gate.detach().float().amax(),
+            "d2v_gate_saturation_fraction": ((d2v_gate < 0.05) | (d2v_gate > 0.95)).detach().float().mean(),
+            "d2v_gate_entropy": binary_entropy(d2v_gate.detach().float()).mean(),
         }
         return layer + layer_injection, vessel + vessel_injection, details
 

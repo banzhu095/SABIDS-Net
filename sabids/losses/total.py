@@ -260,7 +260,7 @@ class SABIDSLoss(nn.Module):
             reconstruction, residual = self._restoration(output, batch)
         else:
             reconstruction, residual = zero, zero
-        if stage in {"segment", "warmup", "joint", "private", "private_seg", "interaction"}:
+        if stage in {"segment", "warmup", "joint", "private", "private_seg", "interaction", "input_segment"}:
             (
                 layer,
                 vessel,
@@ -290,7 +290,7 @@ class SABIDSLoss(nn.Module):
         )
 
         containment = zero
-        if stage in {"segment", "warmup", "joint", "private", "private_seg", "interaction"}:
+        if stage in {"segment", "warmup", "joint", "private", "private_seg", "interaction", "input_segment"}:
             has_layer = batch["has_layer"].view(-1, 1, 1, 1)
             layer_reference = torch.where(
                 has_layer,
@@ -394,6 +394,10 @@ class SABIDSLoss(nn.Module):
             "interaction": {
                 "reconstruction", "residual", "layer", "vessel",
                 "vessel_stroma", "vessel_area", "vessel_outside", "containment"
+            },
+            "input_segment": {
+                "layer", "vessel", "vessel_stroma", "vessel_area",
+                "vessel_outside", "containment"
             },
             "private": {
                 "reconstruction", "residual", "layer", "vessel",

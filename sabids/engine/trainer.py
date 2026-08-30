@@ -109,6 +109,7 @@ def build_loaders(config: Dict) -> tuple[DataLoader, DataLoader, object]:
         root=data_cfg.get("root"),
         datasets=data_cfg.get("train_datasets"),
         groups=data_cfg.get("train_groups"),
+        image_column=data_cfg.get("input_column", "image_path"),
     )
     val_dataset = OCTManifestDataset(
         data_cfg["manifest"],
@@ -118,6 +119,7 @@ def build_loaders(config: Dict) -> tuple[DataLoader, DataLoader, object]:
         root=data_cfg.get("root"),
         datasets=data_cfg.get("val_datasets"),
         groups=data_cfg.get("val_groups"),
+        image_column=data_cfg.get("input_column", "image_path"),
     )
     max_val_samples = data_cfg.get("max_val_samples")
     if max_val_samples is not None:
@@ -183,6 +185,7 @@ def build_diagnostic_loader(
             if split == data_cfg.get("train_split", "train")
             else data_cfg.get("val_groups")
         ),
+        image_column=data_cfg.get("input_column", "image_path"),
     )
     frames_per_group = config["data"].get("train_eval_frames_per_group")
     if split == data_cfg.get("train_split", "train") and frames_per_group is not None:
@@ -241,7 +244,7 @@ class Trainer:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.train_loader, self.val_loader, self.train_sampler = build_loaders(config)
         self._record_run_inputs()
-        if str(config.get("train", {}).get("stage", "")) == "interaction":
+        if str(config.get("train", {}).get("stage", "")) in {"interaction", "input_segment"}:
             missing_labels = config.get("runtime", {}).get("missing_label_assets", [])
             if missing_labels:
                 raise FileNotFoundError(
@@ -475,7 +478,7 @@ class Trainer:
         }
         label_assets = []
         asset_table = table
-        if str(self.config.get("train", {}).get("stage", "")) == "interaction":
+        if str(self.config.get("train", {}).get("stage", "")) in {"interaction", "input_segment"}:
             allowed_splits = {
                 str(self.config.get("data", {}).get("train_split", "train")),
                 str(self.config.get("data", {}).get("val_split", "val")),
@@ -831,6 +834,13 @@ class Trainer:
         d2s_gradient_norm_total = 0.0
         s2d_gradient_norm_total = 0.0
         d2s_scale_gradient_total = 0.0
+        gradient_group_totals = defaultdict(float)
+        gradient_group_fraction_totals = defaultdict(float)
+        scale_gradient_totals = defaultdict(float)
+        level_mapping_gradient_totals = defaultdict(float)
+        clipping_coefficient_total = 0.0
+        post_clip_gradient_norm_total = 0.0
+        diagnostic_counts = defaultdict(int)
         accumulation_steps = max(
             1, int(self.config["train"].get("gradient_accumulation_steps", 1))
         )
@@ -934,6 +944,62 @@ class Trainer:
                     d2s_scale_gradient_total += float(
                         torch.stack(scale_gradients).mean().item()
                     )
+                level_mapping_gradients = defaultdict(list)
+                for name, parameter in self.model.named_parameters():
+                    if parameter.grad is None or not name.startswith("interactions."):
+                        continue
+                    parts = name.split(".")
+                    if len(parts) < 3:
+                        continue
+                    level, local_name = parts[1], ".".join(parts[2:])
+                    if local_name in {"seg_scale", "layer_scale", "vessel_scale"}:
+                        scale_gradient_totals[(level, local_name)] += float(
+                            parameter.grad.detach().float().abs().mean().item()
+                        )
+                        continue
+                    direction = "d2s" if any(token in local_name for token in (
+                        "noise_head", "restoration_context", "denoise_to_layer", "denoise_to_vessel",
+                    )) else "s2d"
+                    level_mapping_gradients[(level, direction)].append(
+                        parameter.grad.detach().float().reshape(-1)
+                    )
+                for key, values in level_mapping_gradients.items():
+                    level_mapping_gradient_totals[key] += float(
+                        torch.linalg.vector_norm(torch.cat(values)).item()
+                    )
+                grouped_gradients = defaultdict(list)
+                for name, parameter in self.model.named_parameters():
+                    if parameter.grad is None:
+                        continue
+                    if "interactions" in name and any(token in name for token in (
+                        "noise_head", "restoration_context", "denoise_to_layer", "denoise_to_vessel",
+                        "layer_scale", "vessel_scale",
+                    )):
+                        group = "d2s"
+                    elif "interactions" in name:
+                        group = "s2d"
+                    elif name.startswith(("stem", "encoder_blocks", "downsamples")):
+                        group = "shared_encoder"
+                    elif ".denoise" in name or name.startswith("residual_head"):
+                        group = "denoise"
+                    elif ".layer" in name or name.startswith(("layer_head", "boundary_head")):
+                        group = "layer"
+                    elif ".vessel" in name or name.startswith("vessel_head"):
+                        group = "vessel"
+                    else:
+                        group = "other"
+                    grouped_gradients[group].append(parameter.grad.detach().float().reshape(-1))
+                group_norms = {
+                    group: float(torch.linalg.vector_norm(torch.cat(values)).item())
+                    for group, values in grouped_gradients.items() if values
+                }
+                for group, value in group_norms.items():
+                    gradient_group_totals[group] += value
+                squared_norm_sum = sum(value * value for value in group_norms.values())
+                for group, value in group_norms.items():
+                    gradient_group_fraction_totals[group] += (
+                        value * value / max(squared_norm_sum, 1e-24)
+                    )
                 gradient_norm = clip_grad_norm_(
                     self.model.parameters(),
                     float(self.config["train"].get("gradient_clip", 1.0)),
@@ -944,6 +1010,10 @@ class Trainer:
                         f"batch={batch_index + 1}, samples={batch.get('sample_id')}"
                     )
                 gradient_norm_total += float(gradient_norm.detach().item())
+                clip_limit = float(self.config["train"].get("gradient_clip", 1.0))
+                coefficient = min(1.0, clip_limit / (float(gradient_norm.detach().item()) + 1e-12))
+                clipping_coefficient_total += coefficient
+                post_clip_gradient_norm_total += float(gradient_norm.detach().item()) * coefficient
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
                 optimizer_steps += 1
@@ -973,14 +1043,42 @@ class Trainer:
                     "guidance_layer_probability_max",
                     "guidance_vessel_probability_min",
                     "guidance_vessel_probability_max",
+                    "guidance_layer_confidence_mean",
+                    "guidance_layer_confidence_std",
+                    "guidance_vessel_confidence_mean",
+                    "guidance_vessel_confidence_std",
                     "guidance_finite",
                     "denoise_guidance_mean",
                     "denoise_guidance_std",
                     "denoise_guidance_finite",
+                    "seg_scale_signed_mean",
+                    "layer_scale_signed_mean",
+                    "vessel_scale_signed_mean",
+                    "seg_source_layer_rms",
+                    "seg_source_vessel_rms",
+                    "seg_transformed_anatomy_rms",
+                    "denoise_receiver_rms",
+                    "denoise_source_rms",
+                    "restoration_transformed_rms",
+                    "layer_receiver_rms",
+                    "vessel_receiver_rms",
+                    "s2d_gate_mean", "s2d_gate_std", "s2d_gate_min", "s2d_gate_max",
+                    "s2d_gate_saturation_fraction", "s2d_gate_entropy",
+                    "d2l_gate_mean", "d2l_gate_std", "d2l_gate_min", "d2l_gate_max",
+                    "d2l_gate_saturation_fraction", "d2l_gate_entropy",
+                    "d2v_gate_mean", "d2v_gate_std", "d2v_gate_min", "d2v_gate_max",
+                    "d2v_gate_saturation_fraction", "d2v_gate_entropy",
                 ):
                     values = [float(item[name].item()) for item in auxiliary if name in item]
                     if values:
                         totals[f"interaction_{name}"] += float(np.mean(values))
+                        if len(batch.get("dataset", [])) == 1:
+                            dataset_name = str(batch["dataset"][0]).replace(" ", "_")
+                            labelled = "vessel_labelled" if bool(batch["has_vessel"][0]) else "vessel_unlabelled"
+                            totals[f"interaction_dataset_{dataset_name}_{name}"] += float(np.mean(values))
+                            totals[f"interaction_{labelled}_{name}"] += float(np.mean(values))
+                            diagnostic_counts[f"interaction_dataset_{dataset_name}_{name}"] += 1
+                            diagnostic_counts[f"interaction_{labelled}_{name}"] += 1
                     for item in auxiliary:
                         if name in item and "level" in item:
                             level = int(item["level"].item())
@@ -990,6 +1088,8 @@ class Trainer:
             progress.set_postfix(loss=totals["total"] / steps)
             del output, repeat_output, clean_output, teacher_output, losses
         result = {key: value / max(steps, 1) for key, value in totals.items()}
+        for key, count in diagnostic_counts.items():
+            result[key] = totals[key] / max(count, 1)
         result.update(
             {
                 "optimizer_steps": float(optimizer_steps),
@@ -1003,8 +1103,16 @@ class Trainer:
                 / max(optimizer_steps, 1),
                 "d2s_scale_gradient_abs_mean": d2s_scale_gradient_total
                 / max(optimizer_steps, 1),
+                "gradient_norm_after_clip": post_clip_gradient_norm_total / max(optimizer_steps, 1),
+                "gradient_clip_coefficient": clipping_coefficient_total / max(optimizer_steps, 1),
+                "interaction_scale_weight_decay": float(self.config["train"].get("weight_decay", 0.0)),
             }
         )
+        for group, value in gradient_group_totals.items():
+            result[f"gradient_group_{group}_norm"] = value / max(optimizer_steps, 1)
+            result[f"gradient_group_{group}_fraction"] = (
+                gradient_group_fraction_totals[group] / max(optimizer_steps, 1)
+            )
         if self.device.type == "cuda":
             result["cuda_peak_memory_bytes"] = float(
                 torch.cuda.max_memory_allocated(self.device)
@@ -1033,6 +1141,63 @@ class Trainer:
                     for name, initial in starts.items()
                 ]
                 result[f"{direction}_mapping_update_abs_mean"] = float(torch.stack(deltas).mean().item())
+        for level, interaction in sorted(self.model.interactions.items(), key=lambda item: int(item[0])):
+            for name in ("seg_scale", "layer_scale", "vessel_scale"):
+                value = getattr(interaction, name).detach().float()
+                result[f"level{level}_{name}_signed_mean"] = float(value.mean().item())
+                result[f"level{level}_{name}_abs_mean"] = float(value.abs().mean().item())
+                result[f"level{level}_{name}_rms"] = float(value.square().mean().sqrt().item())
+                result[f"level{level}_{name}_gradient_abs_mean"] = (
+                    scale_gradient_totals[(level, name)] / max(optimizer_steps, 1)
+                )
+                result[f"level{level}_{name}_weight_decay"] = float(
+                    self.config["train"].get("weight_decay", 0.0)
+                )
+                start = (s2d_scale_start if name == "seg_scale" else d2s_scale_start).get(
+                    f"interactions.{level}.{name}"
+                )
+                if start is not None:
+                    result[f"level{level}_{name}_update_abs_mean"] = float(
+                        (value - start.float()).abs().mean().item()
+                    )
+            d2s_values = [
+                parameter.detach().float().reshape(-1)
+                for module in (
+                    interaction.noise_head, interaction.restoration_context,
+                    interaction.denoise_to_layer_gate, interaction.denoise_to_vessel_gate,
+                    interaction.denoise_to_layer, interaction.denoise_to_vessel,
+                ) for parameter in module.parameters()
+            ]
+            s2d_values = [
+                parameter.detach().float().reshape(-1)
+                for module in (
+                    interaction.layer_anatomy, interaction.vessel_anatomy,
+                    interaction.seg_to_denoise_gate,
+                ) for parameter in module.parameters()
+            ]
+            if d2s_values:
+                result[f"level{level}_d2s_mapping_parameter_rms"] = float(torch.cat(d2s_values).square().mean().sqrt().item())
+                result[f"level{level}_d2s_mapping_gradient_norm"] = (
+                    level_mapping_gradient_totals[(level, "d2s")] / max(optimizer_steps, 1)
+                )
+            if s2d_values:
+                result[f"level{level}_s2d_mapping_parameter_rms"] = float(torch.cat(s2d_values).square().mean().sqrt().item())
+                result[f"level{level}_s2d_mapping_gradient_norm"] = (
+                    level_mapping_gradient_totals[(level, "s2d")] / max(optimizer_steps, 1)
+                )
+            for direction, starts in (("d2s", d2s_mapping_start), ("s2d", s2d_mapping_start)):
+                level_starts = {
+                    name: initial for name, initial in starts.items()
+                    if name.startswith(f"interactions.{level}.")
+                }
+                if level_starts:
+                    changes = [
+                        (named_parameters[name].detach() - initial).float().abs().mean()
+                        for name, initial in level_starts.items()
+                    ]
+                    result[f"level{level}_{direction}_mapping_update_abs_mean"] = float(
+                        torch.stack(changes).mean().item()
+                    )
         return result
 
     @torch.no_grad()

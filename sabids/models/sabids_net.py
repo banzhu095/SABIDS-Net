@@ -430,6 +430,15 @@ class SABIDSNet(nn.Module):
                         self._set_module_trainable(module, True)
                     interaction.layer_scale.requires_grad_(True)
                     interaction.vessel_scale.requires_grad_(True)
+        elif stage == "input_segment":
+            # Image-level I_NOISY/I_DENOISED experiment: the segmentation
+            # network (shared encoder + layer/vessel paths) is trained from the
+            # same Stage-1 snapshot. The internal denoising path and all UGBI
+            # interactions are excluded; D0 is an external frozen cache maker.
+            self._set_module_trainable(self.adapters["denoise"], False)
+            self._set_module_trainable(self.decoders["denoise"], False)
+            self._set_module_trainable(self.residual_head, False)
+            self._set_module_trainable(self.interactions, False)
         elif stage in {"joint", "private", "warmup"}:
             return
         else:
