@@ -768,11 +768,15 @@ class Trainer:
             )
             clean_context = torch.no_grad() if clean_no_grad else nullcontext()
             with clean_context:
-                raw_clean = self.model(
-                    identity_input,
-                    detach_cross=detach_cross,
-                    return_features=False,
-                    return_auxiliary=False,
+                raw_clean = (
+                    self.model.forward_denoise_only(identity_input)
+                    if self.stage == "denoise"
+                    else self.model(
+                        identity_input,
+                        detach_cross=detach_cross,
+                        return_features=False,
+                        return_auxiliary=False,
+                    )
                 )
             clean_keys = ["layer_prob", "vessel_prob"]
             if needs_identity:
@@ -865,7 +869,11 @@ class Trainer:
                 repeat_output, clean_output, teacher_output = self._forward_auxiliary(
                     batch, detach_cross
                 )
-                output = self.model(batch["image"], detach_cross=detach_cross)
+                output = (
+                    self.model.forward_denoise_only(batch["image"])
+                    if self.stage == "denoise"
+                    else self.model(batch["image"], detach_cross=detach_cross)
+                )
                 losses = self.loss_fn(
                     output,
                     batch,

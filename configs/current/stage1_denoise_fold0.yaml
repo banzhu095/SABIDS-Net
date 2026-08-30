@@ -5,5 +5,15 @@ _base_: stage1_denoise_current.yaml
 data:
   manifest: Manifests/joint_folds/manifest_joint_fold0.csv
 
+# Stage 1 has no trained segmentation guidance. Keep the stored architecture
+# compatible, but exclude both interaction directions from its protocol.
+model:
+  enable_seg_to_denoise: false
+  enable_denoise_to_seg: false
+
 train:
   output_dir: runs/current/stage1_denoise_fold0
+  # Preserve effective batch 2 while reducing the 512x512 activation peak on
+  # a 24 GB GPU. Both noisy reconstruction and clean identity remain active.
+  batch_size: 1
+  gradient_accumulation_steps: 2

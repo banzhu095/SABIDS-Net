@@ -102,6 +102,29 @@ def test_input_segment_parameter_boundary_is_identical_and_excludes_denoising():
     assert trainable_sets[0] == trainable_sets[1]
 
 
+def test_stage1_denoise_only_matches_disabled_interaction_full_forward():
+    torch.manual_seed(17)
+    model = _small_model().eval()
+    image = torch.rand(1, 1, 16, 24)
+    with torch.no_grad():
+        full = model(image, return_features=False, return_auxiliary=False)
+        compact = model.forward_denoise_only(image)
+    for key in ("denoised_raw", "denoised", "residual"):
+        torch.testing.assert_close(compact[key], full[key], rtol=0.0, atol=0.0)
+    assert "layer_logits" not in compact and "vessel_logits" not in compact
+
+
+def test_fold_stage1_uses_memory_safe_equivalent_batch_and_no_interaction():
+    root = Path(__file__).resolve().parents[1]
+    config = load_config(root / "configs/current/stage1_denoise_fold0.yaml")
+    assert config["train"]["batch_size"] == 1
+    assert config["train"]["gradient_accumulation_steps"] == 2
+    assert config["train"]["amp"] is True
+    assert config["loss"]["weights"]["identity"] > 0
+    assert config["model"]["enable_seg_to_denoise"] is False
+    assert config["model"]["enable_denoise_to_seg"] is False
+
+
 def test_input_segment_loss_has_no_denoising_rmac_or_pseudo_terms():
     shape = (1, 1, 8, 8)
     layer_logits = torch.zeros(shape, requires_grad=True)

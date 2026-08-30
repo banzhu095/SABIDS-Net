@@ -198,8 +198,8 @@ def build_cache(root: Path, checkpoint: Path, output_root: Path, device_name: st
         for batch in loader:
             image = batch["image"].to(device)
             with torch.no_grad():
-                first = model(image, return_features=False, return_auxiliary=False)["denoised"][0, 0].cpu().numpy()
-                second = model(image, return_features=False, return_auxiliary=False)["denoised"][0, 0].cpu().numpy()
+                first = model.forward_denoise_only(image)["denoised"][0, 0].cpu().numpy()
+                second = model.forward_denoise_only(image)["denoised"][0, 0].cpu().numpy()
             deterministic_diff = float(np.max(np.abs(first - second)))
             if deterministic_diff > 1e-7:
                 raise RuntimeError(f"D0 is non-deterministic for {batch['sample_id'][0]}: {deterministic_diff}")

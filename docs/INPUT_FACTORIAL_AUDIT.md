@@ -48,6 +48,12 @@ fold-0 Stage 1 manifest 的 SHA 以及 segmentation val/test 的位置元数据�
 python train.py --config configs/current/stage1_denoise_fold0.yaml
 ```
 
+24 GB GPU 上的 fold-0 Stage 1 使用 512×512、物理 batch 1 和两步
+梯度累积，保持等效 batch 2。Stage 1 专用 `forward_denoise_only`，
+不计算尚未受监督的 layer/vessel/UGBI 分支；noisy reconstruction
+和 clean identity 监督均保留。旧 OOM 运行不得 resume，因为它使用了
+不同的物理 batch 和前向协议。
+
 不要用其他历史 checkpoint 静默替换。`cache` 只处理 segmentation train/val，
 D0 使用 `eval()` 和 `torch.no_grad()`，clean/GT 不进入 forward；模型同一输入
 前向两次须在 1e-7 内一致。D0 的 512 resize/pad 输出先恢复到原图几何，再保存

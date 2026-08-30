@@ -509,3 +509,11 @@ Populate one row per independent fold after validation threshold selection.
   `best.pth` and all provenance fields are complete; mismatched, incomplete or
   merely path-matching sidecars remain blocked. Focused pass/mismatch tests
   passed locally.
+- A fresh 512x512 Stage 1 attempt then exhausted a 24 GB GPU with physical
+  batch 2 while retaining both noisy and clean-identity graphs. Stage 1 also
+  unnecessarily evaluated frozen, unsupervised segmentation/UGBI branches.
+  Fold-0 Stage 1 now uses physical batch 1 with two-step accumulation and a
+  denoise-only forward; reconstruction, residual and clean identity supervision
+  remain unchanged, while both interaction directions are explicitly disabled.
+  Compact/full equivalence with interactions disabled and a two-graph backward
+  smoke passed locally. Actual CUDA peak memory remains to verify on cloud.

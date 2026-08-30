@@ -108,6 +108,23 @@ class SABIDSNet(nn.Module):
                 value = self.downsamples[level](value)
         return features
 
+    def forward_denoise_only(self, image: torch.Tensor) -> Dict[str, torch.Tensor | List]:
+        """Stage-1 path without untrained segmentation or interaction branches."""
+        encoder_features = self.encode(image)
+        deepest = len(self.channels) - 1
+        denoise = self.adapters["denoise"][deepest](encoder_features[deepest])
+        for stage_index, level in enumerate(self.decoder_levels):
+            skip = self.adapters["denoise"][level](encoder_features[level])
+            denoise = self.decoders["denoise"][stage_index](denoise, skip)
+        residual = self.residual_scale * torch.tanh(self.residual_head(denoise))
+        denoised_raw = image - residual
+        return {
+            "denoised_raw": denoised_raw,
+            "denoised": denoised_raw.clamp(0.0, 1.0),
+            "residual": residual,
+            "auxiliary": [],
+        }
+
     def _interact(
         self,
         level: int,
