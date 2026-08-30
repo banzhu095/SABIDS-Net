@@ -36,6 +36,12 @@ fold-0 Stage 1 manifest 的 SHA 以及 segmentation val/test 的位置元数据�
 - D0 train group 与当前 segmentation val/test group 重叠；
 -当前 Stage 1 train/val noisy/clean 资产缺失。
 
+兼容旧 checkpoint 时，仅接受同 run 目录中 `run_metadata.json`
+作为旁证，且必须同时满足：`best_checkpoint_sha256` 与当前
+`best.pth` 逐位一致，manifest/split/train-groups 指纹齐全，manifest SHA
+与当前文件一致。`resolved_config.yaml`、路径相同或文件时间戳都不能
+单独证明 checkpoint 的训练身份。
+
 若阻断，应先按当前 fold 重新训练 D0：
 
 ```bash

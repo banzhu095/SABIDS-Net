@@ -502,3 +502,10 @@ Populate one row per independent fold after validation threshold selection.
   required on cloud/CI. The real Stage 1 best and J run artifacts are absent
   locally, so real cache/train smoke and numeric scientific conclusions remain
   pending.
+- A cloud legacy Stage 1 best checkpoint was found to contain no manifest,
+  effective-split or train-group runtime fingerprints. The audit remains
+  blocked by default. A compatibility path now accepts `run_metadata.json`
+  only when its recorded best-checkpoint SHA256 exactly matches the inspected
+  `best.pth` and all provenance fields are complete; mismatched, incomplete or
+  merely path-matching sidecars remain blocked. Focused pass/mismatch tests
+  passed locally.

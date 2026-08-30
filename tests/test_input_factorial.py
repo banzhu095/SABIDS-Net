@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 
 import numpy as np
@@ -199,3 +200,38 @@ def test_d0_audit_proves_manifest_identity_and_blocks_group_leakage(tmp_path: Pa
     blocked = audit_d0(tmp_path, checkpoint, tmp_path / "blocked.json")
     assert blocked["status"] == "blocked"
     assert blocked["held_out_overlap_with_d0_train"] == ["val_group"]
+
+
+def test_d0_audit_accepts_only_sha_linked_complete_run_metadata(tmp_path: Path):
+    manifest_root = tmp_path / "Manifests"
+    (manifest_root / "joint_folds").mkdir(parents=True)
+    (manifest_root / "segmentation_folds").mkdir(parents=True)
+    write_gray(tmp_path / "noisy.png", np.zeros((2, 2), dtype=np.float32))
+    write_gray(tmp_path / "clean.png", np.ones((2, 2), dtype=np.float32))
+    stage1 = manifest_root / "joint_folds/manifest_joint_fold0.csv"
+    pd.DataFrame([{
+        "sample_id": "s", "group_id": "train_group", "dataset": "x",
+        "split": "train", "image_path": "noisy.png", "clean_path": "clean.png",
+    }]).to_csv(stage1, index=False)
+    pd.DataFrame([{
+        "sample_id": "v", "group_id": "val_group", "dataset": "x",
+        "split": "val", "image_path": "not_opened.png",
+    }]).to_csv(manifest_root / "segmentation_folds/manifest_seg_fold0.csv", index=False)
+    checkpoint = tmp_path / "best.pth"
+    torch.save({"epoch": 1, "config": {"runtime": {}, "data": {}}}, checkpoint)
+    metadata = {
+        "best_checkpoint_sha256": _sha256(checkpoint),
+        "manifest_sha256": _sha256(stage1),
+        "effective_split_sha256": "linked-split",
+        "effective_groups": {"train": ["train_group"], "val": []},
+    }
+    (tmp_path / "run_metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+    passed = audit_d0(tmp_path, checkpoint, tmp_path / "linked.json")
+    assert passed["status"] == "passed"
+    assert passed["provenance_source"] == "sha256_linked_run_metadata"
+
+    metadata["best_checkpoint_sha256"] = "not-the-checkpoint"
+    (tmp_path / "run_metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+    blocked = audit_d0(tmp_path, checkpoint, tmp_path / "mismatch.json")
+    assert blocked["status"] == "blocked"
+    assert blocked["sidecar_status"] == "checkpoint_sha_mismatch"

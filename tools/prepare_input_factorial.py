@@ -59,17 +59,49 @@ def audit_d0(root: Path, checkpoint: Path, output: Path) -> Dict:
     config = payload.get("config")
     if not isinstance(config, dict):
         raise RuntimeError("D0 checkpoint has no resolved config; leakage cannot be proved")
+    checkpoint_sha = sha256_file(checkpoint)
     runtime = config.get("runtime", {})
-    effective_groups = runtime.get("effective_groups", {})
+    provenance = runtime
+    provenance_source = "checkpoint_runtime"
+    sidecar_path = checkpoint.parent / "run_metadata.json"
+    sidecar_status = "absent"
+    sidecar_checkpoint_sha = None
+    if sidecar_path.is_file():
+        try:
+            sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as error:
+            sidecar = {}
+            sidecar_status = f"invalid:{type(error).__name__}"
+        else:
+            sidecar_checkpoint_sha = sidecar.get("best_checkpoint_sha256")
+            sidecar_status = (
+                "checkpoint_sha_matched"
+                if sidecar_checkpoint_sha == checkpoint_sha
+                else "checkpoint_sha_mismatch"
+            )
+            runtime_complete = all((
+                runtime.get("manifest_sha256"),
+                runtime.get("effective_split_sha256"),
+                runtime.get("effective_groups", {}).get("train"),
+            ))
+            sidecar_complete = all((
+                sidecar.get("manifest_sha256"),
+                sidecar.get("effective_split_sha256"),
+                sidecar.get("effective_groups", {}).get("train"),
+            ))
+            if not runtime_complete and sidecar_checkpoint_sha == checkpoint_sha and sidecar_complete:
+                provenance = sidecar
+                provenance_source = "sha256_linked_run_metadata"
+    effective_groups = provenance.get("effective_groups", {})
     d0_train_groups = {str(value) for value in effective_groups.get("train", [])}
     required = {
-        "manifest_sha256": runtime.get("manifest_sha256"),
-        "effective_split_sha256": runtime.get("effective_split_sha256"),
+        "manifest_sha256": provenance.get("manifest_sha256"),
+        "effective_split_sha256": provenance.get("effective_split_sha256"),
         "d0_train_groups": sorted(d0_train_groups),
     }
     unknown = [key for key, value in required.items() if value in (None, "", [])]
     stage1_manifest_sha = sha256_file(stage1_manifest)
-    manifest_match = runtime.get("manifest_sha256") == stage1_manifest_sha
+    manifest_match = provenance.get("manifest_sha256") == stage1_manifest_sha
     segmentation = pd.read_csv(segmentation_manifest, dtype=str).fillna("")
     held_out = segmentation[segmentation["split"].isin(["val", "test"])]
     held_out_groups = set(held_out["group_id"].astype(str))
@@ -95,16 +127,21 @@ def audit_d0(root: Path, checkpoint: Path, output: Path) -> Dict:
     report = {
         "status": "passed" if passed else "blocked",
         "checkpoint": str(checkpoint.resolve()),
-        "checkpoint_sha256": sha256_file(checkpoint),
+        "checkpoint_sha256": checkpoint_sha,
         "checkpoint_epoch": int(payload.get("epoch", -1)) + 1,
         "checkpoint_declared_manifest": config.get("data", {}).get("manifest"),
         "checkpoint_declared_normalization": config.get("data", {}).get("normalization"),
         "checkpoint_declared_target_size": config.get("data", {}).get("target_size"),
+        "provenance_source": provenance_source,
+        "sidecar_run_metadata": str(sidecar_path),
+        "sidecar_status": sidecar_status,
+        "sidecar_best_checkpoint_sha256": sidecar_checkpoint_sha,
         "checkpoint_manifest_sha256": runtime.get("manifest_sha256"),
+        "effective_manifest_sha256": provenance.get("manifest_sha256"),
         "current_stage1_manifest": str(stage1_manifest),
         "current_stage1_manifest_sha256": stage1_manifest_sha,
         "manifest_fingerprint_match": manifest_match,
-        "effective_split_sha256": runtime.get("effective_split_sha256"),
+        "effective_split_sha256": provenance.get("effective_split_sha256"),
         "d0_train_groups": sorted(d0_train_groups),
         "segmentation_validation_groups": sorted(set(segmentation.loc[segmentation["split"] == "val", "group_id"])),
         "segmentation_test_groups_metadata_only": sorted(set(segmentation.loc[segmentation["split"] == "test", "group_id"])),
