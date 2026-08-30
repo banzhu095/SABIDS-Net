@@ -53,6 +53,10 @@ python train.py --config configs/current/stage1_denoise_fold0.yaml
 不计算尚未受监督的 layer/vessel/UGBI 分支；noisy reconstruction
 和 clean identity 监督均保留。旧 OOM 运行不得 resume，因为它使用了
 不同的物理 batch 和前向协议。
+重建目标的 Charbonnier、MS-SSIM、wavelet、edge、residual 和
+clean identity 均在 FP32 中计算，卷积前向仍使用 AMP。fold-0
+的初始 loss scale 为 1024；偶发 AMP overflow 跳过该 optimizer
+update 并下调 scale，连续超过 8 次才视为真实数值故障。
 
 不要用其他历史 checkpoint 静默替换。`cache` 只处理 segmentation train/val，
 D0 使用 `eval()` 和 `torch.no_grad()`，clean/GT 不进入 forward；模型同一输入

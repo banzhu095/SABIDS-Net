@@ -71,26 +71,30 @@ class SABIDSLoss(nn.Module):
         if not bool(valid.any()):
             zero = _zero(output)
             return zero, zero
-        prediction = output["denoised_raw"][valid]
-        target = batch["clean"][valid]
-        image = charbonnier(prediction, target)
-        image = image + 0.2 * multi_scale_ssim_loss(prediction, target)
-        image = image + 0.1 * wavelet_loss(prediction, target)
+        # Reductions, local variance and wavelet differences are numerically
+        # fragile in float16 at 512x512. Keep the model forward under AMP but
+        # explicitly evaluate the complete restoration objective in FP32.
+        with torch.cuda.amp.autocast(enabled=False):
+            prediction = output["denoised_raw"][valid].float()
+            target = batch["clean"][valid].float()
+            image = charbonnier(prediction, target)
+            image = image + 0.2 * multi_scale_ssim_loss(prediction, target)
+            image = image + 0.1 * wavelet_loss(prediction, target)
 
-        layer_edge = edge_map(batch["layer_mask"][valid])
-        vessel_edge = edge_map(batch["vessel_mask"][valid])
-        has_layer = batch["has_layer"][valid].float().view(-1, 1, 1, 1)
-        has_vessel = batch["has_vessel"][valid].float().view(-1, 1, 1, 1)
-        boundary_weight = 1.0 + 1.0 * layer_edge * has_layer + 2.0 * vessel_edge * has_vessel
-        pred_gx, pred_gy = image_gradients(prediction)
-        target_gx, target_gy = image_gradients(target)
-        edge = (
-            boundary_weight * (torch.abs(pred_gx - target_gx) + torch.abs(pred_gy - target_gy))
-        ).mean()
-        image = image + 0.1 * edge
+            layer_edge = edge_map(batch["layer_mask"][valid].float())
+            vessel_edge = edge_map(batch["vessel_mask"][valid].float())
+            has_layer = batch["has_layer"][valid].float().view(-1, 1, 1, 1)
+            has_vessel = batch["has_vessel"][valid].float().view(-1, 1, 1, 1)
+            boundary_weight = 1.0 + 1.0 * layer_edge * has_layer + 2.0 * vessel_edge * has_vessel
+            pred_gx, pred_gy = image_gradients(prediction)
+            target_gx, target_gy = image_gradients(target)
+            edge = (
+                boundary_weight * (torch.abs(pred_gx - target_gx) + torch.abs(pred_gy - target_gy))
+            ).mean()
+            image = image + 0.1 * edge
 
-        residual_target = batch["image"][valid] - target
-        residual = F.l1_loss(output["residual"][valid], residual_target)
+            residual_target = batch["image"][valid].float() - target
+            residual = F.l1_loss(output["residual"][valid].float(), residual_target)
         return image, residual
 
     def _segmentation(
@@ -318,10 +322,11 @@ class SABIDSLoss(nn.Module):
                 batch["clean"],
                 batch["image_weak"],
             )
-            identity = F.l1_loss(
-                clean_output["denoised_raw"][identity_valid],
-                identity_target[identity_valid],
-            )
+            with torch.cuda.amp.autocast(enabled=False):
+                identity = F.l1_loss(
+                    clean_output["denoised_raw"][identity_valid].float(),
+                    identity_target[identity_valid].float(),
+                )
         losses["identity"] = identity
 
         rmac = _zero(output)

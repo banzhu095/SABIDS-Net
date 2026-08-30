@@ -348,7 +348,11 @@ class Trainer:
         else:
             raise ValueError("train.scheduler must be cosine or plateau")
         amp_enabled = bool(config["train"].get("amp", True)) and self.device.type == "cuda"
-        self.scaler = torch.cuda.amp.GradScaler(enabled=amp_enabled)
+        self.scaler = torch.cuda.amp.GradScaler(
+            enabled=amp_enabled,
+            init_scale=float(config["train"].get("amp_init_scale", 65536.0)),
+            growth_interval=int(config["train"].get("amp_growth_interval", 2000)),
+        )
         self.amp_enabled = amp_enabled
         self.ema: Optional[ModelEMA] = None
         if self.stage in {"private", "private_seg"} or bool(
@@ -844,6 +848,9 @@ class Trainer:
         level_mapping_gradient_totals = defaultdict(float)
         clipping_coefficient_total = 0.0
         post_clip_gradient_norm_total = 0.0
+        amp_overflow_skips = 0
+        consecutive_amp_overflows = 0
+        minimum_grad_scale = float(self.scaler.get_scale())
         diagnostic_counts = defaultdict(int)
         accumulation_steps = max(
             1, int(self.config["train"].get("gradient_accumulation_steps", 1))
@@ -909,6 +916,51 @@ class Trainer:
             )
             if should_step:
                 self.scaler.unscale_(self.optimizer)
+                nonfinite_gradient_parameters = [
+                    name for name, parameter in self.model.named_parameters()
+                    if parameter.grad is not None
+                    and not bool(torch.isfinite(parameter.grad).all())
+                ]
+                if nonfinite_gradient_parameters:
+                    if not self.amp_enabled:
+                        raise FloatingPointError(
+                            f"Non-finite gradients without AMP at epoch={epoch + 1}, "
+                            f"batch={batch_index + 1}, samples={batch.get('sample_id')}, "
+                            f"parameters={nonfinite_gradient_parameters[:5]}"
+                        )
+                    # GradScaler has already recorded found_inf in unscale_().
+                    # scaler.step() therefore skips the optimizer mutation and
+                    # scaler.update() lowers the dynamic scale.
+                    previous_scale = float(self.scaler.get_scale())
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+                    current_scale = float(self.scaler.get_scale())
+                    minimum_grad_scale = min(minimum_grad_scale, current_scale)
+                    self.optimizer.zero_grad(set_to_none=True)
+                    amp_overflow_skips += 1
+                    consecutive_amp_overflows += 1
+                    maximum = int(self.config["train"].get("max_consecutive_amp_overflows", 8))
+                    if consecutive_amp_overflows > maximum:
+                        raise FloatingPointError(
+                            "Persistent AMP gradient overflow: "
+                            f"epoch={epoch + 1}, batch={batch_index + 1}, "
+                            f"samples={batch.get('sample_id')}, previous_scale={previous_scale}, "
+                            f"current_scale={current_scale}, parameters={nonfinite_gradient_parameters[:5]}"
+                        )
+                    steps += 1
+                    for key, value in losses.items():
+                        scalar = float(value.detach().item()) if torch.is_tensor(value) else float(value)
+                        totals[key] += scalar
+                    totals["amp_overflow_previous_scale"] += previous_scale
+                    totals["amp_overflow_current_scale"] += current_scale
+                    progress.set_postfix(
+                        loss=totals["total"] / steps,
+                        amp_overflow=amp_overflow_skips,
+                        grad_scale=current_scale,
+                    )
+                    del output, repeat_output, clean_output, teacher_output, losses
+                    continue
+                consecutive_amp_overflows = 0
                 d2s_gradients = [
                     parameter.grad.detach().float().reshape(-1)
                     for name, parameter in self.model.named_parameters()
@@ -1024,6 +1076,7 @@ class Trainer:
                 post_clip_gradient_norm_total += float(gradient_norm.detach().item()) * coefficient
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
+                minimum_grad_scale = min(minimum_grad_scale, float(self.scaler.get_scale()))
                 optimizer_steps += 1
                 self.optimizer.zero_grad(set_to_none=True)
                 if self.ema is not None:
@@ -1114,6 +1167,8 @@ class Trainer:
                 "gradient_norm_after_clip": post_clip_gradient_norm_total / max(optimizer_steps, 1),
                 "gradient_clip_coefficient": clipping_coefficient_total / max(optimizer_steps, 1),
                 "interaction_scale_weight_decay": float(self.config["train"].get("weight_decay", 0.0)),
+                "amp_overflow_skips": float(amp_overflow_skips),
+                "amp_minimum_grad_scale": float(minimum_grad_scale),
             }
         )
         for group, value in gradient_group_totals.items():

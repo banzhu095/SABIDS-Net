@@ -517,3 +517,12 @@ Populate one row per independent fold after validation threshold selection.
   remain unchanged, while both interaction directions are explicitly disabled.
   Compact/full equivalence with interactions disabled and a two-graph backward
   smoke passed locally. Actual CUDA peak memory remains to verify on cloud.
+- The next cloud attempt reached epoch 1 batch 6 (`duke28_ll8`) but the trainer
+  aborted on a non-finite gradient after AMP unscale. Restoration reductions
+  and identity are now explicitly FP32 while convolution remains autocast. The
+  fold config starts GradScaler at 1024 instead of 65536; a detected AMP
+  overflow now follows standard GradScaler behavior (skip mutation and reduce
+  scale), with a hard failure after more than eight consecutive overflows.
+  Non-AMP non-finite gradients still fail immediately. FP32-loss finite
+  backward and resolved AMP-policy tests passed locally; cloud completion is
+  pending.

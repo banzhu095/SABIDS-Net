@@ -120,9 +120,41 @@ def test_fold_stage1_uses_memory_safe_equivalent_batch_and_no_interaction():
     assert config["train"]["batch_size"] == 1
     assert config["train"]["gradient_accumulation_steps"] == 2
     assert config["train"]["amp"] is True
+    assert config["train"]["amp_init_scale"] == 1024.0
+    assert config["train"]["max_consecutive_amp_overflows"] == 8
     assert config["loss"]["weights"]["identity"] > 0
     assert config["model"]["enable_seg_to_denoise"] is False
     assert config["model"]["enable_denoise_to_seg"] is False
+
+
+def test_stage1_restoration_and_identity_losses_promote_half_outputs_to_fp32():
+    shape = (1, 1, 16, 24)
+    denoised = torch.rand(shape, dtype=torch.float16, requires_grad=True)
+    residual = torch.rand(shape, dtype=torch.float16, requires_grad=True)
+    clean_denoised = torch.rand(shape, dtype=torch.float16, requires_grad=True)
+    output = {"denoised_raw": denoised, "residual": residual}
+    clean_output = {"denoised_raw": clean_denoised}
+    batch = {
+        "image": torch.rand(shape), "image_weak": torch.rand(shape),
+        "clean": torch.rand(shape), "layer_mask": torch.zeros(shape),
+        "vessel_mask": torch.zeros(shape), "valid_mask": torch.ones(shape),
+        "has_clean": torch.tensor([True]), "has_layer": torch.tensor([False]),
+        "has_vessel": torch.tensor([False]), "has_repeat": torch.tensor([False]),
+        "is_clean": torch.tensor([False]),
+    }
+    criterion = SABIDSLoss({"weights": {
+        "reconstruction": 1.0, "residual": 0.5, "identity": 0.05,
+    }})
+    losses = criterion(output, batch, stage="denoise", clean_output=clean_output)
+    assert losses["reconstruction"].dtype == torch.float32
+    assert losses["residual"].dtype == torch.float32
+    assert losses["identity"].dtype == torch.float32
+    assert torch.isfinite(losses["total"])
+    losses["total"].backward()
+    assert all(
+        tensor.grad is not None and bool(torch.isfinite(tensor.grad).all())
+        for tensor in (denoised, residual, clean_denoised)
+    )
 
 
 def test_input_segment_loss_has_no_denoising_rmac_or_pseudo_terms():
