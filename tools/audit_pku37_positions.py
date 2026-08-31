@@ -44,6 +44,14 @@ def shape_of(path: Path | None) -> str:
     return f"{image.shape[0]}x{image.shape[1]}"
 
 
+def write_png(path: Path, image: np.ndarray) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    success, encoded = cv2.imencode(".png", image)
+    if not success:
+        raise RuntimeError(f"Could not encode plot: {path}")
+    path.write_bytes(encoded.tobytes())
+
+
 def boundary_statistics(layer: np.ndarray) -> dict[str, float]:
     upper, lower, thickness = [], [], []
     invalid = 0
@@ -264,12 +272,12 @@ def main() -> None:
         # sample or a fold and contain development positions only.
         heat = np.clip((z - np.nanmin(z)) / max(float(np.nanmax(z) - np.nanmin(z)), 1e-6) * 255, 0, 255).astype(np.uint8)
         heat = cv2.applyColorMap(cv2.resize(heat, (max(480, 40 * len(numeric)), max(240, 28 * len(chars))), interpolation=cv2.INTER_NEAREST), cv2.COLORMAP_VIRIDIS)
-        cv2.imwrite(str(output / "position_feature_heatmap.png"), heat)
+        write_png(output / "position_feature_heatmap.png", heat)
         plot = np.full((640, 640, 3), 255, np.uint8); px, py = scores[:, 0], scores[:, 1] if scores.shape[1] > 1 else np.zeros(len(scores))
         px = (px - px.min()) / max(float(px.max() - px.min()), 1e-6); py = (py - py.min()) / max(float(py.max() - py.min()), 1e-6)
         for index, group_id in enumerate(chars["group_id"].astype(str)):
             point = (int(45 + 550 * px[index]), int(595 - 550 * py[index])); cv2.circle(plot, point, 5, (150, 70, 30), -1); cv2.putText(plot, group_id.replace("pku_", ""), (point[0] + 4, point[1] - 4), cv2.FONT_HERSHEY_SIMPLEX, .35, (0, 0, 0), 1)
-        cv2.imwrite(str(output / "position_pca.png"), plot)
+        write_png(output / "position_pca.png", plot)
     else:
         pd.DataFrame(columns=["group_id", "typicality_distance", "atypicality_percentile", "pc1", "pc2"]).to_csv(output / "position_typicality.csv", index=False)
         pd.DataFrame(columns=["group_id", "cluster"]).to_csv(output / "position_clusters.csv", index=False)

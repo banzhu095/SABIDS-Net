@@ -38,6 +38,7 @@ def main() -> None:
     parser.add_argument("--mode", choices=("audit", "cache", "initialize"), required=True)
     parser.add_argument("--checkpoint", default=None)
     parser.add_argument("--device", default="auto")
+    parser.add_argument("--seed", type=int, default=42, help="Recorded D0 seed; cache inference is deterministic")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--smoke-test", action="store_true")
     parser.add_argument("--resume", action="store_true")
@@ -55,6 +56,12 @@ def main() -> None:
         raise FileNotFoundError(f"Missing fold-specific D0 checkpoint: {checkpoint}")
     sealed = set(map(str, phase0["sealed_test_groups"]))
     audit = audit_d0_checkpoint(checkpoint, d0_manifest, val, sealed)
+    audit["requested_d0_seed"] = args.seed
+    checkpoint_seed = torch.load(checkpoint, map_location="cpu").get("config", {}).get("seed")
+    audit["checkpoint_d0_seed"] = checkpoint_seed
+    if checkpoint_seed is not None and int(checkpoint_seed) != args.seed:
+        audit["status"] = "blocked"
+        audit["seed_mismatch"] = True
     fold_root = output / f"fold{args.fold}{'_smoke' if args.smoke_test else ''}"
     write_json(audit, fold_root / "d0_leakage_audit.json")
     if audit["status"] != "passed":
@@ -69,6 +76,11 @@ def main() -> None:
         return
     snapshot = fold_root / "preseg_initialization.pth"
     if snapshot.exists():
+        if args.resume:
+            prior = json.loads((fold_root / "initialization_audit.json").read_text(encoding="utf-8"))
+            if prior.get("d0_checkpoint_sha256") != sha256_file(checkpoint):
+                raise RuntimeError("Existing initialization is linked to a different D0 checkpoint")
+            print(json.dumps(prior, ensure_ascii=False, indent=2)); return
         raise FileExistsError(f"Refusing to overwrite common initialization: {snapshot}")
     payload = torch.load(checkpoint, map_location="cpu")
     model = build_model(payload["config"])

@@ -26,6 +26,7 @@ def main() -> None:
     parser.add_argument("--fold", type=int, required=True)
     parser.add_argument("--mode", choices=("train", "audit"), required=True)
     parser.add_argument("--device", default="auto")
+    parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--smoke-test", action="store_true")
@@ -51,6 +52,7 @@ def main() -> None:
         return
 
     config = copy.deepcopy(load_config(root / "configs/current/stage1_denoise_fold0.yaml"))
+    config["seed"] = args.seed
     config["device"] = args.device
     config["data"]["manifest"] = str(manifest)
     config["data"]["root"] = str(root)
@@ -68,7 +70,7 @@ def main() -> None:
     elif run.exists() and any(run.iterdir()):
         raise FileExistsError(f"Refusing to overwrite D0 run: {run}; use --resume only for an exact continuation")
     registry = {
-        "fold": args.fold, "manifest": str(manifest), "validation_groups": sorted(val),
+        "fold": args.fold, "seed": args.seed, "manifest": str(manifest), "validation_groups": sorted(val),
         "sealed_test_groups_metadata_only": sorted(sealed), "test_assets_opened": 0,
         "command_status": "dry_run" if args.dry_run else "authorized",
     }
@@ -76,8 +78,8 @@ def main() -> None:
         print(json.dumps(registry, ensure_ascii=False, indent=2))
         return
     trainer = Trainer(config)
-    save_config(config, run / "resolved_config.yaml")
-    write_json(registry, run / "preflight_registry.json")
+    save_config(config, run / (f"resolved_config_resume_epoch{trainer.start_epoch:03d}.yaml" if args.resume else "resolved_config.yaml"))
+    write_json(registry, run / (f"preflight_registry_resume_epoch{trainer.start_epoch:03d}.json" if args.resume else "preflight_registry.json"))
     trainer.fit()
     if not checkpoint.is_file():
         raise RuntimeError(f"Training finished without best checkpoint: {checkpoint}")

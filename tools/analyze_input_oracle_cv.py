@@ -64,12 +64,15 @@ def main() -> None:
     parser.add_argument("--runs", default="runs/input_oracle_cv")
     parser.add_argument("--output", default="runs/input_oracle_cv/report")
     parser.add_argument("--folds", type=int, nargs="+", default=[0, 1, 2, 3])
-    parser.add_argument("--seeds", type=int, nargs="+", default=[42, 43, 44])
+    parser.add_argument("--seeds", type=int, nargs="+", default=None)
+    parser.add_argument("--seed", type=int, default=None, help="Single-seed alias")
     parser.add_argument("--archive-existing", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--smoke-test", action="store_true")
     parser.add_argument("--resume", action="store_true")
     args = parser.parse_args()
+    if args.seed is not None and args.seeds is not None: parser.error("Use either --seed or --seeds")
+    args.seeds = args.seeds or ([args.seed] if args.seed is not None else [42, 43, 44])
     root = Path(args.project_root).expanduser().resolve()
     runs = (root / args.runs).resolve()
     output = (root / args.output).resolve()
@@ -77,7 +80,21 @@ def main() -> None:
     frames, positions, missing, epoch0 = [], [], [], []
     fold_suffix = "_smoke" if args.smoke_test else ""
     for fold in args.folds:
+        d0_audit_path = runs / f"fold{fold}{fold_suffix}/d0_leakage_audit.json"
+        if not d0_audit_path.is_file():
+            missing.append(str(d0_audit_path))
+        else:
+            d0_audit = json.loads(d0_audit_path.read_text(encoding="utf-8"))
+            if d0_audit.get("status") != "passed" or d0_audit.get("test_assets_opened") != 0:
+                missing.append(f"FAILED_D0_AUDIT:{d0_audit_path}")
         for seed in args.seeds:
+            pair_path = runs / f"fold{fold}{fold_suffix}/paired_data_plan_audit_fold{fold}_seed{seed}.json"
+            if not pair_path.is_file():
+                missing.append(str(pair_path))
+            else:
+                pair = json.loads(pair_path.read_text(encoding="utf-8"))
+                if not pair.get("all_equal") or not pair.get("all_three_arms_present"):
+                    missing.append(f"INCOMPLETE_PAIRING:{pair_path}")
             for arm in ("noisy", "clean", "denoised"):
                 run = runs / f"fold{fold}{fold_suffix}/{arm}_seed{seed}"
                 validation = run / "final_validation"
@@ -283,8 +300,43 @@ def main() -> None:
     protocol_text = """# Statistical protocol\n\n- Unit of inference: independent anatomical position (`group_id`).\n- Repeat frames are averaged within position; seeds are repeated fits, not subjects.\n- Primary checkpoint: fixed final epoch; threshold 0.5; P0 without calibration/post-processing.\n- Positive gain means improvement (error metrics are direction-reversed).\n- CI: percentile bootstrap resampling positions. With 16 positions it is descriptive and low-powered.\n- Exact sign test is reported without multiplicity correction; it is secondary/exploratory.\n- Sealed test images are neither opened nor evaluated.\n"""
     (output / "STATISTICAL_PROTOCOL.md").write_text(protocol_text, encoding="utf-8")
     (output / "PROTOCOL.md").write_text(protocol_text, encoding="utf-8")
+    psnr_gain = (
+        float((input_quality["psnr_d0"] - input_quality["psnr_noisy"]).mean())
+        if {"psnr_d0", "psnr_noisy"}.issubset(input_quality.columns) else math.nan
+    )
+    fp_gain, fn_gain = value("DENOISED-NOISY", "vessel_roi_fp_per_valid_pixel"), value("DENOISED-NOISY", "vessel_roi_fn_per_valid_pixel")
+    size_effects = {size: value("DENOISED-NOISY", f"vessel_gt_component_{size}_pixel_recall") for size in ("small", "medium", "large")}
+    typicality_path = output / "position_typicality.csv"
+    typicality_note = "not available"
+    if typicality_path.is_file():
+        typicality = pd.read_csv(typicality_path)
+        legacy = typicality[typicality["group_id"].astype(str).isin(["pku_0006", "pku_0012", "pku_0040"])]
+        if not legacy.empty: typicality_note = "; ".join(f"{row.group_id}: {row.atypicality_percentile:.1%}" for row in legacy.itertuples())
+    review_path = runs / "label_audit/label_review_form.csv"
+    manual_complete = False
+    if review_path.is_file():
+        review = pd.read_csv(review_path, dtype=str).fillna("")
+        manual_complete = bool(len(review) and review["review_status"].ne("PENDING").all())
+    recommendation = (
+        "prioritize task-preserving denoising and domain alignment" if "D0 fails" in mechanism
+        else "prioritize label/registration audit and a neutral-initialization sensitivity run" if "oracle clean" in mechanism.lower() and "no mean" in mechanism.lower()
+        else "retain the segmenter and validate the gain before adding feature interaction" if d_layer > 0 and d_vessel > 0
+        else "do not strengthen D→S yet; resolve the mixed endpoint mechanism first"
+    )
+    answers = [
+        f"1. Stage 1 image quality: {'improved' if np.isfinite(psnr_gain) and psnr_gain > 0 else 'evidence insufficient'}; mean PSNR change={psnr_gain:.4g} dB.",
+        f"2. CLEAN versus NOISY for layer: {'improved' if oracle_layer > 0 else 'not improved' if np.isfinite(oracle_layer) else 'insufficient'}; {oracle_layer:.4g} pp.",
+        f"3. CLEAN versus NOISY for vessel: {'improved' if oracle_vessel > 0 else 'not improved' if np.isfinite(oracle_vessel) else 'insufficient'}; {oracle_vessel:.4g} pp.",
+        f"4. D0 recovery: layer={d_layer:.4g} pp, vessel={d_vessel:.4g} pp. {mechanism}",
+        f"5. D0 error trade-off: ROI FP improvement={fp_gain:.4g}; ROI FN improvement={fn_gain:.4g}; positive means reduced error.",
+        "6. Vessel-size effects: " + ", ".join(f"{key}={val:.4g} pp" for key, val in size_effects.items()) + ".",
+        f"7. Original-position typicality percentiles: {typicality_note}.",
+        f"8. Label-quality effect: {'manual review available' if manual_complete else 'uncertain; blinded review remains PENDING, automatic associations are descriptive only'}.",
+        f"9. Stability: {int(summary.loc[summary['metric'].isin(['layer_dice','p0_vessel_dice']), 'n_independent_positions'].max()) if not summary.empty else 0} independent positions; inspect fold/seed tables and cluster CI—seed×position was not tested as independent.",
+        f"10. Recommended next step: {recommendation}.",
+    ]
     (output / "SUMMARY.md").write_text("\n".join([
-        "# PKU37 three-arm input-oracle CV", "", mechanism, "",
+        "# PKU37 three-arm input-oracle CV", "", "## Direct answers", "", *answers, "",
         "The table below reports fixed-final, position-first paired gains. Positive is better.", "",
         "```text", primary.to_string(index=False), "```", "",
         "CLEAN is evaluated once per anatomical position; repeat stability is N/A for CLEAN. No test result was used.",

@@ -40,6 +40,12 @@ def main() -> None:
     development, sealed = set(audit["development_groups"]), set(audit["sealed_test_groups"])
     manifest = pd.read_csv(audit["source_manifest"], dtype=str).fillna("")
     manifest = manifest[manifest["group_id"].isin(development) & ~manifest["group_id"].isin(sealed)]
+    d0_lookup: dict[str, str] = {}
+    for fold_manifest in sorted((root / "Manifests/input_oracle_cv").glob("fold_*_input.csv")):
+        table = pd.read_csv(fold_manifest, dtype=str).fillna("")
+        table = table[table["split"] == "val"]
+        if "denoised_cache_path" in table:
+            d0_lookup.update(dict(zip(table["sample_id"].astype(str), table["denoised_cache_path"].astype(str))))
     if output.exists() and any(output.iterdir()) and not args.resume: raise FileExistsError(output)
     png = output / "png"; png.mkdir(parents=True, exist_ok=True)
     pages, inventory, missing = [], [], []
@@ -52,7 +58,9 @@ def main() -> None:
         vessel = read_mask(vessel_path) > .5 if vessel_path and vessel_path.is_file() else None
         panels: list[tuple[str, np.ndarray | None]] = [("clean", clean)]
         for _, row in selected.iterrows():
-            path = resolve(root, row["image_path"]); panels.append((f"noisy:{row['sample_id']}", read_gray(path) if path and path.is_file() else None))
+            sample_id = str(row["sample_id"]); path = resolve(root, row["image_path"])
+            panels.append((f"noisy:{sample_id}", read_gray(path) if path and path.is_file() else None))
+            d0_path = resolve(root, d0_lookup.get(sample_id, "")); panels.append((f"fold_D0:{sample_id}", read_gray(d0_path) if d0_path and d0_path.is_file() else None))
         if clean is not None and layer is not None and clean.shape == layer.shape:
             overlay = _rgb(clean); boundary = layer & ~cv2.erode(layer.astype(np.uint8), np.ones((3,3), np.uint8)).astype(bool); overlay[boundary] = (0,255,0)
             panels.append(("layer_overlay", overlay))
@@ -60,6 +68,24 @@ def main() -> None:
         if clean is not None and vessel is not None and clean.shape == vessel.shape:
             overlay = _rgb(clean); overlay[vessel] = (0,128,255); panels.append(("vessel_overlay", overlay))
         else: panels.append(("vessel_overlay", None))
+        if clean is not None and vessel is not None:
+            count, components, stats, _ = cv2.connectedComponentsWithStats(vessel.astype(np.uint8), 8)
+            component_overlay = _rgb(clean)
+            for component in range(1, count):
+                area = int(stats[component, cv2.CC_STAT_AREA]); color = (0, 255, 0) if area <= 64 else ((0, 165, 255) if area <= 256 else (0, 0, 255))
+                component_overlay[components == component] = color
+            panels.append(("vessel_sizes_S_M_L", component_overlay))
+            suspicious = _rgb(clean)
+            if layer is not None: suspicious[vessel & ~layer] = (255, 0, 255)
+            panels.append(("outside_or_suspicious", suspicious))
+            ys, xs = np.where(vessel); cy, cx = (int(np.median(ys)), int(np.median(xs))) if len(ys) else (clean.shape[0]//2, clean.shape[1]//2)
+            half = 80; y0, y1 = max(0, cy-half), min(clean.shape[0], cy+half); x0, x1 = max(0, cx-half), min(clean.shape[1], cx+half)
+            panels.append(("ROI:clean", clean[y0:y1, x0:x1]))
+            for _, row in selected.iterrows():
+                sample_id = str(row["sample_id"]); noisy_path = resolve(root, row["image_path"]); d0_path = resolve(root, d0_lookup.get(sample_id, ""))
+                noisy = read_gray(noisy_path) if noisy_path and noisy_path.is_file() else None; d0 = read_gray(d0_path) if d0_path and d0_path.is_file() else None
+                panels.append((f"ROI:noisy:{sample_id}", noisy[y0:y1, x0:x1] if noisy is not None else None))
+                panels.append((f"ROI:D0:{sample_id}", d0[y0:y1, x0:x1] if d0 is not None else None))
         size = 180; canvas = np.full((size + 25, size * len(panels), 3), 255, np.uint8)
         for index, (name, image) in enumerate(panels):
             if image is None or image.size == 0:

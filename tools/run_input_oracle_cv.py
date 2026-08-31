@@ -49,7 +49,7 @@ def _config(root: Path, output: Path, fold: int, arm: str, seed: int, args: argp
         config["evaluation"]["num_workers"] = 0
         config["data"]["samples_per_epoch"] = 2
         config["data"]["max_val_samples"] = 2
-    if args.resume:
+    if args.resume and args.mode == "train":
         last = run / "last.pth"
         if not last.is_file():
             raise FileNotFoundError(f"--resume requires {last}")
@@ -156,6 +156,22 @@ def main() -> None:
             continue
         expected_state = expected_plan = expected_trainable = None
         paired = {}
+        resume_originals = {}
+        if args.mode == "train" and args.resume:
+            for arm in args.arms:
+                run = Path(configs[arm]["train"]["output_dir"])
+                audit_path, parameter_path = run / "initialization_audit.json", run / "parameter_audit.json"
+                if not audit_path.is_file() or not parameter_path.is_file():
+                    raise FileNotFoundError(f"Resume requires original pairing audits in {run}")
+                resume_originals[arm] = {
+                    "audit": json.loads(audit_path.read_text(encoding="utf-8")),
+                    "parameters": json.loads(parameter_path.read_text(encoding="utf-8")),
+                }
+            states = {value["audit"]["model_state_sha256"] for value in resume_originals.values()}
+            plans = {value["audit"]["data_plan_sha256"] for value in resume_originals.values()}
+            names = {hashlib.sha256("\n".join(sorted(value["parameters"]["trainable"])).encode()).hexdigest() for value in resume_originals.values()}
+            if len(states) != 1 or len(plans) != 1 or len(names) != 1:
+                raise RuntimeError("Original three-arm pairing audits differ; refusing resume")
         for arm in args.arms:
             config = configs[arm]
             run = Path(config["train"]["output_dir"])
@@ -166,9 +182,16 @@ def main() -> None:
                 trainer = Trainer(config)
                 if arm == "clean":
                     trainer.val_loader = _clean_once_loader(trainer.val_loader)
-                save_config(config, run / "resolved_config.yaml")
+                save_config(
+                    config,
+                    run / (f"resolved_config_resume_epoch{trainer.start_epoch:03d}.yaml" if args.resume else "resolved_config.yaml"),
+                )
                 initialization = json.loads((run / "initialization_audit.json").read_text(encoding="utf-8"))
                 parameters = json.loads((run / "parameter_audit.json").read_text(encoding="utf-8"))
+                if args.resume:
+                    write_json(initialization, run / f"resume_state_audit_epoch{trainer.start_epoch:03d}.json")
+                    initialization = resume_originals[arm]["audit"]
+                    write_json(initialization, run / "initialization_audit.json")
                 state, plan, trainable = initialization["model_state_sha256"], initialization["data_plan_sha256"], sorted(parameters["trainable"])
                 expected_state = state if expected_state is None else expected_state
                 expected_plan = plan if expected_plan is None else expected_plan
@@ -197,6 +220,9 @@ def main() -> None:
                     raise FileExistsError(f"Refusing to overwrite evaluation: {destination}")
                 eval_config = copy.deepcopy(config)
                 eval_config["train"]["output_dir"] = str(run / "evaluation_audit")
+                evaluation_audit = Path(eval_config["train"]["output_dir"])
+                if evaluation_audit.exists() and any(evaluation_audit.iterdir()):
+                    raise FileExistsError(f"Refusing to overwrite evaluation audit: {evaluation_audit}")
                 trainer = Trainer(eval_config)
                 load_checkpoint(checkpoint, trainer.model, strict=True, map_location=trainer.device)
                 loader = _clean_once_loader(trainer.val_loader) if arm == "clean" else trainer.val_loader
@@ -218,7 +244,24 @@ def main() -> None:
                 trainer.writer.close()
         if args.mode == "train":
             pair_path = output / f"fold{args.fold}{'_smoke' if args.smoke_test else ''}/paired_data_plan_audit_fold{args.fold}_seed{seed}.json"
-            write_json({"fold": args.fold, "seed": seed, "arms": paired, "all_equal": True, "test_assets_opened": 0}, pair_path)
+            merged = {}
+            if pair_path.is_file():
+                merged.update(json.loads(pair_path.read_text(encoding="utf-8")).get("arms", {}))
+            merged.update(paired)
+            signatures = {
+                (
+                    value["model_state_sha256"], value["data_plan_sha256"],
+                    value["trainable_names_sha256"],
+                )
+                for value in merged.values()
+            }
+            if len(signatures) != 1:
+                raise RuntimeError(f"Accumulated arm-by-arm pairing audit differs: {pair_path}")
+            write_json({
+                "fold": args.fold, "seed": seed, "arms": merged,
+                "all_equal": True, "all_three_arms_present": set(merged) == set(ARMS),
+                "test_assets_opened": 0,
+            }, pair_path)
 
 
 if __name__ == "__main__":

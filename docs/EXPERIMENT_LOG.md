@@ -545,7 +545,9 @@ Populate one row per independent fold after validation threshold selection.
 - No fold, cache, pilot, full training, or scientific result was produced from
   this local data state. Cloud execution is permitted only after Phase 0 reports
   `passed` without changing the frozen test definition.
-- Verification: `python -m compileall -q .` passed; focused direct assertions
-  for deterministic 4-fold assignment and metric direction/unit passed. The
-  local Python environment has no `pytest` module, so the new pytest file awaits
-  execution in the cloud environment.
+- Verification: `python -m compileall -q .` and module/CLI imports passed.
+  Seven focused tests passed through direct invocation: metric direction/unit,
+  deterministic balanced folds, blocked-audit gate, one-clean-per-position,
+  missing-atlas placeholder, three-arm paired report smoke, and lightweight ZIP
+  exclusion. The local Python environment has no `pytest` module, so standard
+  `pytest` collection still awaits execution in the cloud environment.
