@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -23,17 +25,42 @@ def scale_unit(metric: str) -> tuple[float, str]:
     return 1.0, "native"
 
 
+def prepare_output_directory(output: Path, archive_existing: bool) -> Path | None:
+    """Create output, optionally preserving a previous non-empty report."""
+    archive = None
+    if output.exists() and any(output.iterdir()):
+        if not archive_existing:
+            raise FileExistsError(
+                "Input-factorial report is non-empty; rerun with "
+                f"--archive-existing to preserve it: {output}"
+            )
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        archive = output.with_name(f"{output.name}_archive_{timestamp}")
+        suffix = 1
+        while archive.exists():
+            archive = output.with_name(
+                f"{output.name}_archive_{timestamp}_{suffix:02d}"
+            )
+            suffix += 1
+        shutil.move(str(output), str(archive))
+        print(f"Archived existing report without deletion: {archive}")
+    output.mkdir(parents=True, exist_ok=True)
+    return archive
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Group-first I_DENOISED - I_NOISY report")
     parser.add_argument("--project-root", default=".")
     parser.add_argument("--seeds", type=int, nargs="+", required=True)
     parser.add_argument("--output", default="runs/input_factorial_report")
+    parser.add_argument(
+        "--archive-existing", action="store_true",
+        help="Move a previous non-empty report to a timestamped sibling before rebuilding.",
+    )
     args = parser.parse_args()
     root = Path(args.project_root).expanduser().resolve()
     output = (root / args.output).resolve() if not Path(args.output).is_absolute() else Path(args.output)
-    if output.exists() and any(output.iterdir()):
-        raise FileExistsError(f"Refusing to overwrite input-factorial report: {output}")
-    output.mkdir(parents=True, exist_ok=True)
+    prepare_output_directory(output, args.archive_existing)
     frames, positions, missing = [], [], []
     for seed in args.seeds:
         for variant in ("noisy", "denoised"):

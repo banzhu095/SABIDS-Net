@@ -526,3 +526,8 @@ Populate one row per independent fold after validation threshold selection.
   Non-AMP non-finite gradients still fail immediately. FP32-loss finite
   backward and resolved AMP-policy tests passed locally; cloud completion is
   pending.
+- Re-running the I-factorial summarizer against an existing non-empty report
+  correctly triggered its overwrite guard. The CLI now supports
+  `--archive-existing`, moving the entire prior report to a collision-safe
+  timestamped sibling before rebuilding. It never deletes or merges partial
+  and new tables. Refusal-without-flag and archive-preservation tests passed.

@@ -147,10 +147,15 @@ python tools/run_input_factorial.py --project-root . --mode evaluate \
 
 # 9. 位置优先汇总和固定图册
 python tools/summarize_input_factorial.py --project-root . \
-  --seeds 42 43 44 --output runs/input_factorial_report_v1
+  --seeds 42 43 44 --output runs/input_factorial_report_v1 \
+  --archive-existing
 python tools/build_input_factorial_atlas.py --project-root . --seed 42 \
   --output runs/input_factorial_report_v1/atlas_seed42
 ```
+
+`--archive-existing` 不删除旧报告；它先将非空目录整体移到
+`input_factorial_report_v1_archive_YYYYmmdd_HHMMSS/`，再在原路径重建。
+首次生成且目录不存在时可以省略该参数。
 
 注意：第一段交互诊断也需要 `$SMALL_MAX/$MEDIUM_MAX`。若尚未生成 I cache，
 可先完成步骤 2--4，再回来运行步骤 1；不能凭经验随意填写阈值。
