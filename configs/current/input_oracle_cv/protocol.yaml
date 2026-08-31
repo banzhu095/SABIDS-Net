@@ -1,0 +1,15 @@
+protocol_version: pku37-input-oracle-cv-v1
+source_manifest: Manifests/segmentation_folds/manifest_seg_fold0.csv
+all_manifest: Manifests/manifest_all.csv
+joint_manifest: Manifests/joint_folds/manifest_joint_fold0.csv
+expected_labelled_groups: 20
+expected_development_labelled_groups: 16
+sealed_test_groups: [pku_0024, pku_0031, pku_0037, pku_0039]
+preferred_folds: 4
+segmentation_seeds: [42, 43, 44]
+fixed_final_epoch: 60
+threshold: 0.5
+postprocess: p0
+component_area_bins_original_pixels: [64, 256]
+component_bins_role: descriptive_fold_stratification_only; evaluation thresholds must be derived from each fold training labels
+original_validation_groups: [pku_0006, pku_0012, pku_0040]

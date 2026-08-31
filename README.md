@@ -1194,3 +1194,11 @@ test、交互、RMAC、降噪 loss、pseudo、阈值校准和后处理均不参�
 
 实现审计、缓存格式、公平性门禁、原图小血管分箱、全部运行命令与结果解释见
 [`docs/INPUT_FACTORIAL_AUDIT.md`](docs/INPUT_FACTORIAL_AUDIT.md)。
+
+## PKU37 NOISY / CLEAN / DENOISED 三臂交叉验证
+
+新增的 input-oracle CV 将全部合规 development 标签位置按 `group_id` 建折；每折
+单独训练不接触该折 validation 的 D0，再以完全配对的初始化和数据计划训练三种输入。
+Phase 0 的标签数量、test ID 或 split 不一致时会硬阻断，不能通过自动改 test 集解锁。
+主结果固定 epoch 60、P0=0.5、原图坐标，并先按位置归约。完整审计、pilot、恢复和
+正式运行命令见 [`docs/INPUT_ORACLE_CV.md`](docs/INPUT_ORACLE_CV.md)。

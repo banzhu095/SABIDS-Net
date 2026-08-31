@@ -360,6 +360,9 @@ def evaluate_model(
                         sample_dir / f"{sample_id}_vessel_prob.png",
                         vessel_prob_eval,
                     )
+                    sample_dir.mkdir(parents=True, exist_ok=True)
+                    np.save(sample_dir / f"{sample_id}_layer_prob_float32.npy", layer_prob_eval.astype(np.float32), allow_pickle=False)
+                    np.save(sample_dir / f"{sample_id}_vessel_prob_float32.npy", vessel_prob_eval.astype(np.float32), allow_pickle=False)
                     write_gray(
                         sample_dir / f"{sample_id}_layer_mask.png",
                         layer_pred.astype(np.float32),
@@ -379,11 +382,30 @@ def evaluate_model(
                             sample_dir / f"{sample_id}_layer_gt.png",
                             layer_true.astype(np.float32),
                         )
+                        layer_tp = layer_pred & layer_true & valid_eval
+                        layer_fp = layer_pred & ~layer_true & valid_eval
+                        layer_fn = ~layer_pred & layer_true & valid_eval
+                        layer_error = np.repeat(noisy_eval[..., None], 3, axis=2)
+                        layer_error[layer_tp] = (0.0, 1.0, 0.0)
+                        layer_error[layer_fp] = (1.0, 0.0, 0.0)
+                        layer_error[layer_fn] = (0.0, 0.35, 1.0)
+                        write_rgb(sample_dir / f"{sample_id}_layer_error_tp_fp_fn.png", layer_error)
+                        layer_overlay = np.repeat(noisy_eval[..., None], 3, axis=2)
+                        layer_overlay[layer_pred] = 0.55 * layer_overlay[layer_pred] + 0.45 * np.array((0.0, 1.0, 0.0))
+                        write_rgb(sample_dir / f"{sample_id}_layer_overlay.png", layer_overlay)
                     if bool(batch["has_vessel"][index]):
                         write_gray(
                             sample_dir / f"{sample_id}_vessel_gt.png",
                             vessel_true.astype(np.float32),
                         )
+                        vessel_error = np.repeat(noisy_eval[..., None], 3, axis=2)
+                        vessel_error[vessel_tp] = (0.0, 1.0, 0.0)
+                        vessel_error[vessel_fp] = (1.0, 0.0, 0.0)
+                        vessel_error[vessel_fn] = (0.0, 0.35, 1.0)
+                        write_rgb(sample_dir / f"{sample_id}_vessel_error_tp_fp_fn.png", vessel_error)
+                        vessel_overlay = np.repeat(noisy_eval[..., None], 3, axis=2)
+                        vessel_overlay[vessel_pred] = 0.55 * vessel_overlay[vessel_pred] + 0.45 * np.array((1.0, 0.55, 0.0))
+                        write_rgb(sample_dir / f"{sample_id}_vessel_overlay.png", vessel_overlay)
                     diagnostic_maps = {
                         "vessel_tp": vessel_tp,
                         "vessel_fp": vessel_fp,

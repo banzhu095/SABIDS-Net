@@ -353,3 +353,14 @@ Before launching a long run, record all answers in the experiment log:
 - [ ] Public fold and target size match the checkpoint initialization chain.
 - [ ] Paths resolve on the current OS/server.
 - [ ] `git status --short` does not show data, labels, manifests, or runs.
+# PKU37 input-oracle CV addendum (2026-08-31)
+
+The three-arm NOISY/CLEAN/DENOISED experiment uses only labelled development
+PKU37 positions accepted by `configs/current/input_oracle_cv/protocol.yaml`.
+Configured test IDs and any legacy manifest test IDs form a conservative sealed
+union until their discrepancy is resolved; no asset in that union may be opened.
+Each development `group_id` is validation exactly once. Each fold-specific D0
+excludes that fold's validation groups and the sealed union before generating
+float32 inputs. One clean reference may be sampled repeatedly during paired
+training but is evaluated once per position and is never treated as repeated
+independent evidence.

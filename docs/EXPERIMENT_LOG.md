@@ -531,3 +531,21 @@ Populate one row per independent fold after validation threshold selection.
   `--archive-existing`, moving the entire prior report to a collision-safe
   timestamped sibling before rebuilding. It never deletes or merges partial
   and new tables. Refusal-without-flag and archive-preservation tests passed.
+## 2026-08-31 — PKU37 input-oracle CV implementation (no training result)
+
+- Added sealed-test-safe Phase 0 inventory, label/registration review, position
+  typicality, deterministic group-fold construction, fold-specific D0 training
+  and provenance audit, float32 NOISY/CLEAN/DENOISED caches, paired three-arm
+  training/evaluation, position-clustered statistics, fixed atlas, Excel report,
+  and lightweight GPT package tooling.
+- Local Phase 0 was **blocked as designed**: the Windows manifest contains 13
+  labelled PKU37 positions and 9 effective development positions, not the
+  frozen 20/16 protocol, and its legacy test IDs differ from the configured
+  sealed IDs. The effective union remained sealed and `test_assets_opened=0`.
+- No fold, cache, pilot, full training, or scientific result was produced from
+  this local data state. Cloud execution is permitted only after Phase 0 reports
+  `passed` without changing the frozen test definition.
+- Verification: `python -m compileall -q .` passed; focused direct assertions
+  for deterministic 4-fold assignment and metric direction/unit passed. The
+  local Python environment has no `pytest` module, so the new pytest file awaits
+  execution in the cloud environment.

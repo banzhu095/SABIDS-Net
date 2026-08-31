@@ -13,7 +13,7 @@ import cv2
 import numpy as np
 import pandas as pd
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -49,9 +49,16 @@ def resolve_path(root: Path, value: str) -> Path:
     return path.resolve() if path.is_absolute() else (root / path).resolve()
 
 
-def audit_d0(root: Path, checkpoint: Path, output: Path) -> Dict:
-    segmentation_manifest = root / "Manifests/segmentation_folds/manifest_seg_fold0.csv"
-    stage1_manifest = root / "Manifests/joint_folds/manifest_joint_fold0.csv"
+def audit_d0(
+    root: Path,
+    checkpoint: Path,
+    output: Path,
+    segmentation_manifest: Path | None = None,
+    stage1_manifest: Path | None = None,
+    sealed_groups: set[str] | None = None,
+) -> Dict:
+    segmentation_manifest = segmentation_manifest or root / "Manifests/segmentation_folds/manifest_seg_fold0.csv"
+    stage1_manifest = stage1_manifest or root / "Manifests/joint_folds/manifest_joint_fold0.csv"
     missing = [str(path) for path in (checkpoint, segmentation_manifest, stage1_manifest) if not path.is_file()]
     if missing:
         raise FileNotFoundError("Missing D0 audit input: " + ", ".join(missing))
@@ -104,7 +111,7 @@ def audit_d0(root: Path, checkpoint: Path, output: Path) -> Dict:
     manifest_match = provenance.get("manifest_sha256") == stage1_manifest_sha
     segmentation = pd.read_csv(segmentation_manifest, dtype=str).fillna("")
     held_out = segmentation[segmentation["split"].isin(["val", "test"])]
-    held_out_groups = set(held_out["group_id"].astype(str))
+    held_out_groups = set(held_out["group_id"].astype(str)) | set(sealed_groups or set())
     overlap = sorted(d0_train_groups & held_out_groups)
 
     stage1 = pd.read_csv(stage1_manifest, dtype=str).fillna("")
@@ -161,9 +168,21 @@ def audit_d0(root: Path, checkpoint: Path, output: Path) -> Dict:
     return report
 
 
-def build_cache(root: Path, checkpoint: Path, output_root: Path, device_name: str) -> None:
+def build_cache(
+    root: Path,
+    checkpoint: Path,
+    output_root: Path,
+    device_name: str,
+    source_manifest: Path | None = None,
+    stage1_manifest: Path | None = None,
+    derived_path: Path | None = None,
+    sealed_groups: set[str] | None = None,
+    max_samples_per_split: int | None = None,
+) -> None:
     audit_path = output_root / "d0_leakage_audit.json"
-    audit = audit_d0(root, checkpoint, audit_path)
+    source_manifest = source_manifest or root / "Manifests/segmentation_folds/manifest_seg_fold0.csv"
+    stage1_manifest = stage1_manifest or root / "Manifests/joint_folds/manifest_joint_fold0.csv"
+    audit = audit_d0(root, checkpoint, audit_path, source_manifest, stage1_manifest, sealed_groups)
     if audit["status"] != "passed":
         raise RuntimeError(f"D0 leakage audit is blocked; inspect {audit_path}")
     payload = torch.load(checkpoint, map_location="cpu")
@@ -178,7 +197,6 @@ def build_cache(root: Path, checkpoint: Path, output_root: Path, device_name: st
     if any(module.training for module in model.modules()):
         raise RuntimeError("D0 must be fully in eval mode")
 
-    source_manifest = root / "Manifests/segmentation_folds/manifest_seg_fold0.csv"
     source_table = pd.read_csv(source_manifest, dtype=str).fillna("")
     transform_config = json.loads(json.dumps(d0_config))
     transform_config["data"]["manifest"] = str(source_manifest)
@@ -188,12 +206,15 @@ def build_cache(root: Path, checkpoint: Path, output_root: Path, device_name: st
     derived = source_table.copy()
     derived["noisy_cache_path"] = ""
     derived["denoised_cache_path"] = ""
+    derived["clean_cache_path"] = ""
     checkpoint_sha = sha256_file(checkpoint)
     for split in ("train", "val"):
         dataset = OCTManifestDataset(
             source_manifest, split=split, transform=_make_transform(transform_config, False),
             sample_repeat=False, root=root,
         )
+        if max_samples_per_split is not None:
+            dataset = Subset(dataset, range(min(int(max_samples_per_split), len(dataset))))
         loader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=0)
         for batch in loader:
             image = batch["image"].to(device)
@@ -230,28 +251,54 @@ def build_cache(root: Path, checkpoint: Path, output_root: Path, device_name: st
                 raise RuntimeError(f"sample_id must be unique within split: {sample_id}")
             derived.loc[row_index, "noisy_cache_path"] = str(noisy_path.relative_to(root)).replace("\\", "/")
             derived.loc[row_index, "denoised_cache_path"] = str(denoised_path.relative_to(root)).replace("\\", "/")
+            clean_path = str(batch["clean_path"][0])
+            clean_cache_path = None
+            if clean_path:
+                clean = read_gray(clean_path)
+                clean_cache_path = output_root / "clean_float32" / f"{group_id}.npy"
+                if clean_cache_path.exists():
+                    existing = np.load(clean_cache_path, allow_pickle=False)
+                    if existing.shape != clean.shape or not np.array_equal(existing.astype(np.float32), clean.astype(np.float32)):
+                        raise FileExistsError(f"Existing clean cache differs; refusing overwrite: {clean_cache_path}")
+                else:
+                    atomic_save_npy(clean_cache_path, clean)
+                derived.loc[row_index, "clean_cache_path"] = str(clean_cache_path.relative_to(root)).replace("\\", "/")
             cache_rows.append({
                 "split": split, "sample_id": sample_id, "group_id": group_id,
                 "input_path": batch["original_path"][0], "noisy_cache_path": str(noisy_path),
                 "denoised_cache_path": str(denoised_path), "d0_checkpoint_sha256": checkpoint_sha,
                 "shape": str(tuple(denoised_original.shape)), "dtype": "float32",
                 "minimum": float(denoised_original.min()), "maximum": float(denoised_original.max()),
+                "noisy_mean": float(noisy_original.mean()), "noisy_std": float(noisy_original.std()),
+                "denoised_mean": float(denoised_original.mean()), "denoised_std": float(denoised_original.std()),
+                "clean_mean": float(clean.mean()) if clean_path else np.nan,
+                "clean_std": float(clean.std()) if clean_path else np.nan,
                 "noisy_cache_sha256": sha256_file(noisy_path), "denoised_cache_sha256": sha256_file(denoised_path),
                 "identity_roundtrip_max_abs_diff": identity_diff,
                 "repeat_d0_max_abs_diff": deterministic_diff,
+                "clean_cache_path": str(clean_cache_path) if clean_cache_path else "",
             })
-            clean_path = str(batch["clean_path"][0])
             if clean_path:
-                clean = read_gray(clean_path)
                 quality = {
                     "split": split, "sample_id": sample_id, "group_id": group_id,
                     "psnr_noisy": psnr(noisy_original, clean), "psnr_d0": psnr(denoised_original, clean),
+                    "psnr_clean": float("inf"),
                     "ssim_noisy": ssim(noisy_original, clean), "ssim_d0": ssim(denoised_original, clean),
+                    "ssim_clean": 1.0,
                     "rmse_noisy": rmse(noisy_original, clean), "rmse_d0": rmse(denoised_original, clean),
+                    "rmse_clean": 0.0,
                     "epi_noisy": edge_preservation_index(noisy_original, clean),
                     "epi_d0": edge_preservation_index(denoised_original, clean),
+                    "epi_clean": edge_preservation_index(clean, clean),
                     "reference_edge_mae_noisy": reference_edge_mae(noisy_original, clean),
                     "reference_edge_mae_d0": reference_edge_mae(denoised_original, clean),
+                    "reference_edge_mae_clean": 0.0,
+                    "d0_residual_mean": float((denoised_original - noisy_original).mean()),
+                    "d0_residual_variance": float((denoised_original - noisy_original).var()),
+                    "d0_residual_high_frequency_energy": float(cv2.Laplacian((denoised_original - noisy_original).astype(np.float32), cv2.CV_32F).var()),
+                    "noisy_high_frequency_energy": float(cv2.Laplacian(noisy_original.astype(np.float32), cv2.CV_32F).var()),
+                    "d0_high_frequency_energy": float(cv2.Laplacian(denoised_original.astype(np.float32), cv2.CV_32F).var()),
+                    "clean_high_frequency_energy": float(cv2.Laplacian(clean.astype(np.float32), cv2.CV_32F).var()),
                 }
                 layer_path, vessel_path = str(batch["layer_mask_path"][0]), str(batch["vessel_mask_path"][0])
                 if layer_path:
@@ -268,6 +315,8 @@ def build_cache(root: Path, checkpoint: Path, output_root: Path, device_name: st
                         quality["vessel_stroma_cnr_abs_error_noisy"] = abs(quality["vessel_stroma_cnr_noisy"] - quality["vessel_stroma_cnr_clean"])
                         quality["vessel_stroma_cnr_abs_error_d0"] = abs(quality["vessel_stroma_cnr_d0"] - quality["vessel_stroma_cnr_clean"])
                 quality_rows.append(quality)
+    if max_samples_per_split is not None:
+        derived = derived[derived["noisy_cache_path"] != ""].copy()
     output_root.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(cache_rows).to_csv(output_root / "denoised_cache_manifest.csv", index=False, encoding="utf-8-sig")
     pd.DataFrame(quality_rows).to_csv(output_root / "input_quality_metrics.csv", index=False, encoding="utf-8-sig")
@@ -298,13 +347,13 @@ def build_cache(root: Path, checkpoint: Path, output_root: Path, device_name: st
         index=False, encoding="utf-8-sig",
     )
     write_json({
-        "cache_files": int(2 * len(cache_rows)),
-        "cache_bytes": int(sum(Path(row[key]).stat().st_size for row in cache_rows for key in ("noisy_cache_path", "denoised_cache_path"))),
+        "cache_files": int(2 * len(cache_rows) + len({row["clean_cache_path"] for row in cache_rows if row["clean_cache_path"]})),
+        "cache_bytes": int(sum(Path(row[key]).stat().st_size for row in cache_rows for key in ("noisy_cache_path", "denoised_cache_path")) + sum(Path(path).stat().st_size for path in {row["clean_cache_path"] for row in cache_rows if row["clean_cache_path"]})),
         "dtype": "float32", "test_rows_cached": 0, "test_assets_opened": 0,
         "stage1_normalization": d0_config["data"].get("normalization", "fixed"),
         "stage1_target_size": d0_config["data"].get("target_size"),
     }, output_root / "cache_summary.json")
-    derived_path = root / "Manifests/input_factorial/manifest_input_fold0.csv"
+    derived_path = derived_path or root / "Manifests/input_factorial/manifest_input_fold0.csv"
     derived_path.parent.mkdir(parents=True, exist_ok=True)
     if derived_path.exists():
         existing = pd.read_csv(derived_path, dtype=str).fillna("")
