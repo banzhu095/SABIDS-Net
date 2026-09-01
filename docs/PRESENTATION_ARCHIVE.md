@@ -17,6 +17,10 @@ python tools/build_presentation_archive.py \
   --output "$OUT"
 ```
 
+If a previous audit stopped after creating a partial directory, preserve it and
+restart the same output name with `--archive-existing`.  The old directory is
+moved to a timestamped sibling and is never deleted.
+
 Review `audit/run_path_audit.csv`, `audit/checkpoint_audit.csv`, and
 `audit/missing_assets.csv`.  The checkpoint audit hashes `best.pth` and
 `last.pth` and reads the stored epoch; directory names alone are not accepted as

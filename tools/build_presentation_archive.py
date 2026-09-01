@@ -22,6 +22,7 @@ import argparse
 import csv
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -86,6 +87,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--interaction-report", help="Completed interaction factorial summary")
     parser.add_argument("--input-report", help="Completed input factorial summary")
     parser.add_argument("--run-missing-validation", action="store_true")
+    parser.add_argument("--archive-existing", action="store_true", help="Preserve an existing audit/all output as a timestamped sibling before restarting")
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--skip-workbooks", action="store_true", help="Keep CSVs if @oai/artifact-tool is unavailable")
@@ -133,6 +135,81 @@ def read_yaml_text(path: Path) -> dict[str, Any]:
         return {}
 
 
+def read_json_object(path: Path) -> tuple[dict[str, Any], str]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+        return (value if isinstance(value, dict) else {}, "parsed" if isinstance(value, dict) else "not_an_object")
+    except Exception as exc:
+        return {}, f"unreadable:{type(exc).__name__}"
+
+
+def audit_history_csv(path: Path) -> dict[str, Any]:
+    """Read a history without letting a malformed legacy row abort the audit.
+
+    A strict pandas parse is authoritative when it succeeds.  On parser failure,
+    the stdlib CSV reader inventories every logical row and records field-count
+    mismatches.  Metrics from that fallback are explicitly marked unusable; only
+    row count and a best-effort maximum epoch are retained for discovery.
+    """
+    result: dict[str, Any] = {
+        "history_rows": 0, "last_history_epoch": "", "history_parse_status": "missing",
+        "history_expected_fields": "", "history_bad_line_count": 0,
+        "history_bad_lines": "", "history_observed_field_counts": "",
+        "history_metrics_usable": False, "history_parse_error": "",
+    }
+    if not path.is_file():
+        return result
+    try:
+        table = pd.read_csv(path)
+        result.update({
+            "history_rows": len(table),
+            "last_history_epoch": int(pd.to_numeric(table["epoch"], errors="coerce").max())
+            if "epoch" in table and len(table) and pd.to_numeric(table["epoch"], errors="coerce").notna().any() else "",
+            "history_parse_status": "parsed_strict", "history_expected_fields": len(table.columns),
+            "history_metrics_usable": True,
+        })
+        return result
+    except Exception as exc:
+        result["history_parse_error"] = f"{type(exc).__name__}: {exc}"
+
+    bad_lines: list[int] = []
+    observed_counts: set[int] = set()
+    epochs: list[float] = []
+    row_count = 0
+    try:
+        with path.open("r", encoding="utf-8-sig", errors="replace", newline="") as handle:
+            reader = csv.reader(handle)
+            header = next(reader, [])
+            expected = len(header)
+            epoch_index = header.index("epoch") if "epoch" in header else None
+            for row in reader:
+                if not row or not any(str(value).strip() for value in row):
+                    continue
+                row_count += 1
+                observed_counts.add(len(row))
+                if len(row) != expected:
+                    bad_lines.append(reader.line_num)
+                if epoch_index is not None and epoch_index < len(row):
+                    try:
+                        epoch = float(row[epoch_index])
+                        if math.isfinite(epoch):
+                            epochs.append(epoch)
+                    except (TypeError, ValueError):
+                        pass
+        result.update({
+            "history_rows": row_count, "last_history_epoch": int(max(epochs)) if epochs else "",
+            "history_parse_status": "malformed_inventory_only", "history_expected_fields": expected,
+            "history_bad_line_count": len(bad_lines),
+            "history_bad_lines": ";".join(str(value) for value in bad_lines[:50]),
+            "history_observed_field_counts": ";".join(str(value) for value in sorted(observed_counts)),
+            "history_metrics_usable": False,
+        })
+    except Exception as exc:
+        result["history_parse_status"] = "unreadable"
+        result["history_parse_error"] += f" | fallback:{type(exc).__name__}: {exc}"
+    return result
+
+
 def nested(mapping: dict[str, Any], dotted: str, default: Any = "") -> Any:
     current: Any = mapping
     for key in dotted.split("."):
@@ -172,15 +249,20 @@ def audit(root: Path, output: Path) -> dict[str, Any]:
         config_path = path / "resolved_config.yaml"
         metadata_path = path / "run_metadata.json"
         config = read_yaml_text(config_path) if config_path.is_file() else {}
-        metadata = json.loads(metadata_path.read_text(encoding="utf-8")) if metadata_path.is_file() else {}
+        metadata, metadata_parse_status = read_json_object(metadata_path) if metadata_path.is_file() else ({}, "missing")
         stage = nested(config, "train.stage", metadata.get("stage", ""))
         history = path / "history.csv"
-        history_rows = 0
-        last_history_epoch: Any = ""
-        if history.is_file():
-            table = pd.read_csv(history)
-            history_rows = len(table)
-            last_history_epoch = int(table["epoch"].max()) if "epoch" in table and len(table) else ""
+        history_audit = audit_history_csv(history)
+        if history_audit["history_parse_status"] in {"malformed_inventory_only", "unreadable"}:
+            missing.append({
+                "family": "history", "alias": alias, "asset": "history.csv",
+                "path": history.relative_to(root).as_posix(), "status": "MALFORMED",
+                "impact": (
+                    "history discovered but excluded from quantitative ranking; "
+                    f"bad_lines={history_audit['history_bad_lines'] or 'unknown'}; "
+                    f"field_counts={history_audit['history_observed_field_counts'] or 'unknown'}"
+                ),
+            })
         run_rows.append({
             "alias": alias, "run_path": path.relative_to(root).as_posix(), "exists": path.is_dir(),
             "stage": stage, "seed": nested(config, "train.seed", metadata.get("seed", "")),
@@ -191,10 +273,11 @@ def audit(root: Path, output: Path) -> dict[str, Any]:
             "encoder_frozen": nested(config, "train.freeze_shared_encoder", "unknown"),
             "denoiser_frozen": nested(config, "train.freeze_denoiser", "unknown"),
             "outside_bce_weight": nested(config, "loss.weights.vessel_outside", "unknown"),
-            "configured_epochs": nested(config, "train.epochs", ""), "last_history_epoch": last_history_epoch,
+            "configured_epochs": nested(config, "train.epochs", ""),
             "monitor": nested(config, "train.monitor", metadata.get("monitor", "")),
-            "history_rows": history_rows, "history_present": history.is_file(),
+            "history_present": history.is_file(), **history_audit,
             "config_present": config_path.is_file(), "metadata_present": metadata_path.is_file(),
+            "metadata_parse_status": metadata_parse_status,
             "initialization_audit_present": (path / "initialization_audit.json").is_file(),
             "parameter_audit_present": (path / "parameter_audit.json").is_file(),
             "label_inventory_present": (path / "label_asset_inventory.json").is_file(),
@@ -887,14 +970,30 @@ def assemble(root: Path, output: Path, args: argparse.Namespace) -> dict[str, An
     return {"sources": {key: str(value) for key, value in sources.items()}, "validation": validation["status"], "workbook_required": not args.skip_workbooks}
 
 
-def prepare_output(root: Path, value: str | None, mode: str) -> Path:
+def prepare_output(root: Path, value: str | None, mode: str, archive_existing: bool = False) -> Path:
     if value:
         output = safe_resolve(root, value)
         assert output is not None
     else:
         output = root / "runs" / f"presentation_archive_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     if mode in {"audit", "all"}:
-        if output.exists(): raise FileExistsError(f"Refusing to overwrite presentation archive: {output}")
+        if output.exists():
+            if not archive_existing:
+                raise FileExistsError(
+                    f"Refusing to overwrite presentation archive: {output}; "
+                    "use --archive-existing to preserve and restart it"
+                )
+            archived = output.with_name(
+                output.name + "_archive_" + datetime.now().strftime("%Y%m%d_%H%M%S")
+            )
+            suffix = 1
+            while archived.exists():
+                archived = output.with_name(
+                    output.name + "_archive_" + datetime.now().strftime("%Y%m%d_%H%M%S") + f"_{suffix:02d}"
+                )
+                suffix += 1
+            shutil.move(str(output), str(archived))
+            print(f"Archived existing presentation output without deletion: {archived}")
         for name in ("audit", "metrics", "tables", "figures", "stage1_denoising", "stage2_debug", "stage2_ablation", "postprocessing", "joint", "input_experiment", "gpt_bundle"):
             (output / name).mkdir(parents=True, exist_ok=True)
     elif not output.is_dir():
@@ -905,7 +1004,7 @@ def prepare_output(root: Path, value: str | None, mode: str) -> Path:
 def main() -> None:
     args = parse_args()
     root = Path(args.project_root).expanduser().resolve()
-    output = prepare_output(root, args.output, args.mode)
+    output = prepare_output(root, args.output, args.mode, args.archive_existing)
     result: dict[str, Any] = {"tool_version": VERSION, "output": str(output), "mode": args.mode}
     if args.mode in {"audit", "all"}:
         result["audit"] = audit(root, output)

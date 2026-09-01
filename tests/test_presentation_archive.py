@@ -4,7 +4,7 @@ from pathlib import Path
 
 import numpy as np
 
-from tools.build_presentation_archive import error_map, forbidden, package_archive, rgb_overlay
+from tools.build_presentation_archive import audit_history_csv, error_map, forbidden, package_archive, prepare_output, rgb_overlay
 
 
 class PresentationArchiveTests(unittest.TestCase):
@@ -36,6 +36,30 @@ class PresentationArchiveTests(unittest.TestCase):
             package_archive(output)
             with self.assertRaisesRegex(FileExistsError, "Refusing to overwrite"):
                 package_archive(output)
+
+    def test_malformed_history_is_inventoried_without_becoming_usable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            history = Path(directory) / "history.csv"
+            history.write_text("epoch,loss,dice\n1,0.5,0.4\n2,0.4,0.5,unexpected\n", encoding="utf-8")
+            result = audit_history_csv(history)
+            self.assertEqual(result["history_parse_status"], "malformed_inventory_only")
+            self.assertEqual(result["history_rows"], 2)
+            self.assertEqual(result["last_history_epoch"], 2)
+            self.assertEqual(result["history_bad_line_count"], 1)
+            self.assertFalse(result["history_metrics_usable"])
+
+    def test_partial_audit_is_archived_before_restart(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "runs" / "presentation_archive_demo"
+            output.mkdir(parents=True)
+            (output / "partial.txt").write_text("preserve", encoding="utf-8")
+            prepared = prepare_output(root, str(output), "audit", archive_existing=True)
+            self.assertEqual(prepared, output)
+            self.assertTrue(prepared.is_dir())
+            archives = list(output.parent.glob("presentation_archive_demo_archive_*"))
+            self.assertEqual(len(archives), 1)
+            self.assertEqual((archives[0] / "partial.txt").read_text(encoding="utf-8"), "preserve")
 
 
 if __name__ == "__main__":
