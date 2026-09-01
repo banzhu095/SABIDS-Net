@@ -551,3 +551,10 @@ Populate one row per independent fold after validation threshold selection.
   missing-atlas placeholder, three-arm paired report smoke, and lightweight ZIP
   exclusion. The local Python environment has no `pytest` module, so standard
   `pytest` collection still awaits execution in the cloud environment.
+# 2026-09-01 — Validation-only stage summary archive (no new training)
+
+- Added `tools/build_stage_summary.py` and `tools/build_stage_summary_workbooks.mjs` to audit existing run metadata, preserve protocol boundaries, generate long-form metrics, fixed validation atlases, eight presentation figures, seven topic workbooks, a master experiment ledger, evidence/limitations summaries, and CRC-verified full/GPT packages.
+- The generated local archive is `runs/stage_summary_20260901_121853`. Its quantitative source is the records-only validation archive `reports/experiment_records/20260828_174000`; no checkpoint inference, training, threshold calibration, test evaluation, or test-asset opening was performed.
+- Formal fixed-final B0/J00/J10/J01/J11 and epoch-60 I-NOISY/I-DENOISED result assets are absent locally and are explicitly marked `MISSING`. No Joint or input-factorial performance conclusion is claimed.
+- The available original-grid E3b evidence covers only `pku_0006`, `pku_0012`, and `pku_0040`, one fixed f01 frame each. Stage 2 matched histories cover seed 42 only. P3 remains labelled inference/postprocessing rather than training gain.
+- Archive validation passed for CSV schemas/finite values and PNG decoding/dimensions. The full package contains 145 files (6,597,237 bytes; SHA256 `22c0d50bad33bf8e7b35bf57f9a11d658c67de32f20d8920e2ab9227245db72b`); the GPT package contains 47 files (1,476,438 bytes; SHA256 `dea972344e97b21c5e4564b9fa1e3ca8be0ed6ff0c666ca69eea610798751e35`). Both passed ZIP CRC verification.

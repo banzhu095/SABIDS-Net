@@ -58,6 +58,12 @@ def _bootstrap(values: np.ndarray, seed: int, repeats: int = 10000) -> tuple[flo
     return tuple(np.quantile(sampled, [0.025, 0.975]))
 
 
+def _sample_std(values) -> float:
+    array = np.asarray(values, dtype=float)
+    array = array[np.isfinite(array)]
+    return float(np.std(array, ddof=1)) if len(array) >= 2 else math.nan
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Position-clustered analysis of NOISY/CLEAN/DENOISED CV")
     parser.add_argument("--project-root", default=".")
@@ -118,8 +124,10 @@ def main() -> None:
         if args.dry_run:
             print(json.dumps(checklist, ensure_ascii=False, indent=2)); return
         raise FileNotFoundError("Missing fixed-final validations; see missing_and_failure_checklist.json")
-    frame_table = pd.concat(frames, ignore_index=True)
-    position_table = pd.concat(positions, ignore_index=True)
+    # A deep copy consolidates blocks from wide evaluator CSVs. Without it,
+    # pandas emits a fragmentation warning for every arm during smoke reports.
+    frame_table = pd.concat(frames, ignore_index=True).copy(deep=True)
+    position_table = pd.concat(positions, ignore_index=True).copy(deep=True)
     frame_table.to_csv(output / "frame_metrics_long.csv", index=False, encoding="utf-8-sig")
     position_table.to_csv(output / "position_metrics_long.csv", index=False, encoding="utf-8-sig")
     pd.DataFrame(epoch0).to_csv(output / "epoch0_input_domain_bias.csv", index=False, encoding="utf-8-sig")
@@ -152,7 +160,9 @@ def main() -> None:
     gains.to_csv(output / "paired_gains_by_position_seed.csv", index=False, encoding="utf-8-sig")
     # Seeds are repeated fits of the same anatomical positions, not subjects.
     position_gain = gains.groupby(["group_id", "comparison", "metric", "unit"], as_index=False).agg(
-        mean_improvement=("improvement", "mean"), seed_std=("improvement", "std"), n_seeds=("seed", "nunique")
+        mean_improvement=("improvement", "mean"),
+        seed_std=("improvement", _sample_std),
+        n_seeds=("seed", "nunique"),
     )
     position_gain["effect_percentile_within_metric"] = position_gain.groupby(
         ["comparison", "metric"]
@@ -167,7 +177,8 @@ def main() -> None:
         mean_improvement=("improvement", "mean"), n_positions=("group_id", "nunique"),
     )
     fold_summary.to_csv(output / "paired_gains_by_fold.csv", index=False, encoding="utf-8-sig")
-    seed_metrics = position_table.groupby(["fold", "seed", "arm"], as_index=False)[metrics].mean(numeric_only=True)
+    seed_metric_source = position_table.loc[:, ["fold", "seed", "arm", *metrics]].copy(deep=True)
+    seed_metrics = seed_metric_source.groupby(["fold", "seed", "arm"], as_index=False).mean(numeric_only=True)
     seed_metrics.to_csv(output / "seed_metrics_long.csv", index=False, encoding="utf-8-sig")
     summary_rows = []
     for (comparison, metric, unit), part in position_gain.groupby(["comparison", "metric", "unit"], sort=True):
@@ -182,15 +193,15 @@ def main() -> None:
         summary_rows.append({
             "comparison": comparison, "metric": metric, "unit": unit,
             "mean": float(np.nanmean(values)), "median": float(np.nanmedian(values)),
-            "position_std": float(np.nanstd(values, ddof=1)), "iqr": float(q3 - q1),
-            "seed_mean_std": float(seed_values.std(ddof=1)),
+            "position_std": _sample_std(values), "iqr": float(q3 - q1),
+            "seed_mean_std": _sample_std(seed_values),
             "n_independent_positions": int(np.isfinite(values).sum()), "cluster_bootstrap_ci95_low": low,
             "cluster_bootstrap_ci95_high": high, "exact_sign_test_p": _sign_p(part["mean_improvement"]),
             "positive_positions": int((part["mean_improvement"] > 0).sum()),
             "negative_positions": int((part["mean_improvement"] < 0).sum()),
             "zero_positions": int((part["mean_improvement"] == 0).sum()),
             "largest_single_position_effect": float(np.nanmax(finite_abs)) if len(finite_abs) else math.nan,
-            "mean_smaller_than_seed_sd": bool(abs(np.nanmean(values)) < seed_values.std(ddof=1)) if len(seed_values) > 1 else False,
+            "mean_smaller_than_seed_sd": bool(abs(np.nanmean(values)) < _sample_std(seed_values)) if len(seed_values) > 1 else False,
             "fold_range": float(fold_values.max() - fold_values.min()) if len(fold_values) else math.nan,
             "exploratory_inference_only": True,
         })
