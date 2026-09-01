@@ -338,10 +338,25 @@ def audit(root: Path, output: Path) -> dict[str, Any]:
 
 def run_command(command: list[str], root: Path, log: Path) -> None:
     log.parent.mkdir(parents=True, exist_ok=True)
-    with log.open("w", encoding="utf-8") as handle:
+    with log.open("a", encoding="utf-8") as handle:
+        handle.write("\n" + "=" * 80 + "\n")
+        handle.write(f"{datetime.now().isoformat()} COMMAND: {' '.join(command)}\n")
+        handle.flush()
         process = subprocess.run(command, cwd=root, stdout=handle, stderr=subprocess.STDOUT, text=True)
     if process.returncode:
-        raise RuntimeError(f"Command failed ({process.returncode}); see {log}: {' '.join(command)}")
+        lines = log.read_text(encoding="utf-8", errors="replace").splitlines()
+        tail = "\n".join(lines[-80:])
+        failure_path = log.with_name(
+            log.name + ".failure_" + datetime.now().strftime("%Y%m%d_%H%M%S") + ".json"
+        )
+        write_json(failure_path, {
+            "command": command, "exit_code": process.returncode,
+            "log": str(log), "log_tail": tail,
+        })
+        raise RuntimeError(
+            f"Command failed ({process.returncode}); full log: {log}; "
+            f"failure record: {failure_path}\n--- log tail ---\n{tail}"
+        )
 
 
 def latest_dir(parent: Path, pattern: str) -> Path | None:
@@ -355,10 +370,37 @@ def evaluate_missing(root: Path, output: Path, args: argparse.Namespace) -> dict
     staging = output / "_staging"; logs = output / "audit" / "logs"
     stage12 = safe_resolve(root, args.stage12_report) if args.stage12_report else staging / "stage12_validation"
     if not (stage12 / "segmentation_per_frame.csv").is_file() or not (stage12 / "predictions_index.csv").is_file():
+        if not (stage12 / "experiment_registry.csv").is_file():
+            run_command([
+                sys.executable, "tools/export_stage12_results.py", "--project-root", str(root),
+                "--output", str(stage12), "--dry-run", "--skip-input-hashes", "--resume",
+            ], root, logs / "stage12_preflight.log")
+        registry_path = stage12 / "experiment_registry.csv"
+        if not registry_path.is_file():
+            raise RuntimeError(f"Stage1/2 preflight did not create registry: {registry_path}")
+        stage12_registry = pd.read_csv(registry_path).fillna("")
+        not_ready = stage12_registry[stage12_registry["status"].astype(str) != "ready"]
+        preflight = {
+            "registry": str(registry_path), "n_runs": len(stage12_registry),
+            "ready_runs": int((stage12_registry["status"].astype(str) == "ready").sum()),
+            "blocked": not_ready[[column for column in ("alias", "status", "resolved_config", "checkpoint") if column in not_ready]].to_dict("records"),
+            "malformed_histories": stage12_registry.loc[
+                stage12_registry.get("history_status", pd.Series(index=stage12_registry.index, dtype=str)).astype(str) == "malformed_unusable",
+                [column for column in ("alias", "history_status", "history_error") if column in stage12_registry],
+            ].to_dict("records"),
+            "test_assets_opened": 0,
+        }
+        write_json(output / "audit" / "stage12_preflight.json", preflight)
+        if len(not_ready):
+            raise RuntimeError(
+                "Stage1/2 preflight blocked missing formal config/checkpoint; see "
+                f"{output / 'audit' / 'stage12_preflight.json'}"
+            )
         run_command([
             sys.executable, "tools/export_stage12_results.py", "--project-root", str(root),
             "--output", str(stage12), "--device", args.device, "--batch-size", "1",
-            "--num-workers", str(args.num_workers), "--full-non-test", "--save-all-float", "--resume",
+            "--num-workers", str(args.num_workers), "--full-non-test", "--save-all-float",
+            "--skip-input-hashes", "--resume",
         ], root, logs / "stage12_validation.log")
 
     b0 = root / "runs/current/interaction_b0_fold0_seed42/validation/frame_metrics.csv"

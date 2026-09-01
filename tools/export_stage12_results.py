@@ -100,7 +100,14 @@ def history_best(run_dir: Path, monitor: str) -> Dict[str, Any]:
     history_path = run_dir / "history.csv"
     if not history_path.is_file():
         return {"history_status": "missing"}
-    history = pd.read_csv(history_path)
+    try:
+        history = pd.read_csv(history_path)
+    except (pd.errors.ParserError, UnicodeDecodeError, OSError) as error:
+        return {
+            "history_status": "malformed_unusable",
+            "history_error": f"{type(error).__name__}: {error}",
+            "history_metrics_usable": False,
+        }
     column = f"val_{monitor}" if f"val_{monitor}" in history else monitor
     if history.empty or column not in history:
         return {"history_status": "monitor_missing", "history_rows": len(history)}
@@ -153,7 +160,17 @@ def build_training_best(root: Path, registry: pd.DataFrame) -> pd.DataFrame:
         history_path = root / item["run_path"] / "history.csv"
         if not history_path.is_file():
             continue
-        history = pd.read_csv(history_path)
+        try:
+            history = pd.read_csv(history_path)
+        except (pd.errors.ParserError, UnicodeDecodeError, OSError) as error:
+            rows.append({
+                "display_order": item["display_order"],
+                "experiment": item["alias"],
+                "selection_source": "unavailable_malformed_history",
+                "history_status": "malformed_unusable",
+                "history_error": f"{type(error).__name__}: {error}",
+            })
+            continue
         if history.empty:
             continue
         epoch = item.get("checkpoint_epoch")

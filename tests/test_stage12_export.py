@@ -9,8 +9,8 @@ import torch
 
 from sabids.metrics import binary_metrics, psnr
 from tools.export_stage12_results import (
-    build_inventory, float_cache_complete, make_scope_manifest, predict_only,
-    write_denoise_drift,
+    build_inventory, build_training_best, float_cache_complete, history_best,
+    make_scope_manifest, predict_only, write_denoise_drift,
 )
 
 
@@ -107,6 +107,23 @@ class Stage12ExportTests(unittest.TestCase):
             self.assertEqual(drift.loc[drift.experiment == "E1-current", "status"].iloc[0], "compared")
             self.assertEqual(drift.loc[drift.experiment == "E3-current", "status"].iloc[0],
                              "incompatible_or_corrupt_cache")
+
+    def test_malformed_history_does_not_block_checkpoint_registry(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            run = root / "runs" / "current" / "demo"
+            run.mkdir(parents=True)
+            (run / "history.csv").write_text(
+                "epoch,val_psnr\n1,30.0\n2,31.0,unexpected\n", encoding="utf-8"
+            )
+            status = history_best(run, "psnr")
+            self.assertEqual(status["history_status"], "malformed_unusable")
+            registry = pd.DataFrame([{
+                "display_order": 0, "alias": "demo", "run_path": "runs/current/demo",
+                "checkpoint_epoch": 2,
+            }])
+            result = build_training_best(root, registry)
+            self.assertEqual(result.iloc[0]["selection_source"], "unavailable_malformed_history")
 
 
 if __name__ == "__main__":
