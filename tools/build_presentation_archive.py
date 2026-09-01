@@ -119,6 +119,18 @@ def write_table(path: Path, rows: Iterable[dict[str, Any]], columns: list[str] |
     return frame
 
 
+def copy_file(source: Path, destination: Path) -> None:
+    """Copy an archive asset after creating its parent; reuse identical output."""
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.is_file():
+        if source.stat().st_size == destination.stat().st_size and sha256(source) == sha256(destination):
+            return
+        raise FileExistsError(
+            f"Refusing to overwrite a different assembled asset: {destination}"
+        )
+    shutil.copy2(source, destination)
+
+
 def safe_resolve(root: Path, value: Any) -> Path | None:
     text = str(value or "").strip()
     if not text:
@@ -586,7 +598,7 @@ def materialize_stage2(report: Path, output: Path, missing: list[dict[str, Any]]
     frames = pd.read_csv(frame_path)
     frames.to_csv(output / "metrics" / "stage2_ablation_metrics.csv", index=False, encoding="utf-8-sig")
     group_path = report / "segmentation_per_group.csv"
-    if group_path.is_file(): shutil.copy2(group_path, output / "metrics" / "stage2_ablation_by_position.csv")
+    if group_path.is_file(): copy_file(group_path, output / "metrics" / "stage2_ablation_by_position.csv")
     selected = []
     e3b = frames[frames["experiment"] == "E3b"]
     for (dataset, group_id), _ in e3b.groupby(["dataset", "group_id"]):
@@ -610,7 +622,7 @@ def materialize_stage2(report: Path, output: Path, missing: list[dict[str, Any]]
             if any(not path.is_file() for path in required.values()):
                 missing.append({"family": "stage2", "alias": alias, "sample_id": row.sample_id, "asset": "matched prediction set", "status": "MISSING", "impact": "contact incomplete"})
                 continue
-            for name, path in required.items(): shutil.copy2(path, target / name)
+            for name, path in required.items(): copy_file(path, target / name)
             noisy = load_image(required["input.png"]); layer_gt = load_image(required["layer_gt.png"]); vessel_gt = load_image(required["vessel_gt.png"])
             layer = load_image(required["layer_pred.png"]); vessel = load_image(required["vessel_pred.png"])
             write_rgb(target / "gt_overlay.png", rgb_overlay(noisy, layer_gt, vessel_gt))
@@ -623,7 +635,7 @@ def materialize_stage2(report: Path, output: Path, missing: list[dict[str, Any]]
             contact = labelled_canvas(method_tiles, f"Stage2 matched comparison | {row.group_id} | {row.sample_id}", "Threshold 0.5, P0, same sample and display window")
             write_rgb(contacts / f"{row.group_id}_{row.sample_id}.png", contact.astype(np.float32)/255.0)
     paired = report / "paired_comparisons.csv"
-    if paired.is_file(): shutil.copy2(paired, output / "metrics" / "stage2_paired_comparisons.csv")
+    if paired.is_file(): copy_file(paired, output / "metrics" / "stage2_paired_comparisons.csv")
     return frames
 
 
@@ -739,8 +751,10 @@ def debug_archive(root: Path, output: Path, missing: list[dict[str, Any]]) -> No
     (output / "stage2_debug" / "debug_summary.md").write_text("# Stage 2 debugging timeline\n\nHistorical failures explain engineering decisions and are excluded from the current matched-protocol ranking. E0 is an overfit check, not generalization. Same-checkpoint D→S disabling measures dependency; E3b-noD2S is the retraining contrast.\n", encoding="utf-8")
     e0 = root / "runs/current/stage2_overfit_safe_fold0"
     if (e0 / "history.csv").is_file():
-        shutil.copy2(e0 / "history.csv", output / "stage2_debug" / "e0_overfit" / "history.csv")
-        (output / "stage2_debug" / "e0_overfit" / "README.md").write_text("# OVERFIT CHECK — NOT GENERALIZATION\n", encoding="utf-8")
+        e0_output = output / "stage2_debug" / "e0_overfit"
+        e0_output.mkdir(parents=True, exist_ok=True)
+        copy_file(e0 / "history.csv", e0_output / "history.csv")
+        (e0_output / "README.md").write_text("# OVERFIT CHECK — NOT GENERALIZATION\n", encoding="utf-8")
     else:
         missing.append({"family": "E0", "asset": "checkpoint/history/predictions", "status": "MISSING", "impact": "E0 images cannot be reconstructed; no retraining performed"})
 
@@ -763,7 +777,7 @@ def copy_factorial(root: Path, output: Path, sources: dict[str, Path], missing: 
             continue
         for source_name, target_name in files.items():
             path = source / source_name
-            if path.is_file(): shutil.copy2(path, output / "metrics" / target_name)
+            if path.is_file(): copy_file(path, output / "metrics" / target_name)
             else: missing.append({"family": family, "asset": source_name, "status": "MISSING", "impact": f"{target_name} unavailable"})
     for family, source_key in (("joint", "interaction_atlas"), ("input_experiment", "input_atlas")):
         source = sources.get(source_key)
@@ -907,7 +921,7 @@ def workbook_inputs(output: Path) -> None:
     }
     placeholder = pd.DataFrame([{"status": "MISSING", "reason": "source asset unavailable; see audit/missing_assets.csv"}])
     for name, source in mappings.items():
-        if source.is_file(): shutil.copy2(source, target / name)
+        if source.is_file(): copy_file(source, target / name)
         else: placeholder.to_csv(target / name, index=False, encoding="utf-8-sig")
     pd.DataFrame([{"conclusion": "Use only validation-supported claims; test remains sealed."}]).to_csv(target / "conclusions.csv", index=False, encoding="utf-8-sig")
     pd.DataFrame([{"limitation": line[2:]} for line in (output / "LIMITATIONS.md").read_text(encoding="utf-8").splitlines() if line.startswith("- ")]).to_csv(target / "limitations.csv", index=False, encoding="utf-8-sig")

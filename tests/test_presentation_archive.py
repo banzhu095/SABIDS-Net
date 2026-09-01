@@ -4,7 +4,7 @@ from pathlib import Path
 
 import numpy as np
 
-from tools.build_presentation_archive import audit_history_csv, error_map, forbidden, package_archive, prepare_output, rgb_overlay
+from tools.build_presentation_archive import audit_history_csv, copy_file, error_map, forbidden, package_archive, prepare_output, rgb_overlay
 
 
 class PresentationArchiveTests(unittest.TestCase):
@@ -60,6 +60,16 @@ class PresentationArchiveTests(unittest.TestCase):
             archives = list(output.parent.glob("presentation_archive_demo_archive_*"))
             self.assertEqual(len(archives), 1)
             self.assertEqual((archives[0] / "partial.txt").read_text(encoding="utf-8"), "preserve")
+
+    def test_copy_file_creates_parent_and_reuses_identical_asset(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.csv"
+            destination = root / "nested" / "e0" / "history.csv"
+            source.write_text("epoch,metric\n1,0.5\n", encoding="utf-8")
+            copy_file(source, destination)
+            copy_file(source, destination)
+            self.assertEqual(destination.read_text(encoding="utf-8"), source.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":
