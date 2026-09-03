@@ -1,0 +1,4 @@
+﻿fold,group_id,arm,seed,layer_dice,upper_boundary_mae,lower_boundary_mae,thickness_mae,vessel_dice,vessel_precision,vessel_recall,vessel_roi_dice,vessel_roi_fp,vessel_roi_fn,vessel_outside_gt_layer_fraction,vessel_area_fraction,vessel_area_fraction_mae,n_samples
+0,pku_0001,I-CLEAN,42,0.9,1.0,1.0,1.0,0.8,0.8,0.8,0.8,0.0,0.0,0.0,0.2,0.0,1
+0,pku_0001,I-DENOISED,42,0.9,1.0,1.0,1.0,0.8,0.8,0.8,0.8,0.0,0.0,0.0,0.2,0.0,1
+0,pku_0001,I-NOISY,42,0.9,1.0,1.0,1.0,0.8,0.8,0.8,0.8,0.0,0.0,0.0,0.2,0.0,1

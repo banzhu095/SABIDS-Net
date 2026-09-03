@@ -1,0 +1,25 @@
+{
+  "status": "passed_with_audit_warnings",
+  "smoke_test": true,
+  "folds": [
+    0
+  ],
+  "positions": 1,
+  "sample_counts": {
+    "I-CLEAN": 1,
+    "I-DENOISED": 1,
+    "I-NOISY": 1
+  },
+  "position_counts": {
+    "I-CLEAN": 1,
+    "I-DENOISED": 1,
+    "I-NOISY": 1
+  },
+  "missing_assets": 0,
+  "panels": 1,
+  "test_denylist": [
+    "pku_9999"
+  ],
+  "test_assets_opened": 0,
+  "archived_previous_output": ""
+}

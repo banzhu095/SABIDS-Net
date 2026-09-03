@@ -1,0 +1,2 @@
+﻿fold,group_id,seed,selection_rule,noisy_sample_id,clean_sample_id,denoised_sample_id,clean_mapping_note
+0,pku_0001,42,lexicographically_first_valid_sample_id,pku_0001_f01,pku_0001_f01,pku_0001_f01,I-CLEAN uses one position-level reference; it is not duplicated as repeat frames.

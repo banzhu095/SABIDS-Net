@@ -567,3 +567,34 @@ Populate one row per independent fold after validation threshold selection.
 - Cloud audit then exposed a legacy `history.csv` whose schema changes from 283 to 285 fields at line 29.  The presentation audit now falls back to a row-structure inventory, records bad line numbers and observed field counts, marks the history metrics unusable for ranking, and continues checkpoint/prediction discovery.  `--archive-existing` preserves a partial failed presentation directory before a clean audit restart.
 - The subsequent presentation `evaluate` wrapper reported only the Stage1/2 subprocess exit code.  The Stage1/2 exporter still parsed the same malformed history while building its records table, so it now marks that history `malformed_unusable` and omits its training metrics without blocking checkpoint inference.  Presentation evaluation now runs a metadata-only Stage1/2 preflight, passes `--skip-input-hashes` to keep sealed-test bytes unopened, appends rather than overwrites command logs, and includes the final 80 log lines plus a timestamped failure JSON in any exception.
 - Cloud assembly then reached E0 archival but failed because `stage2_debug/e0_overfit/` had not yet been created.  All assembled file copies now create their parent directory, reuse an identical existing target on partial reruns, and refuse to overwrite a different target.  E0 output initialization is explicit, so the completed inference phase does not need to be repeated.
+
+# 2026-09-02 — Fixed-final three-input visualization exporter
+
+- Added `tools/export_input_oracle_visualizations.py` for a single auditable
+  I-NOISY/I-DENOISED/I-CLEAN export at seed 42, epoch-60 `last.pth`, threshold
+  0.5 and raw P0. It restores validation predictions to original geometry,
+  exports float32 probabilities plus fixed green-layer/red-vessel overlays,
+  keeps CLEAN once per anatomical position, builds deterministic outer-fold
+  panels/HTML/contact sheet, position-first metrics, asset registries and a
+  lightweight CRC-checked GPT ZIP.
+- The exporter unions the protocol, Phase-0 and split-audit sealed test sets
+  into a mandatory denylist. Test overlap is fatal and no test asset is read.
+  Existing outputs are timestamp-archived only when `--archive-existing` is
+  explicit.
+- Initialization, common-state and data-plan hashes are compared within each
+  fold. Parameter auditing cross-checks `parameter_audit.json`, the checkpoint
+  optimizer groups and numerical changes from `preseg_initialization.pth` to
+  `last.pth`.
+- The audit makes an existing implementation/config mismatch explicit:
+  `input_factorial_common.yaml` inherits
+  `stage2_freeze_shared_encoder: true`, while `input_segment` actually leaves
+  stem/encoder/downsampling parameters trainable and freezes the denoising and
+  UGBI paths. Existing three-arm runs are therefore matched fine-tuning from a
+  common Stage-1 initialization, not frozen-encoder probes.
+- Four focused visualization checks passed by direct execution, including an
+  end-to-end one-position/three-arm synthetic smoke with zero missing assets,
+  one atlas panel and a 31-file GPT ZIP whose CRC and forbidden-asset checks
+  passed. Standard `pytest` could not start because both available local Python
+  runtimes lack the pytest package. Full real-data export remains blocked
+  locally because Phase 0 is blocked and formal fold checkpoints are absent;
+  no scientific performance result is claimed.

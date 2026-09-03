@@ -1,0 +1,2 @@
+sample_id,group_id,dataset,split,noisy_cache_path,denoised_cache_path,clean_cache_path,image_path
+pku_0001_f01,pku_0001,PKU37,val,cache/noisy.npy,cache/den.npy,cache/clean.npy,unused.png

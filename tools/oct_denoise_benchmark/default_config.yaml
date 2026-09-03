@@ -1,0 +1,33 @@
+include_sealed_test: false
+seed: 42
+bootstrap_iterations: 10000
+methods:
+  noisy_identity:
+    method_id: noisy_identity
+  bm3d:
+    method_id: bm3d
+    sigma_psd: 0.08
+    stage: all
+  nlm_speckle:
+    method_id: nlm_speckle
+    patch_size: 3
+    search_radius: 3
+    h: 0.15
+    gamma: 0.5
+  wavelet:
+    method_id: wavelet
+    wavelet: db2
+    level: 1
+    threshold_scale: 0.8
+    threshold_mode: soft
+  tv:
+    method_id: tv
+    weight: 0.05
+    max_num_iter: 200
+  gaussian:
+    method_id: gaussian
+    sigma: 1.0
+  msbtd:
+    method_id: msbtd
+  ascibp:
+    method_id: ascibp

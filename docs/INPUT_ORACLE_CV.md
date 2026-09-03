@@ -91,3 +91,43 @@ python tools/package_input_oracle_analysis.py --project-root .
 The report refuses partial inputs. Negative, mixed, or position-dependent
 effects are retained. CLEAN is evaluated once per position and its repeat
 stability is not interpreted.
+
+## Fixed-final three-input visualization export
+
+After all seed-42 `last.pth` checkpoints have reached epoch 60, the unified
+exporter audits the exact initialization/data plan/optimizer parameter set,
+reuses complete original-grid validation predictions or runs missing
+validation inference, and writes fixed-color per-sample assets plus one panel
+per external-validation position:
+
+```bash
+python tools/export_input_oracle_visualizations.py \
+  --project-root /mnt/SABIDS-Net \
+  --runs-root /mnt/SABIDS-Net/runs/input_oracle_cv \
+  --output-root /mnt/SABIDS-Net/runs/input_oracle_visualization_seed42_fixed_final \
+  --seed 42 \
+  --checkpoint last.pth \
+  --epoch 60 \
+  --threshold 0.5 \
+  --postprocess p0 \
+  --all-outer-val-frames \
+  --make-atlas \
+  --make-gpt-bundle \
+  --archive-existing \
+  --device cuda \
+  --num-workers 4
+```
+
+The command is deliberately fixed to seed 42, `last.pth`, epoch 60, threshold
+0.5 and P0. It never reads a sealed test image. `I-CLEAN` is exported once per
+position under `per_position/`; it is not duplicated into the repeat-frame
+tree. Float32 probability arrays are retained in the full export but excluded
+from the GPT ZIP.
+
+The inherited config currently says `stage2_freeze_shared_encoder: true`, but
+the implemented `input_segment` trainability rule freezes only the denoising
+and interaction paths. Existing runs whose `parameter_audit.json` lists
+`stem`, `encoder_blocks` or `downsamples` as trainable are therefore matched
+fine-tuning experiments from the same Stage 1 initialization, not frozen-
+encoder probes. The visualization audit reports this mismatch without
+rewriting historical results.

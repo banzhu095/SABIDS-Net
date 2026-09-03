@@ -1,0 +1,33 @@
+{
+  "status": "passed_with_audit_warnings",
+  "smoke_test": true,
+  "folds": [
+    0
+  ],
+  "positions": 1,
+  "sample_counts": {
+    "I-CLEAN": 1,
+    "I-DENOISED": 1,
+    "I-NOISY": 1
+  },
+  "position_counts": {
+    "I-CLEAN": 1,
+    "I-DENOISED": 1,
+    "I-NOISY": 1
+  },
+  "missing_assets": 0,
+  "panels": 1,
+  "test_denylist": [
+    "pku_9999"
+  ],
+  "test_assets_opened": 0,
+  "archived_previous_output": "",
+  "gpt_package": {
+    "path": "E:\\1-脉络膜\\OCT降噪\\SABIDS-Net\\SABIDS-Net\\tmp\\input_oracle_visualization_smoke_20260902_224408\\visualization\\SABIDS_I_NOISY_I_DENOISED_I_CLEAN_visualization_seed42_20260902_224422.zip",
+    "sha256": "6f295696de95404430e311c1130e53698f14f60a3e7e926f1e98b2282ec0304a",
+    "files": 28,
+    "crc_check": "passed",
+    "forbidden_assets": 0,
+    "sealed_test_groups": 0
+  }
+}

@@ -1,0 +1,33 @@
+{
+  "fold": 0,
+  "seed": 42,
+  "arm": "I-NOISY",
+  "group_id": "pku_0001",
+  "sample_id": "pku_0001_f01",
+  "dataset": "PKU37",
+  "checkpoint": "E:\\1-脉络膜\\OCT降噪\\SABIDS-Net\\SABIDS-Net\\tmp\\input_oracle_visualization_smoke_20260902_224408\\runs\\input_oracle_cv\\fold0\\noisy_seed42\\last.pth",
+  "checkpoint_sha256": "3f53b9a7b8bbb33d7f416059f1bfaf8b1fed9c478099d03f21bbcc508459244e",
+  "epoch": 60,
+  "threshold": 0.5,
+  "postprocess": "P0",
+  "input_source": "E:\\1-脉络膜\\OCT降噪\\SABIDS-Net\\SABIDS-Net\\tmp\\input_oracle_visualization_smoke_20260902_224408\\cache\\noisy.npy",
+  "clean_is_position_level_reference": false,
+  "expected_original_height": 12,
+  "expected_original_width": 14,
+  "original_height": 12,
+  "original_width": 14,
+  "probability_dtype": "float32",
+  "display_mapping": "fixed_[0,1]_to_[0,255]",
+  "layer_color_rgb": [
+    0,
+    255,
+    0
+  ],
+  "vessel_color_rgb": [
+    255,
+    0,
+    0
+  ],
+  "alpha_layer": 0.23,
+  "alpha_vessel": 0.4
+}

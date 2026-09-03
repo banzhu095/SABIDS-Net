@@ -1,0 +1,40 @@
+{
+  "phase0_status": "passed",
+  "split_status": "passed",
+  "folds": [
+    0
+  ],
+  "seed": 42,
+  "checkpoint": "last.pth",
+  "epoch": 60,
+  "threshold": 0.5,
+  "postprocess": "P0",
+  "sealed_test_denylist": [
+    "pku_9999"
+  ],
+  "pairing": {
+    "0": {
+      "checks": {
+        "all_three_arms_present": true,
+        "same_initialization_sha256": true,
+        "same_model_state_sha256": true,
+        "same_common_state_sha256": true,
+        "same_data_plan_sha256": true,
+        "same_manifest_sha256": true,
+        "same_training_positions": true,
+        "same_validation_positions": true,
+        "same_augmentation_plan": true,
+        "same_configured_epoch": true,
+        "all_epoch_60": true,
+        "all_d2s_off": true,
+        "all_s2d_off": true,
+        "all_denoising_frozen": true,
+        "all_interactions_frozen": true
+      },
+      "paired_protocol_pass": true
+    }
+  },
+  "audit_failures": 3,
+  "test_assets_opened": 0,
+  "interpretation": "matched fine-tuning from the same Stage 1 initialization; not random initialization and not a frozen-encoder probe"
+}
