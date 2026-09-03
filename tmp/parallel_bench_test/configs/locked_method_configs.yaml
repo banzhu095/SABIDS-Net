@@ -1,0 +1,6 @@
+include_sealed_test: false
+selection_split: val
+selection_unit: position
+methods:
+  noisy_identity:
+    method_id: noisy_identity

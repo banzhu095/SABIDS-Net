@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ProcessPoolExecutor
 import json
 import platform
 import shutil
@@ -102,6 +103,65 @@ def _resolve(path_value: str, project_root: Path) -> Path:
 
 def _is_sealed(row: Mapping[str, Any]) -> bool:
     return str(row.get("split", "")).lower() == "test"
+
+
+def _calibration_worker(payload: Mapping[str, Any]) -> Dict[str, Any]:
+    row = dict(payload["row"])
+    project_root = Path(str(payload["project_root"]))
+    candidate = dict(payload["candidate"])
+    method = str(candidate["method_id"])
+    started = time.perf_counter()
+    try:
+        noisy = read_gray(_resolve(row["image_path"], project_root)).astype(np.float32)
+        clean = read_gray(_resolve(row["clean_path"], project_root)).astype(np.float32)
+        output = denoise(noisy, candidate, {"phase": "calibration", "dataset": row["dataset"], "position_id": row["group_id"]})
+        return {
+            "ok": True,
+            "row": {
+                "method_id": method, "candidate_index": payload["candidate_index"], "candidate_hash": payload["candidate_hash"],
+                "candidate_json": json.dumps(candidate, ensure_ascii=False, sort_keys=True), "dataset": row["dataset"],
+                "position_id": row["group_id"], "sample_id": row["sample_id"],
+                **metric_row(noisy, clean, output, time.perf_counter() - started),
+            },
+        }
+    except Exception as exc:
+        return {"ok": False, "row": {"phase": "calibration", "dataset": row["dataset"], "position_id": row["group_id"], "sample_id": row["sample_id"], "method_id": method, "exception_type": type(exc).__name__, "message": str(exc), "candidate_json": json.dumps(candidate, ensure_ascii=False, sort_keys=True)}}
+
+
+def _inference_worker(payload: Mapping[str, Any]) -> Dict[str, Any]:
+    row = dict(payload["row"])
+    project_root = Path(str(payload["project_root"]))
+    run_dir = Path(str(payload["run_dir"]))
+    config = dict(payload["config"])
+    method = str(config["method_id"])
+    dataset = str(row["dataset"])
+    noisy_path, clean_path = _resolve(row["image_path"], project_root), _resolve(row["clean_path"], project_root)
+    suffix = noisy_path.suffix.lower() if noisy_path.suffix.lower() in {".tif", ".tiff", ".png"} else ".png"
+    output_path = run_dir / "images" / dataset / method / f"{noisy_path.stem}{suffix}"
+    started = time.perf_counter()
+    try:
+        noisy = read_gray(noisy_path).astype(np.float32)
+        clean = read_gray(clean_path).astype(np.float32)
+        output = denoise(noisy, config, {"phase": "full", "dataset": dataset, "position_id": row["group_id"], "sample_id": row["sample_id"]})
+        seconds = time.perf_counter() - started
+        _, source_dtype = read_original(noisy_path)
+        save_like_source(output_path, output, source_dtype)
+        saved = read_gray(output_path)
+        if saved.shape != noisy.shape or not np.isfinite(saved).all():
+            raise ValueError("saved output verification failed")
+        return {
+            "ok": True,
+            "row": {
+                "dataset": dataset, "position_id": row["group_id"], "frame_id": infer_frame_id(row), "sample_id": row["sample_id"],
+                "split": row["split"], "is_sealed_test": str(row["split"]).lower() == "test", "method_id": method,
+                "noisy_path": str(noisy_path), "clean_path": str(clean_path), "output_path": str(output_path),
+                "height": noisy.shape[0], "width": noisy.shape[1], "output_min": float(output.min()), "output_max": float(output.max()),
+                "output_finite": True, "config_hash": payload["config_hash"], "adapter_source_hash": payload["adapter_source_hash"],
+                **metric_row(noisy, clean, output, seconds),
+            },
+        }
+    except Exception as exc:
+        return {"ok": False, "row": {"phase": "full", "dataset": dataset, "position_id": row["group_id"], "sample_id": row["sample_id"], "method_id": method, "exception_type": type(exc).__name__, "message": str(exc)}}
 
 
 def audit(project_root: Path, run_dir: Path) -> pd.DataFrame:
@@ -270,30 +330,20 @@ def smoke_test(project_root: Path, run_dir: Path, methods: Sequence[str]) -> pd.
     return table
 
 
-def calibrate(project_root: Path, run_dir: Path, methods: Sequence[str], frames_per_position: int = 1) -> Dict[str, Dict[str, Any]]:
+def calibrate(project_root: Path, run_dir: Path, methods: Sequence[str], frames_per_position: int = 1, workers: int = 6) -> Dict[str, Dict[str, Any]]:
     manifest = _load_manifest(project_root)
     subset = select_validation_subset(manifest, positions_per_dataset=2, frames_per_position=frames_per_position)
     search_rows: List[Dict[str, Any]] = []
     failures: List[Dict[str, Any]] = []
+    tasks: List[Dict[str, Any]] = []
     for method in methods:
         for candidate_index, candidate in enumerate(PARAMETER_GRIDS.get(method, [{"method_id": method}])):
             candidate_hash = stable_hash(candidate)
             for row in subset.to_dict("records"):
-                noisy = read_gray(_resolve(row["image_path"], project_root)).astype(np.float32)
-                clean = read_gray(_resolve(row["clean_path"], project_root)).astype(np.float32)
-                started = time.perf_counter()
-                try:
-                    output = denoise(noisy, candidate, {"phase": "calibration", "dataset": row["dataset"], "position_id": row["group_id"]})
-                    seconds = time.perf_counter() - started
-                    metrics = metric_row(noisy, clean, output, seconds)
-                    search_rows.append({
-                        "method_id": method, "candidate_index": candidate_index, "candidate_hash": candidate_hash,
-                        "candidate_json": json.dumps(candidate, ensure_ascii=False, sort_keys=True), "dataset": row["dataset"],
-                        "position_id": row["group_id"], "sample_id": row["sample_id"], **metrics,
-                    })
-                except Exception as exc:
-                    failures.append({"phase": "calibration", "dataset": row["dataset"], "position_id": row["group_id"], "sample_id": row["sample_id"], "method_id": method, "exception_type": type(exc).__name__, "message": str(exc), "candidate_json": json.dumps(candidate, ensure_ascii=False, sort_keys=True)})
-                    break
+                tasks.append({"row": row, "project_root": str(project_root), "candidate": candidate, "candidate_index": candidate_index, "candidate_hash": candidate_hash})
+    with ProcessPoolExecutor(max_workers=max(1, workers)) as executor:
+        for result in tqdm(executor.map(_calibration_worker, tasks), total=len(tasks), desc="validation calibration", unit="run"):
+            (search_rows if result["ok"] else failures).append(result["row"])
     search = pd.DataFrame(search_rows)
     _write_csv(run_dir / "metrics" / "parameter_search_results.csv", search)
     _write_csv(run_dir / "logs" / "calibration_failures.csv", failures)
@@ -325,7 +375,7 @@ def _load_locked(run_dir: Path) -> Dict[str, Dict[str, Any]]:
     return dict(data.get("methods", {}))
 
 
-def full_inference(project_root: Path, run_dir: Path, methods: Sequence[str], include_sealed_test: bool = False) -> pd.DataFrame:
+def full_inference(project_root: Path, run_dir: Path, methods: Sequence[str], include_sealed_test: bool = False, workers: int = 6) -> pd.DataFrame:
     manifest = _load_manifest(project_root)
     if not include_sealed_test:
         manifest = manifest[manifest["split"].astype(str) != "test"].copy()
@@ -349,37 +399,24 @@ def full_inference(project_root: Path, run_dir: Path, methods: Sequence[str], in
                 continue
             config = locked[method]
             config_hash = stable_hash({"config": config, "adapter_source_hash": adapter_source_hash})
-            for row in tqdm(dataset_rows.to_dict("records"), desc=f"{dataset}/{method} images", position=2, leave=False, unit="img"):
+            tasks = []
+            for row in dataset_rows.to_dict("records"):
                 key = (str(row["sample_id"]), method, config_hash)
                 noisy_path, clean_path = _resolve(row["image_path"], project_root), _resolve(row["clean_path"], project_root)
                 suffix = noisy_path.suffix.lower() if noisy_path.suffix.lower() in {".tif", ".tiff", ".png"} else ".png"
                 output_path = run_dir / "images" / str(dataset) / method / f"{noisy_path.stem}{suffix}"
                 if key in completed and output_path.is_file():
                     continue
-                started = time.perf_counter()
-                try:
-                    noisy = read_gray(noisy_path).astype(np.float32)
-                    clean = read_gray(clean_path).astype(np.float32)
-                    output = denoise(noisy, config, {"phase": "full", "dataset": dataset, "position_id": row["group_id"], "sample_id": row["sample_id"]})
-                    seconds = time.perf_counter() - started
-                    _, source_dtype = read_original(noisy_path)
-                    save_like_source(output_path, output, source_dtype)
-                    saved = read_gray(output_path)
-                    if saved.shape != noisy.shape or not np.isfinite(saved).all():
-                        raise ValueError("saved output verification failed")
-                    metrics = metric_row(noisy, clean, output, seconds)
-                    result_rows.append({
-                        "dataset": dataset, "position_id": row["group_id"], "frame_id": infer_frame_id(row), "sample_id": row["sample_id"],
-                        "split": row["split"], "is_sealed_test": str(row["split"]).lower() == "test", "method_id": method,
-                        "noisy_path": str(noisy_path), "clean_path": str(clean_path), "output_path": str(output_path),
-                        "height": noisy.shape[0], "width": noisy.shape[1], "output_min": float(output.min()), "output_max": float(output.max()),
-                        "output_finite": True, "config_hash": config_hash, "adapter_source_hash": adapter_source_hash, **metrics,
-                    })
-                    completed.add(key)
-                    if len(result_rows) % 20 == 0:
-                        _write_csv(partial_path, pd.DataFrame(result_rows))
-                except Exception as exc:
-                    failures.append({"phase": "full", "dataset": dataset, "position_id": row["group_id"], "sample_id": row["sample_id"], "method_id": method, "exception_type": type(exc).__name__, "message": str(exc)})
+                tasks.append({"row": row, "project_root": str(project_root), "run_dir": str(run_dir), "config": config, "config_hash": config_hash, "adapter_source_hash": adapter_source_hash})
+            if tasks:
+                with ProcessPoolExecutor(max_workers=max(1, workers)) as executor:
+                    for result in tqdm(executor.map(_inference_worker, tasks), total=len(tasks), desc=f"{dataset}/{method} images", position=2, leave=False, unit="img"):
+                        if result["ok"]:
+                            result_rows.append(result["row"])
+                            completed.add((str(result["row"]["sample_id"]), method, config_hash))
+                        else:
+                            failures.append(result["row"])
+                _write_csv(partial_path, pd.DataFrame(result_rows))
     result = pd.DataFrame(result_rows)
     if not result.empty:
         result = result.drop_duplicates(["sample_id", "method_id", "config_hash"], keep="last").sort_values(["dataset", "position_id", "frame_id", "method_id"], kind="stable")
@@ -578,8 +615,8 @@ def run_all(args: argparse.Namespace) -> None:
     audit(project_root, run_dir)
     test_adapters(run_dir, args.methods)
     smoke_test(project_root, run_dir, args.methods)
-    calibrate(project_root, run_dir, args.methods, args.calibration_frames_per_position)
-    full_inference(project_root, run_dir, args.methods, args.include_sealed_test)
+    calibrate(project_root, run_dir, args.methods, args.calibration_frames_per_position, args.workers)
+    full_inference(project_root, run_dir, args.methods, args.include_sealed_test, args.workers)
     summarize(run_dir, seed=42, bootstrap_iterations=10_000)
     build_fixed_previews(run_dir)
     acceptance(project_root, run_dir, args.include_sealed_test)
@@ -596,6 +633,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--methods", nargs="+", default=DEFAULT_METHODS)
     parser.add_argument("--include-sealed-test", action="store_true")
     parser.add_argument("--calibration-frames-per-position", type=int, default=1)
+    parser.add_argument("--workers", type=int, default=6)
     args = parser.parse_args(argv)
     args.project_root = args.project_root.expanduser().resolve()
     if args.run_dir is None:
@@ -619,9 +657,9 @@ def main(argv: Sequence[str] | None = None) -> None:
     elif args.command == "smoke":
         smoke_test(args.project_root, args.run_dir, args.methods)
     elif args.command == "calibrate":
-        calibrate(args.project_root, args.run_dir, args.methods, args.calibration_frames_per_position)
+        calibrate(args.project_root, args.run_dir, args.methods, args.calibration_frames_per_position, args.workers)
     elif args.command == "run":
-        full_inference(args.project_root, args.run_dir, args.methods, args.include_sealed_test)
+        full_inference(args.project_root, args.run_dir, args.methods, args.include_sealed_test, args.workers)
     elif args.command == "summarize":
         summarize(args.run_dir)
         build_fixed_previews(args.run_dir)

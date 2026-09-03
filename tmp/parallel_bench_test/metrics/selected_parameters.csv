@@ -1,0 +1,2 @@
+﻿method_id,candidate_hash,candidate_json,position_macro_psnr,position_macro_ssim,mean_seconds,positions,locked_config_json,selection_rule
+noisy_identity,af2f9b54b17d18dc9685d1253b1e3c0a4ab32704c550599e89f995364428896f,"{""method_id"": ""noisy_identity""}",18.143114224672363,0.12965661556062133,0.034534783333333076,6,"{""method_id"": ""noisy_identity""}",validation position-macro PSNR; SSIM tie-break
