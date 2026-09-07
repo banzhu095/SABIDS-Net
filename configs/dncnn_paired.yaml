@@ -1,0 +1,16 @@
+method_id: dncnn_paired
+initialization: random
+pretrained: false
+depth: 17
+features: 64
+loss: residual_mse
+optimizer: AdamW
+learning_rate: 0.001
+patch_size: 256
+max_updates: 100000
+validation_frequency_updates: 1000
+early_stopping_patience_validations: 20
+gradient_clip: 1.0
+amp: true
+seeds: [42, 123, 2026]
+selection: validation_position_macro_psnr_then_ssim

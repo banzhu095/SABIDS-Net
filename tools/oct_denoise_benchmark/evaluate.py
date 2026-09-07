@@ -4,6 +4,7 @@ import argparse
 import json
 import time
 import traceback
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -41,6 +42,16 @@ def evaluate(args: argparse.Namespace) -> None:
         lock = run_dir / "audit" / "config_lock.json"
         if not lock.is_file():
             raise RuntimeError("sealed test requires audit/config_lock.json created before test launch")
+        lock_data = json.loads(lock.read_text(encoding="utf-8"))
+        if lock_data.get("status") != "locked":
+            raise RuntimeError("sealed test remains closed because config_lock status is not locked")
+        for name, expected in lock_data.get("config_sha256", {}).items():
+            current = run_dir / "configs" / name
+            if not current.is_file() or sha256_file(current) != expected:
+                raise RuntimeError(f"locked configuration changed after lock: {name}")
+        if lock_data.get("test_started_at_utc") is None:
+            lock_data["test_started_at_utc"] = datetime.now(timezone.utc).isoformat()
+            lock.write_text(json.dumps(lock_data, indent=2, ensure_ascii=False), encoding="utf-8")
     registry = load_yaml(args.registry or run_dir / "configs" / "inference_registry.yaml")
     methods = list(registry["methods"]) if args.methods == ["all"] else args.methods
     metric_path, failure_path = run_dir / "metrics" / "per_image_metrics.csv", run_dir / "failures.csv"

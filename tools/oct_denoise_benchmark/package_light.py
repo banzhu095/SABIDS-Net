@@ -41,7 +41,10 @@ def _ensure_result_tables(run_dir: Path) -> None:
         if not destination.exists(): pd.DataFrame(columns=columns).to_csv(destination, index=False)
     curves = []; checkpoints = []
     for path in (run_dir / "checkpoints").glob("smoke_*_seed*/training_curves.csv"):
-        frame = pd.read_csv(path); frame["status"] = "smoke_only"; curves.append(frame)
+        frame = pd.read_csv(path)
+        frame["source_run"] = path.parent.name
+        frame["status"] = "invalid_smoke_loss_sign" if path.parent.name == "smoke_nafnet_seed42" else "smoke_only"
+        curves.append(frame)
     for path in (run_dir / "checkpoints").glob("smoke_*_seed*/checkpoint_inventory.csv"):
         frame = pd.read_csv(path); frame["status"] = "smoke_only_not_formal"; checkpoints.append(frame)
     if curves: pd.concat(curves, ignore_index=True).to_csv(metrics / "training_curves.csv", index=False)
@@ -110,7 +113,7 @@ def write_inference_commands(run_dir: Path) -> None:
 def package(project_root: Path, run_dir: Path) -> Path:
     _ensure_result_tables(run_dir); select_fixed_atlas(project_root, run_dir); write_report(project_root, run_dir); write_inference_commands(run_dir)
     stage = run_dir / "gpt_light"; stage.mkdir(exist_ok=True)
-    include = [run_dir / "metrics", run_dir / "audit", run_dir / "configs", run_dir / "reports", run_dir / "manifests", run_dir / "previews" / "smoke", project_root / "tools" / "oct_denoise_benchmark", project_root / "tests" / "test_denoise_protocol_v1.py"]
+    include = [run_dir / "metrics", run_dir / "audit", run_dir / "configs", run_dir / "reports", run_dir / "manifests", run_dir / "previews" / "smoke", run_dir / "benchmark_summary.xlsx", project_root / "configs" / "dncnn_paired.yaml", project_root / "configs" / "nafnet_paired.yaml", project_root / "tools" / "oct_denoise_benchmark", project_root / "tests" / "test_denoise_protocol_v1.py", project_root / "docs" / "EXPERIMENT_LOG.md"]
     for source in include:
         if not source.exists(): continue
         if source.is_dir():

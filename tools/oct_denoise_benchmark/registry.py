@@ -49,6 +49,7 @@ def lock_run(project_root: Path, run_dir: Path, test_started: bool = False) -> d
             checkpoints[method] = {"path": str(resolved), "sha256": sha256_file(resolved) if resolved.is_file() else "missing"}
     now = datetime.now(timezone.utc).isoformat()
     value = {
+        "status": "locked",
         "git_commit": git_commit(project_root),
         "locked_at_utc": now,
         "test_started_at_utc": now if test_started else None,

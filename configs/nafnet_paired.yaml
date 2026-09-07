@@ -1,0 +1,20 @@
+method_id: nafnet_paired
+name_for_report: NAFNet-width32-1-1-1-28
+initialization: random
+pretrained: false
+width: 32
+enc_blocks: [1, 1, 1, 28]
+middle_blocks: 1
+dec_blocks: [1, 1, 1, 1]
+loss: official_psnr_loss
+optimizer: AdamW
+betas: [0.9, 0.9]
+learning_rate: 0.001
+patch_size: 256
+max_updates: 100000
+validation_frequency_updates: 1000
+early_stopping_patience_validations: 20
+gradient_clip: 1.0
+amp: true
+seeds: [42, 123, 2026]
+selection: validation_position_macro_psnr_then_ssim

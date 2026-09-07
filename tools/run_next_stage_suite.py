@@ -2,6 +2,13 @@
 from __future__ import annotations
 import argparse,json,subprocess,sys
 from pathlib import Path
+# When invoked as ``python tools/run_next_stage_suite.py`` Python adds only
+# ``tools`` to sys.path.  Resolve the repository root before importing the
+# package so the documented CLI works from any current directory.
+_THIS_FILE = Path(__file__).resolve()
+_PROJECT_ROOT = _THIS_FILE.parent.parent
+if str(_PROJECT_ROOT) not in sys.path:
+ sys.path.insert(0, str(_PROJECT_ROOT))
 from sabids.config import load_config,save_config
 SUITES={
  "d1_structure":["d1_d0_pku37_v3.yaml","d1_structure_pku37_v3.yaml"],

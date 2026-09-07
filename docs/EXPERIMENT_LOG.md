@@ -647,3 +647,34 @@ Populate one row per independent fold after validation threshold selection.
 - The order DS/SD/ALT configs are registered but full execution deliberately
   fails closed pending a continuous optimizer/global-step schedule. This is an
   unresolved implementation item, not a completed experiment.
+
+# 2026-09-07 — PKU37 denoising protocol refactor and CPU engineering smoke
+
+- Git commit at start: `f78eb4b4f06da6b414ffe0facb6b662d5b519e76` with pre-existing
+  staged and unstaged user changes preserved. Run directory:
+  `runs/denoise_benchmark_pku_protocol_20260907_154644`.
+- Data audit found PKU37 train/validation/test = 1163/277/294 frames and
+  25/6/6 positions, with no position crossing splits. Duke17 (17 pairs) and
+  Duke28 (28 pairs) are remapped to complete `external_test` sets.
+- Standard BM3D, TV-Chambolle, standard NLM, true single-image K-SVD,
+  DnCNN-paired and NAFNet-paired adapters plus training/evaluation/inference,
+  configuration locking and light-package code were implemented.
+- Real 64x64 OCT adapter smoke passed for identity, BM3D standard two-stage,
+  TV, NLM and K-SVD. Tiny CPU seed-42 training/checkpoint smoke passed for
+  DnCNN and NAFNet, and DnCNN resume passed. The first NAFNet smoke exposed a
+  reversed PSNRLoss sign; it remains recorded as invalid and a corrected run
+  increased validation PSNR from 17.5264 to 17.9383 over two updates. These
+  values are engineering smoke only.
+- Unified inference passed for all seven methods on one image and for five
+  recursively discovered folder images. Full PKU37 validation identity
+  evaluation completed (277 frames; position-macro PSNR 19.8215, SSIM 0.1776,
+  MS-SSIM 0.6410).
+- The local host has PyTorch 2.8.0 CPU only and Python 3.9.13 (below the
+  declared >=3.10). Therefore complete validation calibration, three-seed GPU
+  training, configuration/checkpoint lock, PKU37 test and Duke external tests
+  were intentionally not run. The registry remains unlocked and no formal
+  result or method ranking is claimed.
+- Full repository test suite passed: 98 tests. The generated workbook passed
+  formula-error scanning and rendered-sheet review. The final GPT-light ZIP
+  passed CRC and per-file SHA256 verification and contains no raw data or
+  checkpoint weights.
