@@ -1,0 +1,4 @@
+_base_: segment_input_common.yaml
+input_arm: clean
+require_real_clean: true
+train: {output_dir: runs/current/input_clean_pku37_v3_fold0_seed42}

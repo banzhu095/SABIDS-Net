@@ -64,6 +64,39 @@ def image_gradients(image: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     return gx, gy
 
 
+def multiscale_gradient_loss(
+    prediction: torch.Tensor, target: torch.Tensor, beta: float = 2.0
+) -> torch.Tensor:
+    """Clean-edge-weighted gradient error at scales 1, 2, and 4."""
+    losses = []
+    for scale in (1, 2, 4):
+        pred = prediction if scale == 1 else F.avg_pool2d(prediction, scale, scale)
+        ref = target if scale == 1 else F.avg_pool2d(target, scale, scale)
+        px, py = image_gradients(pred)
+        tx, ty = image_gradients(ref)
+        magnitude = tx.abs() + ty.abs()
+        normalizer = magnitude.flatten(1).amax(1).view(-1, 1, 1, 1).clamp_min(1e-6)
+        weight = 1.0 + float(beta) * magnitude / normalizer
+        losses.append((weight * (px.sub(tx).abs() + py.sub(ty).abs())).mean())
+    return torch.stack(losses).mean()
+
+
+def multiscale_laplacian_loss(
+    prediction: torch.Tensor, target: torch.Tensor
+) -> torch.Tensor:
+    kernel = prediction.new_tensor(
+        [[0.0, 1.0, 0.0], [1.0, -4.0, 1.0], [0.0, 1.0, 0.0]]
+    )[None, None]
+    losses = []
+    for scale in (1, 2, 4):
+        pred = prediction if scale == 1 else F.avg_pool2d(prediction, scale, scale)
+        ref = target if scale == 1 else F.avg_pool2d(target, scale, scale)
+        losses.append(
+            F.l1_loss(F.conv2d(pred, kernel, padding=1), F.conv2d(ref, kernel, padding=1))
+        )
+    return torch.stack(losses).mean()
+
+
 def edge_map(mask: torch.Tensor) -> torch.Tensor:
     gx, gy = image_gradients(mask)
     return torch.clamp(torch.abs(gx) + torch.abs(gy), 0.0, 1.0)

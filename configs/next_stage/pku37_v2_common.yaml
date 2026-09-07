@@ -1,0 +1,21 @@
+_base_: ../base.yaml
+seed: 42
+deterministic: true
+data:
+  manifest: Manifests/pku37_binary_v2/train_manifest.csv
+  root: .
+  train_split: train
+  val_split: val
+  train_datasets: [PKU37]
+  val_datasets: [PKU37]
+  target_size: [512, 512]
+train:
+  batch_size: 1
+  gradient_accumulation_steps: 2
+  num_workers: 4
+  amp: false
+  early_stopping_patience: 20
+evaluation:
+  threshold: 0.5
+  layer_threshold: 0.5
+  vessel_threshold: 0.5

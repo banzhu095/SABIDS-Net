@@ -1,0 +1,3 @@
+_base_: order_common.yaml
+model: {causal_interaction_experiment: true, freeze_shared_encoder: true, detach_d2s_source: true, detach_s2d_source: true}
+train: {stage: interaction, schedule: null, epochs: 20, interaction_ramp_epochs: 4, monitor: vessel_soft_dice}

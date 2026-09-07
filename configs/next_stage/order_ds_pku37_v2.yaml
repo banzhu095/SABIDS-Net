@@ -1,0 +1,19 @@
+_base_: pku37_v2_common.yaml
+model: &no_interaction
+  d2s_enabled: false
+  s2d_enabled: false
+train:
+  stage: joint
+  epochs: 60
+  schedule: order_ds
+  schedule_epochs: [20, 20, 20]
+  output_dir: runs/current/order_ds_pku37_v2_fold0_seed42
+loss: &joint_loss
+  definition_version: pku37-order-d1-e3b-v2
+  restoration_mode: structure_d1
+  char_weight: 1.0
+  ssim_weight: 0.2
+  gradient_weight: 0.1
+  laplacian_weight: 0.05
+  vessel_supervision_mode: roi_bce_dice_outside
+  weights: {reconstruction: 1.0, residual: 0.0, layer: 1.0, vessel: 1.0, vessel_outside: 0.5, containment: 0.1, rmac: 0.0, pseudo: 0.0, identity: 0.0, vessel_stroma: 0.0, vessel_area: 0.0}

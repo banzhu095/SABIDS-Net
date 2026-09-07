@@ -58,6 +58,16 @@ class UGBIBlock(nn.Module):
         self.layer_scale = nn.Parameter(torch.full((1, channels, 1, 1), float(scale_init)))
         self.vessel_scale = nn.Parameter(torch.full((1, channels, 1, 1), float(scale_init)))
 
+    @staticmethod
+    def rms_scaled_update(update: torch.Tensor, receiver: torch.Tensor, rho: float) -> torch.Tensor:
+        """Give each sample an update whose RMS is ``rho`` times receiver RMS."""
+        if float(rho) <= 0.0:
+            return update * 0.0
+        dims = tuple(range(1, update.ndim))
+        update_rms = update.float().square().mean(dim=dims, keepdim=True).sqrt().clamp_min(1e-8)
+        receiver_rms = receiver.detach().float().square().mean(dim=dims, keepdim=True).sqrt()
+        return update * (float(rho) * receiver_rms / update_rms).to(update.dtype)
+
     def seg_to_denoise(
         self,
         denoise: torch.Tensor,
@@ -67,6 +77,7 @@ class UGBIBlock(nn.Module):
         vessel_probability: Optional[torch.Tensor] = None,
         detach_source: bool = False,
         strength: float = 1.0,
+        rms_rho: Optional[float] = None,
     ) -> tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         """Inject trained segmentation guidance into denoising without a cycle."""
         source_l = layer.detach() if detach_source else layer
@@ -87,7 +98,14 @@ class UGBIBlock(nn.Module):
         vessel_anatomy = self.vessel_anatomy(torch.cat([source_v, vessel_prob], dim=1))
         anatomy = layer_conf * layer_anatomy + vessel_conf * vessel_anatomy
         gate = torch.sigmoid(self.seg_to_denoise_gate(torch.cat([denoise, anatomy], dim=1)))
-        injection = strength * self.seg_scale * gate * anatomy if self.enable_seg_to_denoise else torch.zeros_like(denoise)
+        proposed = gate * anatomy
+        injection = (
+            self.rms_scaled_update(proposed, denoise, rms_rho)
+            if self.enable_seg_to_denoise and rms_rho is not None
+            else strength * self.seg_scale * proposed
+            if self.enable_seg_to_denoise
+            else torch.zeros_like(denoise)
+        )
         details = {
             "seg_to_denoise_gate": gate, "seg_to_denoise_injection": injection,
             "seg_to_denoise_injection_relative_rms": injection.float().square().mean().sqrt()
@@ -120,6 +138,9 @@ class UGBIBlock(nn.Module):
             "s2d_gate_max": gate.detach().float().amax(),
             "s2d_gate_saturation_fraction": ((gate < 0.05) | (gate > 0.95)).detach().float().mean(),
             "s2d_gate_entropy": binary_entropy(gate.detach().float()).mean(),
+            "requested_rho": denoise.new_tensor(float(rms_rho or 0.0)),
+            "actual_rho_mean": injection.float().square().mean().sqrt()
+            / (denoise.detach().float().square().mean().sqrt() + 1e-8),
         }
         return denoise + injection, details
 
@@ -130,6 +151,7 @@ class UGBIBlock(nn.Module):
         vessel: torch.Tensor,
         detach_source: bool = False,
         strength: float = 1.0,
+        rms_rho: Optional[float] = None,
     ) -> tuple[torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]]:
         """Inject denoising features into segmentation after the S->D pass."""
         source_d = denoise.detach() if detach_source else denoise
@@ -137,8 +159,20 @@ class UGBIBlock(nn.Module):
         restoration = self.restoration_context(torch.cat([source_d, noise_hint], dim=1))
         d2l_gate = torch.sigmoid(self.denoise_to_layer_gate(torch.cat([layer, restoration], dim=1)))
         d2v_gate = torch.sigmoid(self.denoise_to_vessel_gate(torch.cat([vessel, restoration], dim=1)))
-        layer_injection = strength * self.layer_scale * d2l_gate * self.denoise_to_layer(restoration) if self.enable_denoise_to_seg else torch.zeros_like(layer)
-        vessel_injection = strength * self.vessel_scale * d2v_gate * self.denoise_to_vessel(restoration) if self.enable_denoise_to_seg else torch.zeros_like(vessel)
+        layer_proposed = d2l_gate * self.denoise_to_layer(restoration)
+        vessel_proposed = d2v_gate * self.denoise_to_vessel(restoration)
+        layer_injection = (
+            self.rms_scaled_update(layer_proposed, layer, rms_rho)
+            if self.enable_denoise_to_seg and rms_rho is not None
+            else strength * self.layer_scale * layer_proposed
+            if self.enable_denoise_to_seg else torch.zeros_like(layer)
+        )
+        vessel_injection = (
+            self.rms_scaled_update(vessel_proposed, vessel, rms_rho)
+            if self.enable_denoise_to_seg and rms_rho is not None
+            else strength * self.vessel_scale * vessel_proposed
+            if self.enable_denoise_to_seg else torch.zeros_like(vessel)
+        )
         details = {
             "noise_hint": noise_hint, "denoise_to_layer_gate": d2l_gate,
             "denoise_to_vessel_gate": d2v_gate, "denoise_to_layer_injection": layer_injection,
@@ -172,6 +206,11 @@ class UGBIBlock(nn.Module):
             "d2v_gate_max": d2v_gate.detach().float().amax(),
             "d2v_gate_saturation_fraction": ((d2v_gate < 0.05) | (d2v_gate > 0.95)).detach().float().mean(),
             "d2v_gate_entropy": binary_entropy(d2v_gate.detach().float()).mean(),
+            "requested_rho": layer.new_tensor(float(rms_rho or 0.0)),
+            "actual_rho_mean": 0.5 * (
+                layer_injection.float().square().mean().sqrt() / (layer.detach().float().square().mean().sqrt() + 1e-8)
+                + vessel_injection.float().square().mean().sqrt() / (vessel.detach().float().square().mean().sqrt() + 1e-8)
+            ),
         }
         return layer + layer_injection, vessel + vessel_injection, details
 

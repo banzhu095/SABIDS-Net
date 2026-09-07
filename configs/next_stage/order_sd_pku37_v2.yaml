@@ -1,0 +1,4 @@
+_base_: order_ds_pku37_v2.yaml
+train:
+  schedule: order_sd
+  output_dir: runs/current/order_sd_pku37_v2_fold0_seed42

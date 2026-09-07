@@ -1,0 +1,5 @@
+_base_: common.yaml
+data: {manifest: Manifests/pku37_binary_v3/train_segment.csv}
+model: {d2s_enabled: false, s2d_enabled: false}
+train: {stage: input_segment, epochs: 60, monitor: vessel_soft_dice}
+loss: {definition_version: pku37-v3-input-e3b, vessel_supervision_mode: roi_bce_dice_outside, weights: {layer: 1.0, vessel: 1.0, vessel_outside: 0.5, containment: 0.1, vessel_stroma: 0.0, vessel_area: 0.0}}

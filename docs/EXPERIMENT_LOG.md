@@ -598,3 +598,52 @@ Populate one row per independent fold after validation threshold selection.
   runtimes lack the pytest package. Full real-data export remains blocked
   locally because Phase 0 is blocked and formal fold checkpoints are absent;
   no scientific performance result is claimed.
+
+# 2026-09-03 — Classical OCT denoising development benchmark
+
+- Added the auditable classical-denoising benchmark under
+  `tools/oct_denoise_benchmark/` and completed the development-only run at
+  `runs/denoise_classical_benchmark_20260902_224920`. Pairing covered 1,478
+  images (PKU37 1,440, Duke17 14, Duke28 24); all sealed-test rows remained
+  excluded and no sealed-test image bytes were opened.
+- Six methods completed on every image: noisy identity, Gaussian smoothing,
+  db2 wavelet shrinkage, total variation, speckle-aware NLM and official BM3D
+  4.0.3 low-complexity full two-stage inference. Validation-only selection
+  locked BM3D at `sigma_psd=0.1`, Gaussian at `sigma=1.3`, TV at
+  `weight=0.075`, NLM at `gamma=0.5, h=0.25, patch_size=3,
+  search_radius=3`, and wavelet at level 2/soft/scale 1.1.
+- The three-dataset macro averages were: Gaussian 27.1977 dB PSNR / 0.5387
+  SSIM, BM3D 27.1621 / 0.5709, TV 26.9892 / 0.5376, NLM 24.5596 / 0.4091,
+  wavelet 23.5289 / 0.2961, and noisy identity 18.4545 / 0.1189. Gaussian had
+  the highest macro PSNR but substantially suppressed high-frequency and
+  Laplacian energy; BM3D had the highest macro SSIM and the closest structural
+  energy preservation among the leading methods. Dataset-level PSNR winners
+  differed: Gaussian on Duke17, BM3D on Duke28 and TV on PKU37.
+- MSBTD was blocked because its protected MATLAB P-code requires a private
+  struct containing `TrainIm`/high-SNR dictionary data and exposes no validated
+  batch contract. ASCIBP/WNNM was blocked because its protected core receives
+  the clean reference and that argument cannot be proven algorithmically inert.
+  No substitution was made. A formal SABIDS Stage-1 prediction was not present,
+  so Stage-1 paired comparisons are explicitly `unavailable_reference`.
+- All ten automatic acceptance checks passed. An independent Pillow pass
+  decoded all 8,868 saved TIFFs and confirmed unique paths, `uint8` dtype,
+  expected shapes and finite pixels; all numeric metric cells were finite and
+  sealed-test rows were zero. The 16-sheet `benchmark_summary.xlsx` also passed
+  ZIP CRC testing, artifact-tool round-trip import, rendered-sheet inspection
+  and formula-error scanning. Standard `pytest` remains unavailable locally;
+  adapter contract audit and `compileall` are used for local verification.
+# 2026-09-07 — PKU37-v2 next-stage implementation (partial, no performance run)
+
+- Added a fail-closed PKU37 binary-protocol refresher, PKU37-only D0/D1
+  configurations, D1 structure-preserving losses, RMS-normalized detached
+  decoder interaction, guarded suite/report/external-evaluation/package tools,
+  and focused synthetic tests.
+- Local protocol audit is blocked because existing otherwise valid manifests
+  disagree on the sealed train/validation/test position definition. No test
+  asset was opened and no training/performance result was produced.
+- Compileall, three directly invoked focused tests, and a strong-interaction
+  single-batch forward/backward passed. Standard pytest is unavailable in the
+  local Python environment.
+- The order DS/SD/ALT configs are registered but full execution deliberately
+  fails closed pending a continuous optimizer/global-step schedule. This is an
+  unresolved implementation item, not a completed experiment.

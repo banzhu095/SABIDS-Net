@@ -1,0 +1,2 @@
+param([Parameter(Mandatory=$true)][string]$Run, [Parameter(Mandatory=$true)][string]$Method, [Parameter(Mandatory=$true)][string]$InputImage, [Parameter(Mandatory=$true)][string]$Output, [string]$Device="cpu")
+python -m tools.oct_denoise_benchmark.inference --method $Method --input $InputImage --output $Output --registry (Join-Path $Run "configs/inference_registry.yaml") --device $Device --preserve-bit-depth

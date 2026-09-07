@@ -1,0 +1,3 @@
+_base_: segment_input_common.yaml
+input_arm: d0
+train: {output_dir: runs/current/input_d0_pku37_v3_fold0_seed42}

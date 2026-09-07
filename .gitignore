@@ -19,3 +19,4 @@ data/
 *.pt
 *.ckpt
 *.onnx
+/tools/oct_denoise_benchmark/node_modules/

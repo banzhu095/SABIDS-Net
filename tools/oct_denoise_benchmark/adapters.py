@@ -98,12 +98,18 @@ def _bm3d(image: np.ndarray, config: Mapping[str, Any], context: Mapping[str, An
         raise AdapterUnavailable(f"bm3d package unavailable: {exc}") from exc
     sigma_psd = float(config.get("sigma_psd", 0.08))
     stage_name = str(config.get("stage", "all")).lower()
+    profile_name = str(config.get("profile", "standard")).lower()
     stage = (
         bm3d_package.BM3DStages.HARD_THRESHOLDING
         if stage_name in {"hard", "hard_thresholding"}
         else bm3d_package.BM3DStages.ALL_STAGES
     )
-    profile = bm3d_package.BM3DProfile()
+    if profile_name in {"lc", "low_complexity"}:
+        profile = bm3d_package.BM3DProfileLC()
+    elif profile_name in {"standard", "np"}:
+        profile = bm3d_package.BM3DProfile()
+    else:
+        raise ValueError(f"unsupported official BM3D profile: {profile_name}")
     # Parallel aggregation can change the last floating-point bits between
     # runs.  One thread makes the scientific output exactly reproducible.
     profile.num_threads = 1

@@ -1,0 +1,5 @@
+_base_: common.yaml
+data: {manifest: Manifests/pku37_binary_v3/train_denoise.csv}
+model: {d2s_enabled: false, s2d_enabled: false}
+train: {stage: denoise, epochs: 60, monitor: psnr, output_dir: runs/current/d1_denoise_d0_pku37_v3_fold0_seed42}
+loss: {definition_version: pku37-v3-d0, weights: {reconstruction: 1.0, residual: 0.5, identity: 0.0}}

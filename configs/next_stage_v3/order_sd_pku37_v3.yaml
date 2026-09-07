@@ -1,0 +1,2 @@
+_base_: order_common.yaml
+train: {schedule: order_sd, schedule_epochs: [20, 20, 20], output_dir: runs/current/order_sd_pku37_v3_fold0_seed42}

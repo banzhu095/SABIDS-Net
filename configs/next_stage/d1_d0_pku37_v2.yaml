@@ -1,0 +1,12 @@
+_base_: pku37_v2_common.yaml
+model:
+  enable_seg_to_denoise: false
+  enable_denoise_to_seg: false
+train:
+  stage: denoise
+  epochs: 60
+  monitor: psnr
+  output_dir: runs/current/d1_denoise_d0_pku37_v2_fold0_seed42
+loss:
+  definition_version: pku37-d0-v2
+  weights: {reconstruction: 1.0, residual: 0.5, identity: 0.0}

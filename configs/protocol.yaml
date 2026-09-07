@@ -1,0 +1,42 @@
+protocol_id: pku37_development_duke_external_v1
+manifest: Manifests/manifest_denoise.csv
+development_dataset: PKU37
+train_split: train
+validation_split: val
+sealed_in_domain_test: test
+external_tests: [Duke17, Duke28]
+external_split: external_test
+selection:
+  primary: position_macro_psnr
+  tie_breaker: position_macro_ssim
+  psnr_tolerance: 0.0001
+bootstrap:
+  unit: position
+  iterations: 10000
+  seed: 42
+training:
+  seeds: [42, 123, 2026]
+  patch_size: 256
+  sampling: uniform_position_then_uniform_frame
+  augmentations: [horizontal_flip]
+  forbidden_augmentations: [random_gamma, synthetic_gaussian_noise]
+  checkpoint_rule: best_validation_psnr_ssim_tiebreak
+main_methods:
+  - noisy_identity
+  - bm3d_standard
+  - tv_chambolle
+  - nlm
+  - ksvd_self
+  - dncnn_paired
+  - nafnet_paired
+quantitative_contract:
+  data_range: 1.0
+  final_clip_only: true
+  forbid_per_image_minmax: true
+  forbid_histogram_equalization: true
+  preserve_geometry: true
+licenses:
+  bm3d: Tampere University BM3D package; non-commercial use only
+  scikit_image: BSD-3-Clause
+  pytorch: BSD-style
+  nafnet_reference: MIT

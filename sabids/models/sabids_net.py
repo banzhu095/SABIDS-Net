@@ -31,6 +31,8 @@ class SABIDSNet(nn.Module):
         interaction_scale_init: float = 0.1,
         s2d_source_mode: str = "cross",
         d2s_source_mode: str = "cross",
+        strong_s2d_rho: Optional[float] = None,
+        strong_d2s_rho: Optional[float] = None,
     ) -> None:
         super().__init__()
         if len(channels) != len(encoder_depths):
@@ -49,6 +51,9 @@ class SABIDSNet(nn.Module):
             raise ValueError("d2s_source_mode must be cross or receiver_capacity")
         self.s2d_source_mode = s2d_source_mode
         self.d2s_source_mode = d2s_source_mode
+        self.strong_s2d_rho = strong_s2d_rho
+        self.strong_d2s_rho = strong_d2s_rho
+        self.interaction_progress = 1.0
 
         self.stem = nn.Conv2d(in_channels, channels[0], 3, padding=1)
         self.encoder_blocks = nn.ModuleList(
@@ -97,6 +102,9 @@ class SABIDSNet(nn.Module):
         self.layer_head = nn.Conv2d(channels[0], 1, 1)
         self.boundary_head = nn.Conv2d(channels[0], 2, 1)
         self.vessel_head = nn.Conv2d(channels[0], 1, 1)
+
+    def set_interaction_progress(self, progress: float) -> None:
+        self.interaction_progress = min(1.0, max(0.0, float(progress)))
 
     def encode(self, image: torch.Tensor) -> List[torch.Tensor]:
         features: List[torch.Tensor] = []
@@ -288,6 +296,7 @@ class SABIDSNet(nn.Module):
                     denoise, base_l, base_v, guide_l_prob, guide_v_prob,
                     detach_source=(detach_cross or self.detach_seg_to_denoise_source),
                     strength=float(diagnostic.get("s2d_strength", 1.0)),
+                    rms_rho=(None if self.strong_s2d_rho is None else self.strong_s2d_rho * self.interaction_progress),
                 )
             denoise_features[level] = denoise
             if auxiliary is not None and details is not None:
@@ -312,6 +321,7 @@ class SABIDSNet(nn.Module):
                     layer, vessel,
                     detach_source=(detach_cross or self.detach_denoise_to_seg_source),
                     strength=float(diagnostic.get("d2s_strength", 1.0)),
+                    rms_rho=(None if self.strong_d2s_rho is None else self.strong_d2s_rho * self.interaction_progress),
                 )
             if auxiliary is not None and details is not None:
                 details["level"] = torch.tensor(level, device=image.device)

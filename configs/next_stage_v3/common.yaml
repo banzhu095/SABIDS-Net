@@ -1,0 +1,12 @@
+_base_: ../base.yaml
+protocol_id: pku37_binary_v3
+manifest_root: Manifests/pku37_binary_v3
+label_type: binary
+data_plan_sha256: 7f5da1b29b6e1138a74b29e4ee9fa2d746ea616ddfbb26b3cb487ae833591a9b
+label_inventory_sha256: 61bbd64e41f72eb39ddd783821449505c7d204c166b0757b06eaec1c6760e101
+seed: 42
+fold: 0
+data: {manifest: Manifests/pku37_binary_v3/train_joint.csv, root: ., train_split: train, val_split: val, train_datasets: [PKU37], val_datasets: [PKU37], target_size: [512, 512]}
+train: {batch_size: 1, gradient_accumulation_steps: 2, num_workers: 4, amp: false, fixed_epoch: 60, checkpoint_selection_rule: fixed_final_primary, save_predictions: fixed_atlas_only}
+evaluation: {threshold: 0.5, layer_threshold: 0.5, vessel_threshold: 0.5, primary_output: p0, use_test: false}
+use_duke_for_training: false

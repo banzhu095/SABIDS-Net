@@ -1,0 +1,2 @@
+param([Parameter(Mandatory=$true)][string]$Run, [Parameter(Mandatory=$true)][string]$Method, [Parameter(Mandatory=$true)][string]$InputFolder, [Parameter(Mandatory=$true)][string]$Output, [string]$Device="cpu")
+python -m tools.oct_denoise_benchmark.inference --method $Method --input $InputFolder --output $Output --registry (Join-Path $Run "configs/inference_registry.yaml") --device $Device --recursive --preserve-relative-path --preserve-bit-depth

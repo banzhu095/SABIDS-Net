@@ -1,0 +1,5 @@
+_base_: order_ds_pku37_v2.yaml
+train:
+  schedule: order_alt
+  schedule_epochs: [40, 20]
+  output_dir: runs/current/order_alt_pku37_v2_fold0_seed42

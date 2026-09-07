@@ -1,0 +1,12 @@
+_base_: d1_d0_pku37_v2.yaml
+train:
+  output_dir: runs/current/d1_denoise_struct_pku37_v2_fold0_seed42
+loss:
+  definition_version: pku37-d1-structure-v2
+  restoration_mode: structure_d1
+  char_weight: 1.0
+  ssim_weight: 0.2
+  gradient_weight: 0.1
+  laplacian_weight: 0.05
+  structure_beta: 2.0
+  weights: {reconstruction: 1.0, residual: 0.0, identity: 0.0}

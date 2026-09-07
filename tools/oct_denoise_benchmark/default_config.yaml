@@ -8,6 +8,7 @@ methods:
     method_id: bm3d
     sigma_psd: 0.08
     stage: all
+    profile: lc
   nlm_speckle:
     method_id: nlm_speckle
     patch_size: 3

@@ -14,6 +14,8 @@ from .common import (
     multi_scale_ssim_loss,
     masked_bce_dice_loss,
     masked_negative_bce_loss,
+    multiscale_gradient_loss,
+    multiscale_laplacian_loss,
     wavelet_loss,
 )
 from .pseudo import build_dual_source_pseudo_labels, confidence_masked_bce
@@ -66,20 +68,35 @@ class SABIDSLoss(nn.Module):
         self,
         output: Dict[str, torch.Tensor],
         batch: Dict[str, torch.Tensor],
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]]:
         valid = batch["has_clean"].bool()
         if not bool(valid.any()):
             zero = _zero(output)
-            return zero, zero
+            return zero, zero, {}
         # Reductions, local variance and wavelet differences are numerically
         # fragile in float16 at 512x512. Keep the model forward under AMP but
         # explicitly evaluate the complete restoration objective in FP32.
         with torch.cuda.amp.autocast(enabled=False):
             prediction = output["denoised_raw"][valid].float()
             target = batch["clean"][valid].float()
-            image = charbonnier(prediction, target)
-            image = image + 0.2 * multi_scale_ssim_loss(prediction, target)
-            image = image + 0.1 * wavelet_loss(prediction, target)
+            char = charbonnier(prediction, target)
+            ssim_term = multi_scale_ssim_loss(prediction, target)
+            mode = str(self.config.get("restoration_mode", "legacy"))
+            if mode == "structure_d1":
+                grad = multiscale_gradient_loss(
+                    prediction, target, float(self.config.get("structure_beta", 2.0))
+                )
+                lap = multiscale_laplacian_loss(prediction, target)
+                raw = {"d1_char": char, "d1_ssim": ssim_term, "d1_gradient": grad, "d1_laplacian": lap}
+                image = (
+                    float(self.config.get("char_weight", 1.0)) * char
+                    + float(self.config.get("ssim_weight", 0.2)) * ssim_term
+                    + float(self.config.get("gradient_weight", 0.1)) * grad
+                    + float(self.config.get("laplacian_weight", 0.05)) * lap
+                )
+            else:
+                raw = {}
+                image = char + 0.2 * ssim_term + 0.1 * wavelet_loss(prediction, target)
 
             layer_edge = edge_map(batch["layer_mask"][valid].float())
             vessel_edge = edge_map(batch["vessel_mask"][valid].float())
@@ -91,11 +108,12 @@ class SABIDSLoss(nn.Module):
             edge = (
                 boundary_weight * (torch.abs(pred_gx - target_gx) + torch.abs(pred_gy - target_gy))
             ).mean()
-            image = image + 0.1 * edge
+            if mode != "structure_d1":
+                image = image + 0.1 * edge
 
             residual_target = batch["image"][valid].float() - target
             residual = F.l1_loss(output["residual"][valid].float(), residual_target)
-        return image, residual
+        return image, residual, raw
 
     def _segmentation(
         self,
@@ -261,9 +279,9 @@ class SABIDSLoss(nn.Module):
         losses: Dict[str, torch.Tensor | float] = {}
         zero = _zero(output)
         if stage in {"denoise", "warmup", "joint", "private", "interaction"}:
-            reconstruction, residual = self._restoration(output, batch)
+            reconstruction, residual, restoration_details = self._restoration(output, batch)
         else:
-            reconstruction, residual = zero, zero
+            reconstruction, residual, restoration_details = zero, zero, {}
         if stage in {"segment", "warmup", "joint", "private", "private_seg", "interaction", "input_segment"}:
             (
                 layer,
@@ -284,6 +302,7 @@ class SABIDSLoss(nn.Module):
             vessel_outside_valid_images = 0
         losses["reconstruction"] = reconstruction
         losses["residual"] = residual
+        losses.update(restoration_details)
         losses["layer"] = layer
         losses["vessel"] = vessel
         losses["vessel_stroma"] = vessel_stroma

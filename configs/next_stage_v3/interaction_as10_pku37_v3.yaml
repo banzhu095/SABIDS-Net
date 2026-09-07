@@ -1,0 +1,2 @@
+_base_: strong_common.yaml
+model: {d2s_enabled: false, s2d_enabled: true, strong_d2s_rho: 0.0, strong_s2d_rho: 0.01}

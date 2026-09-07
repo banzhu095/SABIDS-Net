@@ -44,7 +44,7 @@ RUNNABLE_METHODS = ["noisy_identity", "bm3d", "nlm_speckle", "wavelet", "tv", "g
 
 PARAMETER_GRIDS: Dict[str, List[Dict[str, Any]]] = {
     "noisy_identity": [{"method_id": "noisy_identity"}],
-    "bm3d": [{"method_id": "bm3d", "sigma_psd": sigma, "stage": "all"} for sigma in (0.04, 0.06, 0.08, 0.10)],
+    "bm3d": [{"method_id": "bm3d", "sigma_psd": sigma, "stage": "all", "profile": "lc"} for sigma in (0.04, 0.06, 0.08, 0.10)],
     "nlm_speckle": [
         {"method_id": "nlm_speckle", "patch_size": 3, "search_radius": 3, "h": h, "gamma": 0.5}
         for h in (0.08, 0.12, 0.18, 0.25)
@@ -414,6 +414,8 @@ def full_inference(project_root: Path, run_dir: Path, methods: Sequence[str], in
                         if result["ok"]:
                             result_rows.append(result["row"])
                             completed.add((str(result["row"]["sample_id"]), method, config_hash))
+                            if len(result_rows) % 20 == 0:
+                                _write_csv(partial_path, pd.DataFrame(result_rows))
                         else:
                             failures.append(result["row"])
                 _write_csv(partial_path, pd.DataFrame(result_rows))
@@ -499,7 +501,15 @@ def build_fixed_previews(run_dir: Path) -> None:
                 noisy, clean, output = read_gray(row["noisy_path"]), read_gray(row["clean_path"]), read_gray(row["output_path"])
                 preview_path = run_dir / "previews" / "fixed_atlas" / str(dataset) / str(position) / f"{method}.png"
                 _save_preview(preview_path, noisy, clean, output)
-                selected_rows.append({"dataset": dataset, "position_id": position, "sample_id": base_row["sample_id"], "selection_rule": rule, "method_id": method, "preview_path": str(preview_path)})
+                selected_rows.append({"dataset": dataset, "position_id": position, "sample_id": base_row["sample_id"], "selection_rule": rule, "method_id": method, "preview_path": str(preview_path), "status": "exported", "limitation": ""})
+        for unavailable_rule, reason in (
+            ("thin_layer_or_weak_boundary", "No unified reliable layer annotation or pre-registered boundary-thickness rule covers all three datasets."),
+            ("small_vessel_rich", "No unified reliable vessel/stroma annotation or pre-registered vessel-richness rule covers all three datasets."),
+            ("sabids_d0_oversmoothing", "No formal traceable Stage 1/D0 prediction is available for this dataset; PKU37 uses only the pre-registered review positions when present."),
+        ):
+            if unavailable_rule == "sabids_d0_oversmoothing" and dataset == "PKU37":
+                continue
+            selected_rows.append({"dataset": dataset, "position_id": "", "sample_id": "", "selection_rule": unavailable_rule, "method_id": "", "preview_path": "", "status": "not_available", "limitation": reason})
     _write_csv(run_dir / "audit" / "fixed_atlas_selection.csv", selected_rows)
 
 
@@ -509,6 +519,7 @@ def write_report(project_root: Path, run_dir: Path) -> None:
     overall = pd.read_csv(run_dir / "metrics" / "overall_metrics.csv")
     failures = pd.read_csv(run_dir / "failures.csv") if (run_dir / "failures.csv").stat().st_size else pd.DataFrame()
     selected = pd.read_csv(run_dir / "metrics" / "selected_parameters.csv")
+    search = pd.read_csv(run_dir / "metrics" / "parameter_search_results.csv")
     inventory = pd.read_csv(run_dir / "audit" / "dataset_inventory.csv")
     main = overall[overall["aggregation"] == "dataset_macro"].sort_values("psnr", ascending=False)
     dataset_table = per_dataset[[column for column in ["dataset", "method_id", "position_count", "psnr", "ssim", "rmse", "epi", "reference_edge_mae", "hf_energy_ratio_to_clean", "laplacian_energy_ratio_to_clean"] if column in per_dataset]]
@@ -516,12 +527,27 @@ def write_report(project_root: Path, run_dir: Path) -> None:
     method_inventory = pd.read_csv(run_dir / "audit" / "method_inventory.csv")
     blocked = method_inventory[method_inventory["benchmark_role"].astype(str).str.contains("blocked", na=False)][["method_id", "blocking_reason"]]
     over_smooth = main[(main.get("hf_energy_ratio_to_clean", pd.Series(index=main.index, dtype=float)) < 0.75) | (main.get("laplacian_energy_ratio_to_clean", pd.Series(index=main.index, dtype=float)) < 0.75)]
+    ranked = per_dataset[["dataset", "method_id", "psnr"]].copy()
+    ranked["psnr_rank"] = ranked.groupby("dataset")["psnr"].rank(method="min", ascending=False).astype(int)
+    rank_table = ranked.pivot(index="method_id", columns="dataset", values="psnr_rank").reset_index()
+    dataset_columns = [column for column in ("PKU37", "Duke17", "Duke28") if column in rank_table]
+    if dataset_columns:
+        rank_table["rank_span"] = rank_table[dataset_columns].max(axis=1) - rank_table[dataset_columns].min(axis=1)
+        rank_table = rank_table.sort_values(["rank_span", "method_id"], ascending=[False, True])
+    candidate_means = search.groupby(["method_id", "candidate_index", "candidate_json"], as_index=False).agg(
+        validation_position_macro_psnr=("psnr", "mean"), validation_position_macro_ssim=("ssim", "mean")
+    )
+    sensitivity = candidate_means.groupby("method_id", as_index=False).agg(
+        candidates=("candidate_index", "size"), best_psnr=("validation_position_macro_psnr", "max"), worst_psnr=("validation_position_macro_psnr", "min")
+    )
+    sensitivity["psnr_spread"] = sensitivity["best_psnr"] - sensitivity["worst_psnr"]
+    chosen = selected[[column for column in ("method_id", "locked_config_json", "selection_rule") if column in selected]].copy()
     lines = [
         "# SABIDS-Net 经典 OCT 降噪基线报告", "",
         f"运行目录：`{run_dir}`", "",
         "## 结论摘要", "",
         f"本次默认严格排除 sealed test，只处理 train/validation。成功方法及输出行数：{json.dumps(method_counts, ensure_ascii=False)}。",
-        "论文主结果应读取下表的 dataset-macro；frame-micro 仅作兼容性补充。", "",
+        "论文主结果应读取下表的 dataset-macro；frame-micro 仅作兼容性补充。BM3D 使用已安装 `bm3d 4.0.3` 的官方 low-complexity profile，并执行 hard-threshold 与 Wiener 两阶段。", "",
         _markdown_table(main, [column for column in ["method_id", "n", "psnr", "ssim", "rmse", "epi", "reference_edge_mae", "hf_energy_ratio_to_clean", "laplacian_energy_ratio_to_clean"] if column in main]), "",
         "## 现有代码的真实算法", "",
         "五个指定目录实际包含 MSBTD(+GUI Tikhonov)、一个多算法实验工具箱、独立 wavelet 课程实现、ASCIBP/WNNM P-code，以及三个不同来源的 NLM 工具包。完整论文、参数、输入输出、许可证和阻塞项见 `audit/method_inventory.csv`/`.md`。目录 2 不是一种方法；其 SVD 脚本把理论阈值误作 rank 且无法直接运行，anisotropic diffusion 只有图和外链，未进入主实验。", "",
@@ -529,15 +555,21 @@ def write_report(project_root: Path, run_dir: Path) -> None:
         "所有配对来自 `Manifests/manifest_denoise.csv`；没有按文件排序推测。test 只检查路径存在性，未解码、未哈希、未汇总。PKU37 重复帧先按 position 聚合。", "",
         "## 参数选择协议", "",
         "每个数据集固定取两个 validation 位置；候选以 position-macro PSNR 排序、SSIM 并列判定。没有逐图读取 clean 后单独调参。完整搜索见 `metrics/parameter_search_results.csv`，锁定配置见 `configs/locked_method_configs.yaml`。", "",
+        "### 锁定参数", "", _markdown_table(chosen), "",
+        "### 参数敏感性", "", _markdown_table(sensitivity), "",
         "## 三数据集结果", "", _markdown_table(dataset_table), "",
+        "### 跨数据集排序一致性", "", _markdown_table(rank_table), "",
+        "`rank_span` 为同一方法在三个数据集上的最好/最差 PSNR 名次之差；非零表示相对排序随数据集变化，不能用单一总体均值概括。", "",
         "## 结构保持与过度平滑", "",
         f"按高频能量或 Laplacian 能量低于 clean 的 0.75 倍这一预注册诊断阈值，触发的方法为：{', '.join(over_smooth['method_id'].astype(str)) if not over_smooth.empty else '无'}。PSNR/SSIM 提高不自动等价于结构保持；应同时检查 EPI、reference-edge MAE、gradient MAE 和固定图册。", "",
+        "固定图册的每张预览由左到右为 noisy、denoised、clean、4× absolute error、以 0.5 为零点的 2× residual；后两者仅用于可视化，定量指标使用未增强浮点数组。", "",
         "不同数据集上的相对排序可从上表直接比较；由于 Duke17/Duke28 各位置只有一帧，而 PKU37 有重复帧，不能用 frame-micro 掩盖这种差异。", "",
         "## 阻塞、异常与公平性限制", "", _markdown_table(blocked), "",
         "- MSBTD 的 fair-valid 版本需要训练位置 high-SNR 字典和可审计的 P-code struct 构造；当前不能把同位置 clean 作为字典，也不能把另一算法冒充 MSBTD。",
         "- ASCIBP Demo 将 clean 传入核心 P-code；在无法证明其仅用于日志前，未进入公平主表。",
         "- 当前本地只有 Stage 1 smoke checkpoint，没有可追溯的正式 fold-0 Stage 1 best；因此 `sabids_stage1` 配对差值标记为 unavailable_reference，不把 smoke 权重当论文结果。",
         "- 没有覆盖三个数据集且统一可靠的组织/背景、层或 vessel-stroma ROI，因此没有临时手选 ROI 计算 SNR/CNR/ENL/layer-ROI PSNR。", "",
+        "- 固定图册已导出每个数据集的中位普通位置与最低 noisy-PSNR 位置；由于上述统一解剖标注缺失，薄层/弱边界和小血管丰富类别在 `audit/fixed_atlas_selection.csv` 中显式标为 `not_available`，没有伪造主观分类。", "",
         "## 是否适合论文主表", "",
         "`noisy_identity`、BM3D、wavelet、speckle-NLM 可作为经典主/参照基线；TV 与 Gaussian 应标为 supplementary/lower-bound。MSBTD 与 ASCIBP 当前只能列为代码审计阻塞项，不能给出公平数值。正式论文主表还需补齐可追溯的 SABIDS Stage 1、以及至少一个现代监督/自监督 OCT 深度学习基线。", "",
         "## 建议补充的深度学习基线", "",
@@ -586,7 +618,9 @@ def asset_inventory(run_dir: Path) -> pd.DataFrame:
 def write_reproduction_readme(project_root: Path, run_dir: Path) -> None:
     text = f"""# Classical OCT denoising benchmark reproduction
 
-Run from the SABIDS-Net repository root. Sealed test is excluded by default.
+Run from the SABIDS-Net repository root. Python 3.9+, MATLAB R2024a (only for auditing the protected packages), and the packages imported by `tools/oct_denoise_benchmark/adapters.py` are required. Sealed test is excluded by default.
+
+## One-command run
 
 ```powershell
 python -m tools.oct_denoise_benchmark.benchmark all `
@@ -595,15 +629,45 @@ python -m tools.oct_denoise_benchmark.benchmark all `
   --methods noisy_identity bm3d nlm_speckle wavelet tv gaussian msbtd ascibp
 ```
 
-Resume full inference with the same command and run directory. Completed images are skipped only when the locked method configuration and adapter source hash match.
+The equivalent auditable stages are:
+
+```powershell
+$run = \"{run_dir}\"
+$methods = @(\"noisy_identity\", \"bm3d\", \"nlm_speckle\", \"wavelet\", \"tv\", \"gaussian\", \"msbtd\", \"ascibp\")
+python -m tools.oct_denoise_benchmark.benchmark audit --project-root . --run-dir $run --methods $methods
+python -m tools.oct_denoise_benchmark.benchmark smoke --project-root . --run-dir $run --methods $methods
+python -m tools.oct_denoise_benchmark.benchmark calibrate --project-root . --run-dir $run --methods $methods --workers 6
+python -m tools.oct_denoise_benchmark.benchmark run --project-root . --run-dir $run --methods $methods --workers 6
+python -m tools.oct_denoise_benchmark.benchmark summarize --project-root . --run-dir $run
+```
+
+Resume full inference with the `run` command and the same run directory. Completed images are skipped only when the locked method configuration and adapter source hash match. A changed adapter intentionally receives a new source/config hash and is not mixed with the previous output.
 
 The optional `--include-sealed-test` switch exists for an explicitly authorized final test run. Do not use it for development, calibration, method selection or report iteration.
 
-To rebuild summaries from an existing completed run:
+## Workbook
+
+The Excel summary is built with `@oai/artifact-tool` after the CSV summaries and acceptance checks exist:
 
 ```powershell
-python -m tools.oct_denoise_benchmark.benchmark summarize --project-root . --run-dir \"{run_dir}\"
+$node = \"C:\\Users\\ASUS\\.cache\\codex-runtimes\\codex-primary-runtime\\dependencies\\node\\bin\\node.exe\"
+$modules = \"C:\\Users\\ASUS\\.cache\\codex-runtimes\\codex-primary-runtime\\dependencies\\node\\node_modules\"
+if (-not (Test-Path tools\\oct_denoise_benchmark\\node_modules)) {{
+  New-Item -ItemType Junction -Path tools\\oct_denoise_benchmark\\node_modules -Target $modules | Out-Null
+}}
+& $node tools\\oct_denoise_benchmark\\build_benchmark_workbook.mjs \"{run_dir}\" \"{run_dir / 'benchmark_summary.xlsx'}\"
+$builderExit = $LASTEXITCODE
+& $node tools\\oct_denoise_benchmark\\validate_benchmark_workbook.mjs \"{run_dir / 'benchmark_summary.xlsx'}\" \"{run_dir / 'reports' / 'workbook_post_import_validation.json'}\"
+if ($LASTEXITCODE -ne 0) {{ throw \"Workbook round-trip validation failed.\" }}
+if ($builderExit -ne 0) {{ Write-Warning \"The Windows artifact-tool process reported a cleanup-stage exit after export; the saved workbook passed independent round-trip validation.\" }}
 ```
+
+On the bundled Windows runtime, artifact-tool may report `0xC0000409` during
+native process cleanup after the workbook and previews have already been
+written. The separate import/inspect validator is therefore the authoritative
+success gate; it must exit zero.
+
+Re-run `summarize` after any completed inference extension; it deterministically rebuilds position/dataset/overall aggregates, 10,000-sample bootstrap intervals (`seed=42`), the fixed atlas, report, acceptance table and asset inventory.
 """
     (project_root / "tools" / "oct_denoise_benchmark" / "README.md").write_text(text, encoding="utf-8")
 
@@ -665,6 +729,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         build_fixed_previews(args.run_dir)
         acceptance(args.project_root, args.run_dir, args.include_sealed_test)
         write_report(args.project_root, args.run_dir)
+        write_reproduction_readme(args.project_root, args.run_dir)
         asset_inventory(args.run_dir)
 
 

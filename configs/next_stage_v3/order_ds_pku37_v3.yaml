@@ -1,0 +1,2 @@
+_base_: order_common.yaml
+train: {schedule: order_ds, schedule_epochs: [20, 20, 20], output_dir: runs/current/order_ds_pku37_v3_fold0_seed42}

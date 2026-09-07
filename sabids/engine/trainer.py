@@ -228,6 +228,8 @@ def build_model(config: Dict) -> SABIDSNet:
         interaction_scale_init=float(model_cfg.get("interaction_scale_init", 0.1)),
         s2d_source_mode=str(model_cfg.get("s2d_source_mode", "cross")),
         d2s_source_mode=str(model_cfg.get("d2s_source_mode", "cross")),
+        strong_s2d_rho=model_cfg.get("strong_s2d_rho"),
+        strong_d2s_rho=model_cfg.get("strong_d2s_rho"),
     )
 
 
@@ -859,6 +861,10 @@ class Trainer:
         detach_cross = epoch < detach_epochs
         ramp_epochs = max(int(self.config["train"].get("ramp_epochs", 20)), 1)
         ramp = min(1.0, max(0.0, (epoch + 1) / ramp_epochs))
+        interaction_ramp_epochs = max(
+            1, int(self.config["train"].get("interaction_ramp_epochs", ramp_epochs))
+        )
+        self.model.set_interaction_progress((epoch + 1) / interaction_ramp_epochs)
         progress = tqdm(self.train_loader, desc=f"Train {epoch + 1}", leave=False)
         self.optimizer.zero_grad(set_to_none=True)
         for batch_index, batch in enumerate(progress):
@@ -1093,6 +1099,8 @@ class Trainer:
                     "denoise_to_vessel_injection_abs_mean",
                     "denoise_to_layer_injection_relative_rms",
                     "denoise_to_vessel_injection_relative_rms",
+                    "requested_rho",
+                    "actual_rho_mean",
                     "layer_scale_abs_mean",
                     "vessel_scale_abs_mean",
                     "seg_scale_abs_mean",
