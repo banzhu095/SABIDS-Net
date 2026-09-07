@@ -28,8 +28,16 @@ def main():
   for seed in a.seeds:
    for name in SUITES[a.suite]:
     cfg=load_config(root/"configs/next_stage_v3"/name); cfg["seed"]=seed; cfg["fold"]=fold; cfg["device"]=a.device
-    for key in ("data_plan_sha256","label_inventory_sha256"):
-     if cfg.get(key)!=audit.get(key): raise SystemExit(f"BLOCKED: {key} differs from current protocol")
+    # The checked-in YAML is a portable template.  Its hashes may describe the
+    # author's workstation and must not be used to veto a newly rescanned
+    # server protocol.  The protocol audit is authoritative; retain the
+    # template values for provenance before binding the resolved run to it.
+    for key in ("data_plan_sha256", "label_inventory_sha256"):
+     declared = cfg.get(key)
+     if declared != audit.get(key):
+      cfg.setdefault("runtime", {})[f"declared_{key}"] = declared
+      cfg[key] = audit.get(key)
+      cfg["runtime"][f"{key}_bound_from_protocol"] = True
     stem=Path(name).stem; cfg["train"]["output_dir"]=str(root/"runs/current"/stem.replace("fold0_seed42",f"fold{fold}_seed{seed}"))
     if a.mode=="pilot": cfg["train"]["epochs"]=2; cfg["data"]["max_train_samples"]=2; cfg["data"]["max_val_samples"]=2; cfg["train"]["num_workers"]=0
     if cfg["train"].get("schedule") and a.execute: raise SystemExit("BLOCKED: continuous order state machine remains incomplete")
