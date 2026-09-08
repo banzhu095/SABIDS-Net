@@ -1,4 +1,5 @@
 import torch
+from sabids.losses.total import SABIDSLoss
 from sabids.losses.common import multiscale_gradient_loss, multiscale_laplacian_loss
 from sabids.models.ugbi import UGBIBlock
 
@@ -22,3 +23,11 @@ def test_detached_source_blocks_source_gradient_but_mapping_trains():
     (lo.mean()+vo.mean()).backward()
     assert source.grad is None and layer.grad is not None
     assert block.denoise_to_layer.weight.grad is not None
+
+def test_interaction_diagnostics_are_not_auxiliary_heads():
+    cfg={"auxiliary_weight":0.1,"weights":{"layer":1,"vessel":1}}
+    loss=SABIDSLoss(cfg)
+    output={"denoised_raw":torch.zeros(1,1,8,8,requires_grad=True),"layer_logits":torch.zeros(1,1,8,8,requires_grad=True),"vessel_logits":torch.zeros(1,1,8,8,requires_grad=True),"boundary_logits":torch.zeros(1,2,8,8,requires_grad=True),"auxiliary":[{"requested_rho":torch.tensor(0.01)}]}
+    batch={"has_clean":torch.tensor([False]),"has_layer":torch.tensor([True]),"has_vessel":torch.tensor([True]),"layer_mask":torch.zeros(1,1,8,8),"vessel_mask":torch.zeros(1,1,8,8),"valid_mask":torch.ones(1,1,8,8),"is_clean":torch.tensor([False])}
+    result=loss(output,batch,"interaction")
+    assert torch.isfinite(result["total"])

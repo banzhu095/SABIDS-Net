@@ -210,7 +210,10 @@ class SABIDSLoss(nn.Module):
         auxiliary_weight = float(self.config.get("auxiliary_weight", 0.1))
         if auxiliary_weight > 0:
             for auxiliary in output.get("auxiliary", []):
-                if bool(layer_valid.any()):
+                # Causal interaction runs also place per-scale diagnostic
+                # dictionaries in ``auxiliary``.  They are not auxiliary
+                # segmentation heads and therefore have no logits to supervise.
+                if "layer_logit" in auxiliary and bool(layer_valid.any()):
                     target = F.interpolate(
                         batch["layer_mask"][layer_valid],
                         size=auxiliary["layer_logit"].shape[-2:],
@@ -225,7 +228,7 @@ class SABIDSLoss(nn.Module):
                             mode="nearest",
                         ),
                     )
-                if bool(vessel_valid.any()):
+                if "vessel_logit" in auxiliary and bool(vessel_valid.any()):
                     target = F.interpolate(
                         batch["vessel_mask"][vessel_valid],
                         size=auxiliary["vessel_logit"].shape[-2:],

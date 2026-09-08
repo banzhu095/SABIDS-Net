@@ -38,7 +38,9 @@ def main():
       cfg.setdefault("runtime", {})[f"declared_{key}"] = declared
       cfg[key] = audit.get(key)
       cfg["runtime"][f"{key}_bound_from_protocol"] = True
-    stem=Path(name).stem; cfg["train"]["output_dir"]=str(root/"runs/current"/stem.replace("fold0_seed42",f"fold{fold}_seed{seed}"))
+    stem=Path(name).stem
+    run_name=f"{stem}_fold{fold}_seed{seed}"
+    cfg["train"]["output_dir"]=str(root/"runs/current"/run_name)
     if a.mode=="pilot": cfg["train"]["epochs"]=2; cfg["data"]["max_train_samples"]=2; cfg["data"]["max_val_samples"]=2; cfg["train"]["num_workers"]=0
     if cfg["train"].get("schedule") and a.execute: raise SystemExit("BLOCKED: continuous order state machine remains incomplete")
     resolved=root/"runs/next_stage_v3_launch_configs"/f"{stem}_f{fold}_s{seed}.yaml"; save_config(cfg,resolved); cmd=[sys.executable,"train.py","--config",str(resolved)]; commands.append(" ".join(cmd))

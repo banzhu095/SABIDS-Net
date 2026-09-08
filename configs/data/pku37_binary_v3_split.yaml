@@ -1,0 +1,8 @@
+protocol_id: pku37_binary_v3
+label_type: binary
+group_key: anatomical_position
+split_seed: 20260907
+validation_positions: [pku0006, pku0012, pku0040]
+test_positions: [pku0024, pku0031, pku0037, pku0039]
+segmentation_train_rule: all_reliable_labeled_positions_except_validation_and_test
+denoise_train_rule: all_pku37_paired_positions_except_validation_and_test

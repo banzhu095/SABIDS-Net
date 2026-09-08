@@ -1,13 +1,41 @@
+# Python bytecode, test, type-check and coverage caches
 __pycache__/
 *.py[cod]
 *.egg-info/
 .pytest_cache/
+.ipynb_checkpoints/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Local Python/Conda environments and secrets
+.venv/
+venv/
+env/
+.conda/
+.env
+.env.*
+!.env.example
+
+# Editors and operating-system metadata
 .idea/
 .vscode/
-checkpoints/
-runs/
-outputs/
-data/
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Build products
+build/
+dist/
+
+# Repository-root runtime data and experiment artifacts. Keep these anchored:
+# an unanchored `data/` would also hide new source files in `sabids/data/`.
+/checkpoints/
+/runs/
+/outputs/
+/data/
 /Data/
 /Label/
 /Manifests/
@@ -15,8 +43,23 @@ data/
 /predictions/
 /test_results/
 /tensorboard/
+/wandb/
+/lightning_logs/
+/tmp/
+
+# Model weights and exported graphs anywhere in the repository
 *.pth
 *.pt
 *.ckpt
 *.onnx
+
+# Logs and editor/command temporary files
+*.log
+*.tmp
+*.bak
+*.swp
+*.swo
+*~
+
+# Local JavaScript dependency junction used by the workbook builder
 /tools/oct_denoise_benchmark/node_modules/
