@@ -106,6 +106,10 @@ class UGBIBlock(nn.Module):
             if self.enable_seg_to_denoise
             else torch.zeros_like(denoise)
         )
+        dims = tuple(range(1, injection.ndim))
+        rho_values = injection.float().square().mean(dim=dims).sqrt() / (
+            denoise.detach().float().square().mean(dim=dims).sqrt() + 1e-8
+        )
         details = {
             "seg_to_denoise_gate": gate, "seg_to_denoise_injection": injection,
             "seg_to_denoise_injection_relative_rms": injection.float().square().mean().sqrt()
@@ -139,8 +143,11 @@ class UGBIBlock(nn.Module):
             "s2d_gate_saturation_fraction": ((gate < 0.05) | (gate > 0.95)).detach().float().mean(),
             "s2d_gate_entropy": binary_entropy(gate.detach().float()).mean(),
             "requested_rho": denoise.new_tensor(float(rms_rho or 0.0)),
-            "actual_rho_mean": injection.float().square().mean().sqrt()
-            / (denoise.detach().float().square().mean().sqrt() + 1e-8),
+            "actual_rho_mean": rho_values.mean(),
+            "actual_rho_median": rho_values.median(),
+            "actual_rho_p95": torch.quantile(rho_values, 0.95),
+            "actual_rho_max": rho_values.max(),
+            "delta_rms": injection.detach().float().square().mean().sqrt(),
         }
         return denoise + injection, details
 
@@ -173,6 +180,14 @@ class UGBIBlock(nn.Module):
             else strength * self.vessel_scale * vessel_proposed
             if self.enable_denoise_to_seg else torch.zeros_like(vessel)
         )
+        dims = tuple(range(1, layer_injection.ndim))
+        layer_rho = layer_injection.float().square().mean(dim=dims).sqrt() / (
+            layer.detach().float().square().mean(dim=dims).sqrt() + 1e-8
+        )
+        vessel_rho = vessel_injection.float().square().mean(dim=dims).sqrt() / (
+            vessel.detach().float().square().mean(dim=dims).sqrt() + 1e-8
+        )
+        rho_values = torch.cat([layer_rho, vessel_rho])
         details = {
             "noise_hint": noise_hint, "denoise_to_layer_gate": d2l_gate,
             "denoise_to_vessel_gate": d2v_gate, "denoise_to_layer_injection": layer_injection,
@@ -207,9 +222,13 @@ class UGBIBlock(nn.Module):
             "d2v_gate_saturation_fraction": ((d2v_gate < 0.05) | (d2v_gate > 0.95)).detach().float().mean(),
             "d2v_gate_entropy": binary_entropy(d2v_gate.detach().float()).mean(),
             "requested_rho": layer.new_tensor(float(rms_rho or 0.0)),
-            "actual_rho_mean": 0.5 * (
-                layer_injection.float().square().mean().sqrt() / (layer.detach().float().square().mean().sqrt() + 1e-8)
-                + vessel_injection.float().square().mean().sqrt() / (vessel.detach().float().square().mean().sqrt() + 1e-8)
+            "actual_rho_mean": rho_values.mean(),
+            "actual_rho_median": rho_values.median(),
+            "actual_rho_p95": torch.quantile(rho_values, 0.95),
+            "actual_rho_max": rho_values.max(),
+            "delta_rms": 0.5 * (
+                layer_injection.detach().float().square().mean().sqrt()
+                + vessel_injection.detach().float().square().mean().sqrt()
             ),
         }
         return layer + layer_injection, vessel + vessel_injection, details

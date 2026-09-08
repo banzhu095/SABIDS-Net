@@ -45,10 +45,11 @@ class SABIDSNet(nn.Module):
         self.detach_denoise_to_seg_source = detach_denoise_to_seg_source
         self.detach_seg_to_denoise_source = detach_seg_to_denoise_source
         self.causal_interaction_experiment = causal_interaction_experiment
-        if s2d_source_mode not in {"cross", "receiver_capacity"}:
-            raise ValueError("s2d_source_mode must be cross or receiver_capacity")
-        if d2s_source_mode not in {"cross", "receiver_capacity"}:
-            raise ValueError("d2s_source_mode must be cross or receiver_capacity")
+        source_modes = {"cross", "receiver_capacity", "shuffled_cross"}
+        if s2d_source_mode not in source_modes:
+            raise ValueError(f"s2d_source_mode must be one of {sorted(source_modes)}")
+        if d2s_source_mode not in source_modes:
+            raise ValueError(f"d2s_source_mode must be one of {sorted(source_modes)}")
         self.s2d_source_mode = s2d_source_mode
         self.d2s_source_mode = d2s_source_mode
         self.strong_s2d_rho = strong_s2d_rho
@@ -164,12 +165,14 @@ class SABIDSNet(nn.Module):
         return_features: bool = True,
         return_auxiliary: bool = True,
         interaction_diagnostic: Optional[Dict[str, object]] = None,
+        interaction_guidance_image: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor | List[Dict[str, torch.Tensor]]]:
         if self.causal_interaction_experiment:
             return self._forward_causal_interaction(
                 image, detach_cross=detach_cross,
                 return_features=return_features, return_auxiliary=return_auxiliary,
                 interaction_diagnostic=interaction_diagnostic,
+                interaction_guidance_image=interaction_guidance_image,
             )
         encoder_features = self.encode(image)
         deepest = len(self.channels) - 1
@@ -232,22 +235,38 @@ class SABIDSNet(nn.Module):
         return_features: bool,
         return_auxiliary: bool,
         interaction_diagnostic: Optional[Dict[str, object]] = None,
+        interaction_guidance_image: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor | List[Dict[str, torch.Tensor]]]:
         """Acyclic S0 -> denoise -> final-seg path used only by J00/J10/J01/J11."""
         encoder_features = self.encode(image)
+        needs_shuffled_source = (
+            self.s2d_source_mode == "shuffled_cross"
+            or self.d2s_source_mode == "shuffled_cross"
+        )
+        if needs_shuffled_source and interaction_guidance_image is None:
+            raise ValueError("shuffled_cross requires interaction_guidance_image")
+        guidance_encoder_features = None
+        if needs_shuffled_source:
+            with torch.no_grad():
+                guidance_encoder_features = self.encode(interaction_guidance_image)
         deepest = len(self.channels) - 1
 
         # S0 uses the already-trained final segmentation adapters/decoders and
         # heads. It is never supervised a second time and never sees clean/GT.
-        base_layer = self.adapters["layer"][deepest](encoder_features[deepest])
-        base_vessel = self.adapters["vessel"][deepest](encoder_features[deepest])
+        segmentation_source = (
+            guidance_encoder_features
+            if self.s2d_source_mode == "shuffled_cross"
+            else encoder_features
+        )
+        base_layer = self.adapters["layer"][deepest](segmentation_source[deepest])
+        base_vessel = self.adapters["vessel"][deepest](segmentation_source[deepest])
         base_features = {deepest: (base_layer, base_vessel)}
         for stage_index, level in enumerate(self.decoder_levels):
             base_layer = self.decoders["layer"][stage_index](
-                base_layer, self.adapters["layer"][level](encoder_features[level])
+                base_layer, self.adapters["layer"][level](segmentation_source[level])
             )
             base_vessel = self.decoders["vessel"][stage_index](
-                base_vessel, self.adapters["vessel"][level](encoder_features[level])
+                base_vessel, self.adapters["vessel"][level](segmentation_source[level])
             )
             base_features[level] = (base_layer, base_vessel)
         base_layer_prob = torch.sigmoid(self.layer_head(base_layer))
@@ -304,6 +323,18 @@ class SABIDSNet(nn.Module):
                 details["direction"] = torch.tensor(1, device=image.device)
                 auxiliary.append(details)
 
+        shuffled_denoise_features: Dict[int, torch.Tensor] = {}
+        if self.d2s_source_mode == "shuffled_cross":
+            assert guidance_encoder_features is not None
+            with torch.no_grad():
+                shuffled = self.adapters["denoise"][deepest](guidance_encoder_features[deepest])
+                shuffled_denoise_features[deepest] = shuffled
+                for stage_index, level in enumerate(self.decoder_levels):
+                    shuffled = self.decoders["denoise"][stage_index](
+                        shuffled, self.adapters["denoise"][level](guidance_encoder_features[level])
+                    )
+                    shuffled_denoise_features[level] = shuffled
+
         layer = self.adapters["layer"][deepest](encoder_features[deepest])
         vessel = self.adapters["vessel"][deepest](encoder_features[deepest])
         for stage_index, level in [(-1, deepest), *list(enumerate(self.decoder_levels))]:
@@ -317,7 +348,13 @@ class SABIDSNet(nn.Module):
             details = None
             if level in self.interaction_levels:
                 layer, vessel, details = self.interactions[str(level)].denoise_to_seg(
-                    denoise_features[level] if self.d2s_source_mode == "cross" else 0.5 * (layer + vessel),
+                    (
+                        denoise_features[level]
+                        if self.d2s_source_mode == "cross"
+                        else shuffled_denoise_features[level]
+                        if self.d2s_source_mode == "shuffled_cross"
+                        else 0.5 * (layer + vessel)
+                    ),
                     layer, vessel,
                     detach_source=(detach_cross or self.detach_denoise_to_seg_source),
                     strength=float(diagnostic.get("d2s_strength", 1.0)),

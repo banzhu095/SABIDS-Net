@@ -7,10 +7,12 @@ reporting, or packaging.
 
 ## Mandatory gate
 
-Run `python tools/refresh_pku37_binary_protocol.py --project-root . --write`.
-Training is permitted only when `Manifests/pku37_binary_v2/protocol_audit.json`
-reports `status: passed`. A disagreement among existing sealed splits is a hard
-blocker and must be resolved by a human; the tool never invents a split.
+Do not regenerate or rename the protocol while D1 is active. After D1 stops,
+extract its protocol facts with `tools/audit_active_d1.py --write-lock`. All
+subsequent launch, evaluation, report and package commands require the resulting
+`Manifests/<protocol_id>/active_protocol_lock.json`. A missing fact or a D1-seed
+disagreement is a hard blocker. The lock records sealed-test IDs as metadata;
+the tools do not open those assets.
 
 ## Implemented scope
 
@@ -19,15 +21,33 @@ blocker and must be resolved by a human; the tool never invents a split.
   losses. Raw D1 components are emitted in the ordinary loss dictionary/history.
 - Strong decoder interaction supports per-sample RMS-normalized residual
   injection and a 20% epoch ramp. Sources remain detached in confirm configs.
+- DS/SD/ALT are one continuous training job per arm. Model, AdamW, global-step
+  cosine scheduler, AMP scaler, RNG and phase state are checkpointed together;
+  frozen task decoders are placed in eval mode.
+- Input probes train a neutral segmentation model against noisy, D0, D1 or
+  aligned clean inputs. D0/D1 are prepared as external float caches and are not
+  loaded into the segmentation encoder.
+- Shuffle and receiver-capacity controls use the same UGBI parameterization.
+  Shuffle maps are fixed, within split, cross-position derangements.
 - Report and lightweight tar tools exclude test-named paths, checkpoints,
   arrays, Data, Label, and caches.
 
-## Deliberate blockers
+## Required ordering
 
-The ordered DS/SD/ALT YAML contracts are present, but execution is refused by
-the suite runner until one continuous optimizer/global-step state machine is
-implemented. Running three independent `train.py` jobs would not be the stated
-experiment. External Duke evaluation likewise requires an explicit audited
-development manifest and never infers a split.
+1. Finish/audit D0 and D1 and create the active protocol lock.
+2. Create neutral order/input anchors; prepare D0/D1 input caches.
+3. Run input probes and the three order arms.
+4. Evaluate fixed-final order checkpoints and build the order report. Only a
+   complete three-seed report writes `interaction_anchor_selection.json`.
+5. Run seven rho pilots and build their report/strength lock.
+6. Run J00/J10/J01/J11, then the predeclared shuffle/self-adapter controls.
+
+The launcher is fail-closed: it does not overwrite existing runs, requires an
+explicit protocol lock, preserves stale lock files for inspection, and blocks a
+new full GPU suite while another project training process is active unless the
+user explicitly passes `--allow-concurrent-training`.
+
+External Duke evaluation still requires an explicit audited development
+manifest and never infers a split.
 
 Smoke checks are engineering checks and must not be reported as performance.

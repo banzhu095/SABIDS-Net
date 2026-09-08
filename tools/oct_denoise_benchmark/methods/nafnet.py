@@ -97,11 +97,14 @@ def _int_tuple(value: Any) -> tuple[int, ...]:
 
 
 def nafnet_adapter(image: np.ndarray, config: Mapping[str, Any], context: AdapterContext) -> np.ndarray:
-    model = NAFNet(
-        width=int(config.get("width", 32)),
-        enc_blocks=_int_tuple(config.get("enc_blocks", [1, 1, 1, 28])),
-        middle_blocks=int(config.get("middle_blocks", 1)),
-        dec_blocks=_int_tuple(config.get("dec_blocks", [1, 1, 1, 1])),
-    )
-    load_checkpoint(model, context, "nafnet_paired")
+    model = context.extras.get("loaded_model")
+    if model is None:
+        model = NAFNet(
+            width=int(config.get("width", 32)),
+            enc_blocks=_int_tuple(config.get("enc_blocks", [1, 1, 1, 28])),
+            middle_blocks=int(config.get("middle_blocks", 1)),
+            dec_blocks=_int_tuple(config.get("dec_blocks", [1, 1, 1, 1])),
+        )
+        load_checkpoint(model, context, "nafnet_paired")
+        context.extras["loaded_model"] = model
     return tiled_forward(model, image, context)

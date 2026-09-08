@@ -9,6 +9,7 @@ from scipy.ndimage import (
     distance_transform_edt,
     label as connected_components,
     uniform_filter,
+    laplace,
 )
 
 
@@ -99,6 +100,26 @@ def reference_edge_mae(prediction: np.ndarray, target: np.ndarray) -> float:
         return np.sqrt(gx * gx + gy * gy)
 
     return float(np.mean(np.abs(magnitude(prediction) - magnitude(target))))
+
+
+def laplacian_mae(prediction: np.ndarray, target: np.ndarray) -> float:
+    """Absolute second-derivative error against the paired clean reference."""
+    return float(np.mean(np.abs(laplace(prediction.astype(np.float64)) - laplace(target.astype(np.float64)))))
+
+
+def high_frequency_energy_ratio(prediction: np.ndarray, target: np.ndarray) -> float:
+    predicted = float(np.mean(laplace(prediction.astype(np.float64)) ** 2))
+    reference = float(np.mean(laplace(target.astype(np.float64)) ** 2))
+    return predicted / max(reference, 1e-12)
+
+
+def spectral_distance(prediction: np.ndarray, target: np.ndarray) -> float:
+    """RMS distance between normalized log-power spectra."""
+    def spectrum(image: np.ndarray) -> np.ndarray:
+        power = np.abs(np.fft.fftshift(np.fft.fft2(image.astype(np.float64)))) ** 2
+        value = np.log1p(power)
+        return value / max(float(np.linalg.norm(value)), 1e-12)
+    return float(np.sqrt(np.mean((spectrum(prediction) - spectrum(target)) ** 2)))
 
 
 def otsu_threshold(image: np.ndarray, bins: int = 256) -> float:

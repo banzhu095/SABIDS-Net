@@ -90,48 +90,210 @@ def _candidate_grid(method: str) -> list[dict[str, Any]]:
     if method == "bm3d_standard": return [{"method_id": method, "sigma_psd": value, "profile": "standard", "stage": "all"} for value in (0.02, 0.04, 0.06, 0.08, 0.12)]
     if method == "tv_chambolle": return [{"method_id": method, "weight": weight, "eps": eps, "max_num_iter": iterations} for weight in (0.01, 0.03, 0.06, 0.12, 0.24) for eps in (0.0001, 0.0002) for iterations in (100, 300)]
     if method == "nlm": return [{"method_id": method, "h_sigma_multiplier": h, "patch_size": patch, "patch_distance": distance, "fast_mode": True, "provide_sigma": provide} for h in (0.5, 0.8, 1.1, 1.5) for patch in (3, 5, 7) for distance in (3, 6, 10) for provide in (True, False)]
-    if method == "ksvd_self": return [{"method_id": method, "patch_size": patch, "dictionary_atoms": atoms, "iterations": iterations, "omp_max_nonzero": sparsity, "stride": stride, "noise_weight": 1.0, "aggregation_weight": 1.0, "max_training_patches": 2000} for patch in (5, 7) for atoms in (32, 64) for iterations in (3, 5) for sparsity in (3, 5) for stride in (2, 3)]
+    if method == "ksvd_self":
+        base = {"method_id": method, "patch_size": 7, "dictionary_atoms": 64, "iterations": 5, "omp_max_nonzero": 4, "omp_residual_threshold": 0.0, "stride": 6, "noise_weight": 1.0, "aggregation_weight": 1.0, "max_training_patches": 2000}
+        # A deterministic fractional grid varies every required dimension while
+        # avoiding the prohibitive 2^7 full Cartesian product.
+        variants = [
+            {}, {"patch_size": 5}, {"dictionary_atoms": 32}, {"dictionary_atoms": 96},
+            {"iterations": 3}, {"iterations": 7}, {"omp_max_nonzero": 3},
+            {"omp_max_nonzero": 5}, {"noise_weight": 0.6}, {"noise_weight": 0.8},
+            {"stride": 4}, {"stride": 8}, {"aggregation_weight": 0.0},
+            {"aggregation_weight": 3.0},
+        ]
+        return [{**base, **variant} for variant in variants]
     raise ValueError(method)
 
 
-def calibrate(project_root: Path, run_dir: Path, methods: list[str], limit_frames_per_position: int | None = None) -> None:
-    val = development_rows(load_protocol_manifest(project_root), "val").sort_values(["position_id", "frame_id"])
-    if limit_frames_per_position: val = val.groupby("position_id", as_index=False, group_keys=False).head(limit_frames_per_position)
-    all_rows, selected = [], {}
+def _position_macro_candidates(rows: list[dict[str, Any]]) -> pd.DataFrame:
+    frame = pd.DataFrame(rows)
+    positions = frame.groupby(["candidate_uid", "candidate_json", "position_id"], as_index=False).agg(
+        psnr=("psnr", "mean"), ssim=("ssim", "mean"), samples=("sample_id", "nunique")
+    )
+    return positions.groupby(["candidate_uid", "candidate_json"], as_index=False).agg(
+        position_macro_psnr=("psnr", "mean"), position_macro_ssim=("ssim", "mean"),
+        positions=("position_id", "nunique"), samples=("samples", "sum")
+    )
+
+
+def _complete_summary(rows: list[dict[str, Any]], expected_rows: pd.DataFrame) -> pd.DataFrame:
+    summary = _position_macro_candidates(rows)
+    complete = summary[(summary.positions == expected_rows.position_id.nunique()) & (summary.samples == expected_rows.sample_id.nunique())]
+    if complete.empty:
+        raise RuntimeError("no calibration candidate completed every registered validation sample")
+    return complete
+
+
+def _select_candidate(summary: pd.DataFrame, tolerance: float = 1e-4) -> pd.Series:
+    best_psnr = float(summary["position_macro_psnr"].max())
+    tied = summary[summary["position_macro_psnr"] >= best_psnr - tolerance]
+    return tied.sort_values(["position_macro_ssim", "position_macro_psnr", "candidate_uid"], ascending=[False, False, True]).iloc[0]
+
+
+def _numeric_boundaries(best: dict[str, Any], evaluated: list[dict[str, Any]], keys: list[str]) -> list[str]:
+    boundaries = []
+    for key in keys:
+        values = sorted({config[key] for config in evaluated if key in config})
+        if values and best.get(key) in {values[0], values[-1]}:
+            boundaries.append(key)
+    return boundaries
+
+
+def _expand_non_bm3d(method: str, best: dict[str, Any], evaluated: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[str]]:
+    keys = ["weight", "eps", "max_num_iter"] if method == "tv_chambolle" else ["h_sigma_multiplier", "patch_size", "patch_distance"]
+    boundaries = _numeric_boundaries(best, evaluated, keys)
+    proposals: dict[str, list[Any]] = {}
+    if method == "tv_chambolle":
+        ranges = {key: sorted({config[key] for config in evaluated}) for key in keys}
+        if "weight" in boundaries:
+            value = float(best["weight"]); proposals["weight"] = ([max(value / 2, 0.001)] if value == ranges["weight"][0] else [min(value * 1.5, 1.0), min(value * 2, 1.0)])
+        if "eps" in boundaries:
+            value = float(best["eps"]); proposals["eps"] = ([max(value / 2, 1e-6), max(value / 5, 1e-6)] if value == ranges["eps"][0] else [min(value * 2, 0.01)])
+        if "max_num_iter" in boundaries:
+            value = int(best["max_num_iter"]); proposals["max_num_iter"] = ([max(value // 2, 20)] if value == ranges["max_num_iter"][0] else [min(value * 2, 1000)])
+    elif method == "nlm":
+        ranges = {key: sorted({config[key] for config in evaluated}) for key in keys}
+        if "h_sigma_multiplier" in boundaries:
+            value = float(best["h_sigma_multiplier"]); proposals["h_sigma_multiplier"] = ([max(value / 2, 0.1)] if value == ranges["h_sigma_multiplier"][0] else [min(value * 1.5, 5.0), min(value * 2, 5.0)])
+        if "patch_size" in boundaries:
+            value = int(best["patch_size"]); proposals["patch_size"] = ([max(value - 2, 1)] if value == ranges["patch_size"][0] else [min(value + 2, 15)])
+        if "patch_distance" in boundaries:
+            value = int(best["patch_distance"]); proposals["patch_distance"] = ([max(value // 2, 1)] if value == ranges["patch_distance"][0] else [min(round(value * 1.5), 30), min(value * 2, 30)])
+    seen = {stable_sha256(config) for config in evaluated}
+    expanded = []
+    for key, values in proposals.items():
+        for value in values:
+            candidate = dict(best); candidate[key] = value
+            if stable_sha256(candidate) not in seen:
+                expanded.append(candidate); seen.add(stable_sha256(candidate))
+    return expanded, boundaries
+
+
+def _evaluate_candidates(method: str, candidates: list[dict[str, Any]], rows: pd.DataFrame, search_round: int, phase: str, partial_path: Path | None = None) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    total = len(candidates) * len(rows)
+    completed = 0
+    existing = pd.read_csv(partial_path) if partial_path and partial_path.is_file() else pd.DataFrame()
+
+    def flush() -> None:
+        if partial_path is None or not results:
+            return
+        partial_path.parent.mkdir(parents=True, exist_ok=True)
+        combined = pd.concat([existing, pd.DataFrame(results)], ignore_index=True) if not existing.empty else pd.DataFrame(results)
+        combined = combined.drop_duplicates(["method_id", "search_phase", "search_round", "candidate_uid", "sample_id"], keep="last")
+        temporary = partial_path.with_suffix(partial_path.suffix + ".tmp")
+        combined.to_csv(temporary, index=False)
+        temporary.replace(partial_path)
+
+    for candidate_index, config in enumerate(candidates):
+        candidate_json = json.dumps(config, sort_keys=True)
+        candidate_uid = stable_sha256(config)[:16]
+        for row in rows.itertuples():
+            if not existing.empty:
+                match = existing[
+                    (existing.method_id == method) & (existing.search_phase == phase)
+                    & (existing.search_round == search_round) & (existing.candidate_uid == candidate_uid)
+                    & (existing.sample_id.astype(str) == str(row.sample_id)) & (existing.status == "success")
+                ]
+                if not match.empty:
+                    results.append(match.iloc[-1].to_dict()); completed += 1
+                    continue
+            record = {"method_id": method, "search_phase": phase, "search_round": search_round,
+                      "candidate_index": candidate_index, "candidate_uid": candidate_uid,
+                      "candidate_json": candidate_json, "position_id": row.position_id,
+                      "sample_id": row.sample_id}
+            try:
+                noisy, _ = read_image(Path(row.image_path)); reference, _ = read_image(Path(row.clean_path))
+                started = time.perf_counter(); output = denoise(noisy, config, AdapterContext(seed=42)); elapsed = time.perf_counter() - started
+                metrics = compute_metrics(noisy, reference, output, elapsed)
+                results.append({**record, "status": "success", "error": "", **metrics})
+            except Exception as exc:
+                results.append({**record, "status": "failed", "error": f"{type(exc).__name__}: {exc}"})
+            completed += 1
+            if completed % 20 == 0 or completed == total:
+                flush()
+                print(f"calibrate {method}/{phase}: {completed}/{total}", flush=True)
+    flush()
+    return [record for record in results if record.get("status") == "success"]
+
+
+def calibrate(project_root: Path, run_dir: Path, methods: list[str], limit_frames_per_position: int | None = None, ksvd_coarse_frames_per_position: int = 2, ksvd_top_candidates: int = 4, psnr_tolerance: float = 1e-4) -> None:
+    full_val = development_rows(load_protocol_manifest(project_root), "val").sort_values(["position_id", "frame_id"])
+    val = full_val.groupby("position_id", as_index=False, group_keys=False).head(limit_frames_per_position) if limit_frames_per_position else full_val
+    all_rows: list[dict[str, Any]] = []
+    selected: dict[str, dict[str, Any]] = {}
+    partial_name = "parameter_search_smoke_partial.csv" if limit_frames_per_position else "parameter_search_partial.csv"
+    partial_path = run_dir / "metrics" / partial_name
     for method in methods:
         candidates = _candidate_grid(method)
-        round_index = 0
-        while True:
-            round_rows = []
-            for candidate_index, config in enumerate(candidates):
-                for row in val.itertuples():
-                    noisy, _ = read_image(Path(row.image_path)); reference, _ = read_image(Path(row.clean_path))
-                    started = time.perf_counter(); output = denoise(noisy, config, AdapterContext(seed=42)); elapsed = time.perf_counter() - started
-                    metrics = compute_metrics(noisy, reference, output, elapsed)
-                    round_rows.append({"method_id": method, "search_round": round_index, "candidate_index": candidate_index, "candidate_json": json.dumps(config, sort_keys=True), "position_id": row.position_id, "sample_id": row.sample_id, **metrics})
-            all_rows.extend(round_rows)
-            summary = pd.DataFrame(round_rows).groupby(["candidate_index", "candidate_json"], as_index=False)[["psnr", "ssim"]].mean()
-            summary = summary.sort_values(["psnr", "ssim"], ascending=False); best = summary.iloc[0]; best_config = json.loads(best.candidate_json)
-            boundary = False; stop_reason = "best_candidate_interior_or_nonadaptive_grid"
-            if method == "bm3d_standard":
-                sigmas = sorted(config["sigma_psd"] for config in candidates); best_sigma = best_config["sigma_psd"]
-                boundary = best_sigma in {sigmas[0], sigmas[-1]}
-                if boundary and round_index < 3:
-                    if best_sigma == sigmas[-1] and best_sigma < 0.4: new_values = [best_sigma, min(best_sigma * 1.5, 0.4), min(best_sigma * 2, 0.4)]
-                    elif best_sigma == sigmas[0] and best_sigma > 0.002: new_values = [max(best_sigma / 2, 0.002), max(best_sigma * 0.75, 0.002), best_sigma]
-                    else: new_values = []
-                    new_values = sorted(set(new_values) - set(sigmas))
-                    if new_values:
-                        candidates = [{"method_id": method, "sigma_psd": value, "profile": "standard", "stage": "all"} for value in new_values]
-                        round_index += 1; continue
-                    stop_reason = "scientific_sigma_limit_reached"
-                elif boundary: stop_reason = "maximum_adaptive_rounds_reached"
-                else: stop_reason = "best_sigma_interior"
-            best_config["selection_rule"] = "PKU37 validation position-macro PSNR; SSIM tie-break"
-            best_config["search_stop_reason"] = stop_reason
-            selected[method] = best_config; break
+        if method == "ksvd_self" and not limit_frames_per_position:
+            coarse_parts = []
+            for _, group in full_val.groupby("position_id", sort=True):
+                indices = np.linspace(0, len(group) - 1, min(ksvd_coarse_frames_per_position, len(group)), dtype=int)
+                coarse_parts.append(group.iloc[indices])
+            coarse = pd.concat(coarse_parts, ignore_index=True)
+            coarse_rows = _evaluate_candidates(method, candidates, coarse, 0, "coarse_equal_frames_per_position", partial_path)
+            all_rows.extend(coarse_rows)
+            coarse_summary = _complete_summary(coarse_rows, coarse).sort_values(["position_macro_psnr", "position_macro_ssim"], ascending=False)
+            top_json = coarse_summary.head(ksvd_top_candidates)["candidate_json"]
+            finalists = [json.loads(value) for value in top_json]
+            final_rows = _evaluate_candidates(method, finalists, full_val, 1, "full_validation_reevaluation", partial_path)
+            all_rows.extend(final_rows)
+            best = _select_candidate(_complete_summary(final_rows, full_val), psnr_tolerance)
+            best_config = json.loads(best.candidate_json)
+            stop_reason = f"two_stage_search_top_{len(finalists)}_fully_reevaluated"
+            selection_evaluated = candidates
+        else:
+            method_rows: list[dict[str, Any]] = []
+            round_index = 0
+            evaluated_sigmas: set[float] = set()
+            while True:
+                round_rows = _evaluate_candidates(method, candidates, val, round_index, "full_validation" if not limit_frames_per_position else "smoke_subset", partial_path)
+                method_rows.extend(round_rows); all_rows.extend(round_rows)
+                summary = _complete_summary(method_rows, val)
+                best = _select_candidate(summary, psnr_tolerance); best_config = json.loads(best.candidate_json)
+                stop_reason = "nonadaptive_grid_complete"
+                evaluated_configs = [json.loads(value) for value in summary["candidate_json"]]
+                if method in {"tv_chambolle", "nlm"}:
+                    expanded, boundaries = _expand_non_bm3d(method, best_config, evaluated_configs)
+                    if not boundaries:
+                        stop_reason = "best_numeric_parameters_interior"; break
+                    if expanded and round_index < 3:
+                        candidates = expanded; round_index += 1; continue
+                    stop_reason = "maximum_adaptive_rounds_or_scientific_limit_reached"
+                    break
+                if method != "bm3d_standard":
+                    break
+                evaluated_sigmas.update(float(json.loads(value)["sigma_psd"]) for value in summary["candidate_json"])
+                best_sigma = float(best_config["sigma_psd"]); low, high = min(evaluated_sigmas), max(evaluated_sigmas)
+                if best_sigma not in {low, high}:
+                    stop_reason = "best_sigma_interior"; break
+                if round_index >= 3:
+                    stop_reason = "maximum_adaptive_rounds_reached"; break
+                if best_sigma == high and high < 0.4:
+                    new_values = [min(high * 1.5, 0.4), min(high * 2.0, 0.4)]
+                elif best_sigma == low and low > 0.002:
+                    new_values = [max(low / 2.0, 0.002), max(low * 0.75, 0.002)]
+                else:
+                    new_values = []
+                new_values = sorted(set(new_values) - evaluated_sigmas)
+                if not new_values:
+                    stop_reason = "scientific_sigma_limit_reached"; break
+                candidates = [{"method_id": method, "sigma_psd": value, "profile": "standard", "stage": "all"} for value in new_values]
+                round_index += 1
+            selection_evaluated = [json.loads(value) for value in summary["candidate_json"]]
+        parameter_values = {key: sorted({config.get(key) for config in selection_evaluated if key in config}) for key in selection_evaluated[0] if key != "method_id"}
+        boundary = {key: best_config.get(key) in {values[0], values[-1]} for key, values in parameter_values.items() if values and isinstance(values[0], (int, float)) and not isinstance(values[0], bool)}
+        best_config.update({
+            "selection_rule": f"PKU37 validation frame-to-position macro PSNR; SSIM tie-break within {psnr_tolerance} dB",
+            "search_stop_reason": stop_reason, "boundary_parameters": [key for key, value in boundary.items() if value],
+        })
+        selected[method] = best_config
         result_name = "parameter_search_smoke_results.csv" if limit_frames_per_position else "parameter_search_results.csv"
-        pd.DataFrame(all_rows).to_csv(run_dir / "metrics" / result_name, index=False)
+        if partial_path.is_file():
+            pd.read_csv(partial_path).to_csv(run_dir / "metrics" / result_name, index=False)
+        else:
+            pd.DataFrame(all_rows).to_csv(run_dir / "metrics" / result_name, index=False)
     if limit_frames_per_position:
         save_yaml(run_dir / "configs" / "calibration_smoke_selected.yaml", {
             "status": "smoke_only_not_locked",
@@ -149,13 +311,15 @@ def main(argv: Sequence[str] | None = None) -> None:
     for name in ("init", "audit", "smoke", "calibrate", "lock"):
         p = sub.add_parser(name); p.add_argument("--project-root", type=Path, default=Path(".")); p.add_argument("--run-dir", type=Path)
         if name == "smoke": p.add_argument("--methods", nargs="+", default=list(_smoke_configs()))
-        if name == "calibrate": p.add_argument("--methods", nargs="+", default=["bm3d_standard", "tv_chambolle", "nlm", "ksvd_self"]); p.add_argument("--limit-frames-per-position", type=int)
+        if name == "calibrate":
+            p.add_argument("--methods", nargs="+", default=["bm3d_standard", "tv_chambolle", "nlm", "ksvd_self"]); p.add_argument("--limit-frames-per-position", type=int)
+            p.add_argument("--ksvd-coarse-frames-per-position", type=int, default=2); p.add_argument("--ksvd-top-candidates", type=int, default=4); p.add_argument("--psnr-tolerance", type=float, default=1e-4)
     args = parser.parse_args(argv); run = args.run_dir
     if args.command == "init": print(create_run(args.project_root, run)); return
     if run is None: parser.error("--run-dir is required")
     if args.command == "audit": print(json.dumps(audit(args.project_root, run), ensure_ascii=False)); return
     if args.command == "smoke": print(smoke(args.project_root, run, args.methods).to_string(index=False)); return
-    if args.command == "calibrate": calibrate(args.project_root, run, args.methods, args.limit_frames_per_position); return
+    if args.command == "calibrate": calibrate(args.project_root, run, args.methods, args.limit_frames_per_position, args.ksvd_coarse_frames_per_position, args.ksvd_top_candidates, args.psnr_tolerance); return
     if args.command == "lock": print(json.dumps(lock_run(args.project_root, run), indent=2)); return
 
 

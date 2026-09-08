@@ -39,7 +39,7 @@ const overview = [
   ["项目", "值"],
   ["实验", "SABIDS-Net OCT 降噪比较"],
   ["运行标识", path.basename(runDir)],
-  ["当前状态", "工程 smoke 已完成；正式校准、三种子训练和封存测试未完成"],
+  ["当前状态", "工程 smoke 与 PKU37 validation identity 277 帧重算已完成；正式校准、三种子训练和封存测试未完成"],
   ["数据协议", "PKU37 train/validation/test=25/6/6 positions；Duke17/28 全量 external test"],
   ["统计", "frame→position→dataset；bootstrap 10,000，seed=42"],
   ["重要限制", "本机无 CUDA；禁止把 smoke checkpoint 或 validation-only noisy baseline 当论文结果"],
@@ -54,11 +54,13 @@ const specs = [
   ["说明", overview], ["指标定义", definitions], ["数据审计", await csv("audit/dataset_inventory.csv")],
   ["方法来源", await csv("audit/method_inventory.csv")], ["验收", await csv("audit/acceptance_checks.csv")],
   ["数据集结果", await csv("metrics/per_dataset_metrics.csv")], ["逐位置结果", await csv("metrics/per_position_metrics.csv")],
-  ["逐图结果", await csv("metrics/per_image_metrics.csv")], ["配对差值", await csv("metrics/paired_method_differences.csv")],
+  ["逐图结果", await csv("metrics/per_image_metrics.csv")], ["逐种子结果", await csv("metrics/per_seed_metrics.csv")],
+  ["配对差值", await csv("metrics/paired_method_differences.csv")],
   ["置信区间", await csv("metrics/bootstrap_confidence_intervals.csv")], ["参数搜索", await csv("metrics/parameter_search_results.csv")],
   ["参数选择", await csv("metrics/selected_parameters.csv")], ["Checkpoint", await csv("metrics/checkpoint_inventory.csv")],
   ["训练曲线", await csv("metrics/training_curves.csv")], ["运行时间", await csv("metrics/runtime_summary.csv")],
-  ["模型复杂度", await csv("metrics/model_complexity.csv")], ["失败记录", await csv("failures.csv")],
+  ["模型复杂度", await csv("metrics/model_complexity.csv")], ["图册登记", await csv("audit/fixed_atlas_selection.csv")],
+  ["资产清单", await csv("metrics/asset_inventory.csv")], ["失败记录", await csv("failures.csv")],
 ];
 
 const workbook = Workbook.create();

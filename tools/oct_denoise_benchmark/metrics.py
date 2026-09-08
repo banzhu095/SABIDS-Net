@@ -6,7 +6,6 @@ from typing import Any
 import numpy as np
 from scipy.ndimage import gaussian_filter, laplace, sobel
 from skimage.metrics import peak_signal_noise_ratio, structural_similarity
-from skimage.transform import resize
 
 
 def _ssim(a: np.ndarray, b: np.ndarray) -> float:
@@ -16,19 +15,31 @@ def _ssim(a: np.ndarray, b: np.ndarray) -> float:
 
 
 def ms_ssim(output: np.ndarray, reference: np.ndarray, levels: int = 5) -> float:
+    """Wang et al. multi-scale SSIM with Gaussian local statistics."""
     weights = np.array([0.0448, 0.2856, 0.3001, 0.2363, 0.1333], dtype=np.float64)[:levels]
-    weights /= weights.sum()
-    values = []
     left, right = output.astype(np.float64), reference.astype(np.float64)
-    for _ in range(levels):
-        if min(left.shape) < 7:
+    contrast_structure: list[float] = []
+    scale_ssim: list[float] = []
+    c1, c2 = 0.01**2, 0.03**2
+    for level in range(levels):
+        mu_left = gaussian_filter(left, 1.5, mode="reflect", truncate=3.5)
+        mu_right = gaussian_filter(right, 1.5, mode="reflect", truncate=3.5)
+        sigma_left = gaussian_filter(left * left, 1.5, mode="reflect", truncate=3.5) - mu_left * mu_left
+        sigma_right = gaussian_filter(right * right, 1.5, mode="reflect", truncate=3.5) - mu_right * mu_right
+        covariance = gaussian_filter(left * right, 1.5, mode="reflect", truncate=3.5) - mu_left * mu_right
+        cs_map = (2 * covariance + c2) / (sigma_left + sigma_right + c2)
+        ssim_map = ((2 * mu_left * mu_right + c1) / (mu_left * mu_left + mu_right * mu_right + c1)) * cs_map
+        contrast_structure.append(max(float(cs_map.mean()), 1e-8))
+        scale_ssim.append(max(float(ssim_map.mean()), 1e-8))
+        if level == levels - 1 or min(left.shape) < 16:
             break
-        values.append(max(_ssim(left, right), 1e-8))
-        new_shape = (max(left.shape[0] // 2, 3), max(left.shape[1] // 2, 3))
-        left = resize(left, new_shape, order=1, anti_aliasing=True, preserve_range=True)
-        right = resize(right, new_shape, order=1, anti_aliasing=True, preserve_range=True)
-    local_weights = weights[:len(values)]; local_weights /= local_weights.sum()
-    return float(np.prod(np.power(values, local_weights)))
+        left = gaussian_filter(left, 1.0, mode="reflect")[::2, ::2]
+        right = gaussian_filter(right, 1.0, mode="reflect")[::2, ::2]
+    used = len(scale_ssim)
+    local_weights = weights[:used]; local_weights /= local_weights.sum()
+    if used == 1:
+        return scale_ssim[0]
+    return float(np.prod(np.power(contrast_structure[:-1], local_weights[:-1])) * scale_ssim[-1] ** local_weights[-1])
 
 
 def _gradient(image: np.ndarray) -> np.ndarray:

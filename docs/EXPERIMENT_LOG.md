@@ -667,14 +667,50 @@ Populate one row per independent fold after validation threshold selection.
   values are engineering smoke only.
 - Unified inference passed for all seven methods on one image and for five
   recursively discovered folder images. Full PKU37 validation identity
-  evaluation completed (277 frames; position-macro PSNR 19.8215, SSIM 0.1776,
-  MS-SSIM 0.6410).
+  evaluation completed (277 frames; position-macro PSNR 19.8215, SSIM 0.1776).
+  On 2026-09-08 it was recomputed with the corrected Wang-style MS-SSIM
+  implementation, giving MS-SSIM 0.7264.
 - The local host has PyTorch 2.8.0 CPU only and Python 3.9.13 (below the
   declared >=3.10). Therefore complete validation calibration, three-seed GPU
   training, configuration/checkpoint lock, PKU37 test and Duke external tests
   were intentionally not run. The registry remains unlocked and no formal
   result or method ranking is claimed.
-- Full repository test suite passed: 98 tests. The generated workbook passed
+- Full repository test suite passed. The generated workbook passed
   formula-error scanning and rendered-sheet review. The final GPT-light ZIP
   passed CRC and per-file SHA256 verification and contains no raw data or
   checkpoint weights.
+
+# 2026-09-08 — Denoising benchmark continuation (still pre-lock)
+
+- Added resumable classical calibration. Every 20 candidate-image evaluations
+  are atomically checkpointed to a partial CSV; reruns skip only successful
+  rows with the same candidate hash, phase, round and sample. Candidates with
+  incomplete validation coverage are ineligible for selection.
+- Replaced the impractical Cartesian K-SVD grid with a deterministic fractional
+  grid that still varies patch size, atom count, iteration count, OMP
+  sparsity, noise strength, stride and overlap aggregation. Noise strength now
+  interpolates between the noisy and sparse patch, and aggregation uses
+  reconstruction-error reliability weights, so both registered parameters
+  materially affect output.
+- Added primary-seed marking and a separate
+  `denoised_dataset_manifest_primary.csv`; non-primary deep seeds remain
+  available only for denoising stability analysis.
+- Preregistered all required fixed-atlas roles using only noisy images,
+  deterministic ordering, manual anatomy masks and a traceable pre-existing
+  SABIDS D0 asset. A new fail-closed materializer will read reference/output
+  images and create error/residual/crop sheets only after `config_lock` is
+  formally locked.
+- Recomputed all 277 PKU37 validation identity rows with the corrected
+  MS-SSIM, normalized empty checkpoint hashes before de-duplication, and
+  confirmed 277 metric rows map to 277 primary-manifest rows. Test and Duke
+  references remain unopened.
+- The full repository pytest run passed. The refreshed 20-sheet workbook was
+  rendered sheet-by-sheet and its formula-error scan returned zero matches.
+  Formal validation calibration, three-seed RTX 3090 training, locking and
+  sealed evaluation remain pending on ModelWhale.
+- Formal-run bookkeeping was also hardened: best-PSNR and its SSIM tie-break
+  now remain a paired checkpoint state with the selected optimizer update;
+  finalization records deep selections; recursive checkpoint/curve discovery
+  includes formal seed directories; and runtime plus asset inventories merge
+  across the separate sealed-test and train/validation evaluation commands
+  instead of being overwritten by the second command.

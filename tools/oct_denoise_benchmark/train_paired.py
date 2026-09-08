@@ -88,13 +88,26 @@ def train(args: argparse.Namespace) -> Path:
     model = build_model(args.method, config).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate, betas=(0.9, 0.9 if args.method == "nafnet_paired" else 0.999), weight_decay=args.weight_decay)
     scaler = torch.amp.GradScaler("cuda", enabled=args.amp and device.type == "cuda")
-    start_update, best_psnr, best_ssim, stale = 0, -float("inf"), -float("inf"), 0
+    start_update, best_psnr, best_ssim, best_update, stale = 0, -float("inf"), -float("inf"), 0, 0
     last_path = output / "last.pth"
+    curve_path = output / "training_curves.csv"
+    curves = pd.read_csv(curve_path).to_dict("records") if args.resume and curve_path.exists() else []
     if args.resume and last_path.exists():
         state = torch.load(last_path, map_location=device, weights_only=False)
+        prior = state.get("config", {})
+        immutable = ("method", "seed", "patch_size", "depth", "features", "width", "enc_blocks", "middle_blocks", "dec_blocks", "accumulation_steps")
+        changed = {key: (prior.get(key), config.get(key)) for key in immutable if prior.get(key) != config.get(key)}
+        if changed:
+            raise ValueError(f"resume configuration mismatch: {changed}")
         model.load_state_dict(state["model"]); optimizer.load_state_dict(state["optimizer"])
-        start_update, best_psnr, best_ssim = state["update"], state["best_psnr"], state["best_ssim"]
-    curves = []
+        if "scaler" in state: scaler.load_state_dict(state["scaler"])
+        start_update, best_psnr, best_ssim, stale = state["update"], state["best_psnr"], state["best_ssim"], state.get("stale", 0)
+        best_update = int(state.get("best_update", state.get("update", 0)))
+        if "python_random_state" in state: random.setstate(state["python_random_state"])
+        if "numpy_random_state" in state: np.random.set_state(state["numpy_random_state"])
+        if "torch_rng_state" in state: torch.set_rng_state(state["torch_rng_state"])
+        if torch.cuda.is_available() and state.get("cuda_rng_state_all"): torch.cuda.set_rng_state_all(state["cuda_rng_state_all"])
+        if "sampler_rng_state" in state: sampler.rng.bit_generator.state = state["sampler_rng_state"]
     optimizer.zero_grad(set_to_none=True)
     for update in range(start_update + 1, args.max_updates + 1):
         model.train(); total_loss = 0.0; sampled = defaultdict(int)
@@ -117,23 +130,33 @@ def train(args: argparse.Namespace) -> Path:
             psnr, ssim = _validation(model, val_rows, device, args.validation_frames_per_position)
             curves.append({"method_id": args.method, "seed": args.seed, "optimizer_update": update, "train_loss": total_loss, "val_position_macro_psnr": psnr, "val_position_macro_ssim": ssim})
             improved = psnr > best_psnr + args.psnr_tolerance or (abs(psnr - best_psnr) <= args.psnr_tolerance and ssim > best_ssim)
-            state = {"architecture": args.method, "model": model.state_dict(), "optimizer": optimizer.state_dict(), "update": update, "best_psnr": max(best_psnr, psnr), "best_ssim": max(best_ssim, ssim), "config": config, "manifest_sha256": sha256_file(args.manifest or root / "Manifests" / "manifest_denoise.csv")}
-            torch.save(state, last_path)
+            state = {
+                "architecture": args.method, "model": model.state_dict(), "optimizer": optimizer.state_dict(), "scaler": scaler.state_dict(),
+                "update": update, "best_psnr": best_psnr, "best_ssim": best_ssim, "best_update": best_update, "stale": stale,
+                "config": config, "manifest_sha256": sha256_file(args.manifest or root / "Manifests" / "manifest_denoise.csv"),
+                "python_random_state": random.getstate(), "numpy_random_state": np.random.get_state(), "torch_rng_state": torch.get_rng_state(),
+                "cuda_rng_state_all": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else [], "sampler_rng_state": sampler.rng.bit_generator.state,
+            }
             if improved:
-                best_psnr, best_ssim, stale = psnr, ssim, 0
-                state["best_psnr"], state["best_ssim"] = best_psnr, best_ssim
+                best_psnr, best_ssim, best_update, stale = psnr, ssim, update, 0
+                state["best_psnr"], state["best_ssim"], state["best_update"] = best_psnr, best_ssim, best_update
                 torch.save(state, output / "best_psnr.pth")
             else:
                 stale += 1
+            state["stale"] = stale
+            torch.save(state, last_path)
             if ssim >= max((row["val_position_macro_ssim"] for row in curves), default=-1):
                 torch.save(state, output / "best_ssim.pth")
-            pd.DataFrame(curves).to_csv(output / "training_curves.csv", index=False)
+            pd.DataFrame(curves).to_csv(curve_path, index=False)
             print(json.dumps(curves[-1]), flush=True)
             if stale >= args.early_stopping_patience:
                 break
     inventory = []
     for checkpoint in output.glob("*.pth"):
-        inventory.append({"method_id": args.method, "seed": args.seed, "checkpoint": str(checkpoint), "sha256": sha256_file(checkpoint), "bytes": checkpoint.stat().st_size})
+        metadata = torch.load(checkpoint, map_location="cpu", weights_only=False)
+        inventory.append({"method_id": args.method, "seed": args.seed, "checkpoint": str(checkpoint), "sha256": sha256_file(checkpoint), "bytes": checkpoint.stat().st_size,
+                          "optimizer_update": metadata.get("update"), "selected_best_update": metadata.get("best_update"),
+                          "selected_val_position_macro_psnr": metadata.get("best_psnr"), "selected_val_position_macro_ssim": metadata.get("best_ssim")})
     pd.DataFrame(inventory).to_csv(output / "checkpoint_inventory.csv", index=False)
     return output
 

@@ -41,6 +41,7 @@ class OCTManifestDataset(Dataset):
         datasets: Optional[List[str]] = None,
         groups: Optional[List[str]] = None,
         image_column: str = "image_path",
+        guidance_mapping: Optional[str | Path] = None,
     ) -> None:
         self.manifest = Path(manifest).expanduser().resolve()
         self.root = Path(root).expanduser().resolve() if root else self.manifest.parent
@@ -64,6 +65,25 @@ class OCTManifestDataset(Dataset):
         self.group_to_indices: Dict[str, List[int]] = {}
         for index, group_id in enumerate(self.table["group_id"].astype(str)):
             self.group_to_indices.setdefault(group_id, []).append(index)
+        self.guidance_indices: Dict[int, int] = {}
+        if guidance_mapping:
+            mapping_path = Path(guidance_mapping)
+            if not mapping_path.is_absolute():
+                mapping_path = (self.root / mapping_path).resolve()
+            mapping = pd.read_csv(mapping_path, dtype=str).fillna("")
+            if not {"sample_id", "guidance_sample_id"}.issubset(mapping.columns):
+                raise ValueError("Guidance mapping needs sample_id,guidance_sample_id")
+            by_id = {str(value): index for index, value in enumerate(self.table["sample_id"])}
+            groups_by_id = dict(zip(self.table["sample_id"].astype(str), self.table["group_id"].astype(str)))
+            for item in mapping.itertuples(index=False):
+                sample_id, guidance_id = str(item.sample_id), str(item.guidance_sample_id)
+                if sample_id not in by_id or guidance_id not in by_id:
+                    continue
+                if sample_id == guidance_id or groups_by_id[sample_id] == groups_by_id[guidance_id]:
+                    raise ValueError(f"Invalid self/same-position guidance mapping: {sample_id}->{guidance_id}")
+                self.guidance_indices[by_id[sample_id]] = by_id[guidance_id]
+            if len(self.guidance_indices) != len(self.table):
+                raise ValueError("Guidance mapping does not cover the selected split")
 
     def __len__(self) -> int:
         return len(self.table)
@@ -96,9 +116,11 @@ class OCTManifestDataset(Dataset):
         group_id = str(row["group_id"])
         repeat_index, has_repeat = self._repeat_index(index, group_id)
         repeat_row = self.table.iloc[repeat_index]
+        guidance_row = self.table.iloc[self.guidance_indices.get(index, index)]
 
         image = self._load_optional(row[self.image_column])
         repeat = self._load_optional(repeat_row[self.image_column])
+        interaction_guidance = self._load_optional(guidance_row[self.image_column])
         if image is None or repeat is None:
             raise RuntimeError(f"Missing required image for sample {row['sample_id']}")
         original_height, original_width = image.shape[-2:]
@@ -133,7 +155,7 @@ class OCTManifestDataset(Dataset):
             not self.transform.strong_private_only or not has_clean
         )
         transformed = self.transform(
-            arrays={"image": image, "repeat": repeat, "clean": clean},
+            arrays={"image": image, "repeat": repeat, "clean": clean, "interaction_guidance": interaction_guidance},
             masks={
                 "layer_mask": layer,
                 "vessel_mask": vessel,
@@ -151,6 +173,7 @@ class OCTManifestDataset(Dataset):
             "image_weak": transformed["image_weak"],
             "repeat": transformed["repeat"],
             "repeat_weak": transformed["repeat_weak"],
+            "interaction_guidance": transformed["interaction_guidance"],
             "clean": transformed.get("clean", zeros.clone()),
             "layer_mask": transformed.get("layer_mask", zeros.clone()),
             "vessel_mask": transformed.get("vessel_mask", zeros.clone()),

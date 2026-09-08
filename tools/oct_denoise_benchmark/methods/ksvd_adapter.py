@@ -111,16 +111,23 @@ def ksvd_adapter(image: np.ndarray, config: Mapping[str, Any], context: AdapterC
     else:
         train_indices = np.arange(centered.shape[1])
     dictionary = _dct_dictionary(patch, atoms)
-    dictionary, _ = _ksvd(centered[:, train_indices], dictionary, iterations, sparsity, threshold * noise_weight, rng)
-    codes = omp(dictionary, centered, sparsity, threshold * noise_weight)
-    reconstructed = dictionary @ codes + means
+    dictionary, _ = _ksvd(centered[:, train_indices], dictionary, iterations, sparsity, threshold, rng)
+    codes = omp(dictionary, centered, sparsity, threshold)
+    sparse_centered = dictionary @ codes
+    # ``noise_weight`` is the registered denoising strength.  Zero reproduces
+    # the noisy patches and one uses the complete sparse reconstruction.
+    reconstructed = centered + noise_weight * (sparse_centered - centered) + means
+    patch_reliability = 1.0 / (
+        1.0 + aggregation_weight * np.mean((patches - reconstructed) ** 2, axis=0)
+    )
     output = np.zeros_like(image, dtype=np.float64)
     weights = np.zeros_like(image, dtype=np.float64)
     index = 0
     for y in ys:
         for x in xs:
-            output[y:y + patch, x:x + patch] += aggregation_weight * reconstructed[:, index].reshape(patch, patch)
-            weights[y:y + patch, x:x + patch] += aggregation_weight
+            weight = float(patch_reliability[index])
+            output[y:y + patch, x:x + patch] += weight * reconstructed[:, index].reshape(patch, patch)
+            weights[y:y + patch, x:x + patch] += weight
             index += 1
     if np.any(weights <= 0):
         raise RuntimeError("K-SVD patch reconstruction left uncovered pixels")

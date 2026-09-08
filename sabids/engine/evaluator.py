@@ -15,6 +15,9 @@ from ..metrics import (
     binary_metrics,
     edge_preservation_index,
     reference_edge_mae,
+    laplacian_mae,
+    high_frequency_energy_ratio,
+    spectral_distance,
     layer_boundary_mae,
     layer_shape_metrics,
     psnr,
@@ -75,12 +78,27 @@ def evaluate_model(
 
     for batch in tqdm(loader, desc="Evaluating", leave=False):
         image = batch["image"].to(device, non_blocking=True)
-        output = model(
-            image, return_features=False, return_auxiliary=False
+        output = (
+            model.forward_denoise_only(image)
+            if stage == "denoise"
+            else model(
+                image,
+                return_features=False,
+                return_auxiliary=False,
+                interaction_guidance_image=batch.get("interaction_guidance", batch["image"]).to(device, non_blocking=True),
+            )
         )
         denoised = output["denoised"].cpu().numpy()
-        layer_probability = output["layer_prob"].cpu().numpy()
-        vessel_probability = output["vessel_prob"].cpu().numpy()
+        layer_probability = (
+            output["layer_prob"].cpu().numpy()
+            if evaluate_segmentation
+            else np.zeros_like(denoised)
+        )
+        vessel_probability = (
+            output["vessel_prob"].cpu().numpy()
+            if evaluate_segmentation
+            else np.zeros_like(denoised)
+        )
         batch_size = image.shape[0]
         for index in range(batch_size):
             target = None
@@ -170,12 +188,15 @@ def evaluate_model(
                 target = restored(batch["clean"][index, 0].numpy()[crop])
                 denoised_crop, noisy_crop = denoised_eval, noisy_eval
                 row["psnr"] = psnr(denoised_crop[valid_eval], target[valid_eval])
+                row["full_psnr"] = row["psnr"]
                 row["psnr_noisy"] = psnr(noisy_crop[valid_eval], target[valid_eval])
                 row["psnr_gain_db"] = row["psnr"] - row["psnr_noisy"]
                 row["ssim"] = ssim(denoised_crop, target)
+                row["full_ssim"] = row["ssim"]
                 row["ssim_noisy"] = ssim(noisy_crop, target)
                 row["ssim_gain"] = row["ssim"] - row["ssim_noisy"]
                 row["rmse"] = rmse(denoised_crop, target)
+                row["full_rmse"] = row["rmse"]
                 row["rmse_noisy"] = rmse(noisy_crop, target)
                 row["rmse_reduction"] = row["rmse_noisy"] - row["rmse"]
                 row["mse"] = float(np.mean((denoised_crop[valid_eval].astype(np.float64) - target[valid_eval]) ** 2))
@@ -192,6 +213,12 @@ def evaluate_model(
                 row["reference_edge_mae_reduction"] = (
                     row["reference_edge_mae_noisy"] - row["reference_edge_mae"]
                 )
+                row["laplacian_mae"] = laplacian_mae(denoised_crop, target)
+                row["laplacian_mae_noisy"] = laplacian_mae(noisy_crop, target)
+                row["high_frequency_energy_ratio"] = high_frequency_energy_ratio(denoised_crop, target)
+                row["high_frequency_energy_ratio_noisy"] = high_frequency_energy_ratio(noisy_crop, target)
+                row["spectral_distance"] = spectral_distance(denoised_crop, target)
+                row["spectral_distance_noisy"] = spectral_distance(noisy_crop, target)
                 row["snr_noisy_db"] = reconstruction_snr(noisy_crop, target)
                 row["snr_denoised_db"] = reconstruction_snr(denoised_crop, target)
                 row["snr_gain_db"] = row["snr_denoised_db"] - row["snr_noisy_db"]
@@ -209,7 +236,19 @@ def evaluate_model(
                         row["layer_roi_mse"] = float(np.mean((denoised_eval[roi] - target[roi]) ** 2))
                         row["layer_roi_mse_noisy"] = float(np.mean((noisy_eval[roi] - target[roi]) ** 2))
                         row["layer_roi_psnr"] = psnr(denoised_eval[roi], target[roi])
+                        row["gt_layer_roi_psnr"] = row["layer_roi_psnr"]
                         row["layer_roi_psnr_noisy"] = psnr(noisy_eval[roi], target[roi])
+                        row["layer_roi_rmse"] = rmse(denoised_eval[roi], target[roi])
+                        row["gt_layer_roi_rmse"] = row["layer_roi_rmse"]
+                        row["layer_roi_rmse_noisy"] = rmse(noisy_eval[roi], target[roi])
+                        # SSIM needs a rectangular field.  Mask outside the fixed
+                        # GT-layer ROI with the clean reference so it contributes
+                        # zero structural error in every model.
+                        roi_denoised = target.copy(); roi_denoised[roi] = denoised_eval[roi]
+                        roi_noisy = target.copy(); roi_noisy[roi] = noisy_eval[roi]
+                        row["layer_roi_ssim"] = ssim(roi_denoised, target)
+                        row["gt_layer_roi_ssim"] = row["layer_roi_ssim"]
+                        row["layer_roi_ssim_noisy"] = ssim(roi_noisy, target)
                 if evaluate_layer:
                     layer_pred_metric = layer_pred & layer_valid_eval
                     for key, value in binary_metrics(layer_pred[layer_valid_eval], layer_true[layer_valid_eval]).items():
@@ -391,7 +430,7 @@ def evaluate_model(
                         layer_error[layer_fn] = (0.0, 0.35, 1.0)
                         write_rgb(sample_dir / f"{sample_id}_layer_error_tp_fp_fn.png", layer_error)
                         layer_overlay = np.repeat(noisy_eval[..., None], 3, axis=2)
-                        layer_overlay[layer_pred] = 0.55 * layer_overlay[layer_pred] + 0.45 * np.array((0.0, 1.0, 0.0))
+                        layer_overlay[layer_pred] = 0.70 * layer_overlay[layer_pred] + 0.30 * np.array((0.0, 1.0, 0.0))
                         write_rgb(sample_dir / f"{sample_id}_layer_overlay.png", layer_overlay)
                     if bool(batch["has_vessel"][index]):
                         write_gray(
@@ -404,7 +443,7 @@ def evaluate_model(
                         vessel_error[vessel_fn] = (0.0, 0.35, 1.0)
                         write_rgb(sample_dir / f"{sample_id}_vessel_error_tp_fp_fn.png", vessel_error)
                         vessel_overlay = np.repeat(noisy_eval[..., None], 3, axis=2)
-                        vessel_overlay[vessel_pred] = 0.55 * vessel_overlay[vessel_pred] + 0.45 * np.array((1.0, 0.55, 0.0))
+                        vessel_overlay[vessel_pred] = 0.70 * vessel_overlay[vessel_pred] + 0.30 * np.array((1.0, 0.0, 0.0))
                         write_rgb(sample_dir / f"{sample_id}_vessel_overlay.png", vessel_overlay)
                     diagnostic_maps = {
                         "vessel_tp": vessel_tp,

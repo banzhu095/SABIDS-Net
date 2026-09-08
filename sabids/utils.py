@@ -65,6 +65,7 @@ def save_checkpoint(
     config: Dict[str, Any],
     scaler: Optional[Any] = None,
     ema_state: Optional[Dict[str, Any]] = None,
+    extra_state: Optional[Dict[str, Any]] = None,
 ) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -78,6 +79,8 @@ def save_checkpoint(
         "ema": ema_state,
         "config": config,
     }
+    if extra_state:
+        state.update(extra_state)
     torch.save(state, path)
 
 
@@ -90,7 +93,7 @@ def load_checkpoint(
     strict: bool = True,
     map_location: str | torch.device = "cpu",
 ) -> Dict[str, Any]:
-    checkpoint = torch.load(path, map_location=map_location)
+    checkpoint = torch.load(path, map_location=map_location, weights_only=False)
     state_dict = checkpoint.get("model", checkpoint)
     model.load_state_dict(state_dict, strict=strict)
     if optimizer is not None and checkpoint.get("optimizer") is not None:

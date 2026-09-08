@@ -11,9 +11,12 @@ from typing import Sequence
 
 import numpy as np
 import pandas as pd
+import cv2
+from PIL import Image
 
 from .data import load_protocol_manifest
 from .io import read_image, sha256_file
+from .registry import load_yaml
 
 
 REQUIRED_CSV = {
@@ -40,13 +43,13 @@ def _ensure_result_tables(run_dir: Path) -> None:
         destination = run_dir / name if name == "failures.csv" else metrics / name
         if not destination.exists(): pd.DataFrame(columns=columns).to_csv(destination, index=False)
     curves = []; checkpoints = []
-    for path in (run_dir / "checkpoints").glob("smoke_*_seed*/training_curves.csv"):
+    for path in (run_dir / "checkpoints").glob("**/training_curves.csv"):
         frame = pd.read_csv(path)
         frame["source_run"] = path.parent.name
-        frame["status"] = "invalid_smoke_loss_sign" if path.parent.name == "smoke_nafnet_seed42" else "smoke_only"
+        frame["status"] = "invalid_smoke_loss_sign" if path.parent.name == "smoke_nafnet_seed42" else ("smoke_only" if "smoke_" in path.as_posix() else "formal_training")
         curves.append(frame)
-    for path in (run_dir / "checkpoints").glob("smoke_*_seed*/checkpoint_inventory.csv"):
-        frame = pd.read_csv(path); frame["status"] = "smoke_only_not_formal"; checkpoints.append(frame)
+    for path in (run_dir / "checkpoints").glob("**/checkpoint_inventory.csv"):
+        frame = pd.read_csv(path); frame["status"] = "smoke_only_not_formal" if "smoke_" in path.as_posix() else "formal_checkpoint"; checkpoints.append(frame)
     if curves: pd.concat(curves, ignore_index=True).to_csv(metrics / "training_curves.csv", index=False)
     if checkpoints: pd.concat(checkpoints, ignore_index=True).to_csv(metrics / "checkpoint_inventory.csv", index=False)
 
@@ -56,16 +59,144 @@ def select_fixed_atlas(project_root: Path, run_dir: Path) -> pd.DataFrame:
     selected = []
     pku = table[(table.dataset == "PKU37") & (table.split == "test")]
     for position, rows in pku.groupby("position_id", sort=True):
-        row = rows.sort_values(["frame_id", "sample_id"]).iloc[len(rows) // 2]
+        row = rows.sort_values(["frame_index", "sample_id"]).iloc[len(rows) // 2]
         selected.append(row)
     for dataset in ("Duke17", "Duke28"):
         rows = table[table.dataset == dataset].sort_values("sample_id").reset_index(drop=True)
         for index in np.linspace(0, len(rows) - 1, 6, dtype=int): selected.append(rows.iloc[index])
     records = []
+    selected_rows = []
     for row in selected:
         image, metadata = read_image(Path(row.image_path)); h, w = image.shape
-        records.append({"dataset": row.dataset, "split": "test" if row.dataset == "PKU37" else "external_test", "position_id": row.position_id, "sample_id": row.sample_id, "selection_rule": "middle_frame_per_PKU_test_position" if row.dataset == "PKU37" else "six_evenly_spaced_sorted_cases", "selected_without_method_metrics": True, "detail_crop_x": w // 4, "detail_crop_y": h // 3, "detail_crop_width": w // 4, "detail_crop_height": h // 4, "lower_crop_x": w // 4, "lower_crop_y": h // 2, "lower_crop_width": w // 2, "lower_crop_height": h // 4, "limitation": "Deterministic geometry-based crops; no unified ROI was used and no anatomy claim is attached to these coordinates."})
+        residual = image - cv2.GaussianBlur(image, (0, 0), 1.0)
+        contrast = float(np.percentile(image, 95) - np.percentile(image, 5))
+        quality_proxy = contrast / (float(np.median(np.abs(residual))) + 1e-8)
+        record = {"dataset": row.dataset, "split": "test" if row.dataset == "PKU37" else "external_test", "position_id": row.position_id, "sample_id": row.sample_id,
+                  "atlas_role": "pku_test_position" if row.dataset == "PKU37" else "external_fixed_case",
+                  "selection_rule": "middle_frame_per_PKU_test_position" if row.dataset == "PKU37" else "six_evenly_spaced_sorted_cases",
+                  "criterion_score": np.nan, "selected_without_method_metrics": True,
+                  "noisy_sha256": sha256_file(Path(row.image_path)),
+                  "detail_crop_x": w // 4, "detail_crop_y": h // 3, "detail_crop_width": w // 4, "detail_crop_height": h // 4,
+                  "lower_crop_x": w // 4, "lower_crop_y": h // 2, "lower_crop_width": w // 2, "lower_crop_height": h // 4,
+                  "limitation": "Deterministic preregistration; benchmark outputs and clean/reference metrics were not inspected."}
+        records.append(record); selected_rows.append((row, image, quality_proxy, record))
+
+    # Low-quality selection uses a noisy-only contrast-to-high-frequency proxy.
+    row, _, score, base = min(selected_rows, key=lambda item: item[2])
+    records.append({**base, "atlas_role": "low_quality_noisy", "selection_rule": "minimum_noisy_only_robust_contrast_to_high_frequency_proxy", "criterion_score": score})
+
+    labelled = pku[pku.has_manual_label.astype(bool)].groupby("position_id", sort=True).first().reset_index()
+    anatomy = []
+    for row in labelled.itertuples():
+        label_path = Path(row.multiclass_label_path)
+        if not label_path.is_absolute(): label_path = project_root / label_path
+        raw = np.asarray(Image.open(label_path))
+        noisy, _ = read_image(Path(row.image_path))
+        if raw is None or raw.shape != noisy.shape: continue
+        layer, vessel = np.isin(raw, (1, 2)), raw == 2
+        lower = []
+        for x in range(raw.shape[1]):
+            ys = np.flatnonzero(layer[:, x])
+            if ys.size and ys[-1] > 0: lower.append((ys[-1], x))
+        boundary_score = float(np.mean([abs(float(noisy[y, x]) - float(noisy[y - 1, x])) for y, x in lower])) if lower else np.inf
+        anatomy.append((row, noisy, vessel, boundary_score, float(vessel.mean())))
+    if anatomy:
+        weak = min(anatomy, key=lambda item: item[3])
+        rich = max(anatomy, key=lambda item: item[4])
+        for role, item, rule, score in (
+            ("weak_layer_boundary", weak, "minimum_noisy_intensity_step_along_manual_lower_layer_boundary", weak[3]),
+            ("small_vessel_rich", rich, "maximum_manual_vessel_pixel_fraction_among_labelled_PKU_test_positions", rich[4]),
+        ):
+            row, noisy, vessel, _, _ = item; h, w = noisy.shape
+            ys, xs = np.nonzero(vessel)
+            cx = int(np.median(xs)) if len(xs) else w // 2; cy = int(np.median(ys)) if len(ys) else h // 2
+            records.append({"dataset": row.dataset, "split": "test", "position_id": row.position_id, "sample_id": row.sample_id,
+                            "atlas_role": role, "selection_rule": rule, "criterion_score": score,
+                            "selected_without_method_metrics": True, "noisy_sha256": sha256_file(Path(row.image_path)),
+                            "detail_crop_x": max(0, min(cx - w // 8, 3 * w // 4)), "detail_crop_y": max(0, min(cy - h // 8, 3 * h // 4)),
+                            "detail_crop_width": w // 4, "detail_crop_height": h // 4,
+                            "lower_crop_x": w // 4, "lower_crop_y": h // 2, "lower_crop_width": w // 2, "lower_crop_height": h // 4,
+                            "limitation": "Manual anatomy mask was used only to preregister the display case/crop; no benchmark output or clean/reference metric was inspected."})
+
+    # A traceable pre-existing SABIDS denoising asset supplies the requested D0
+    # case; this is not selected from any method in the new benchmark.
+    d0_asset = project_root / "runs" / "stage_summary_20260901_121853" / "atlas" / "stage2_e3b_postprocess" / "pku_0006_f01_denoised.png"
+    d0_row = pku[pku.sample_id == "pku_0006_f01"]
+    if d0_asset.is_file() and not d0_row.empty:
+        row = d0_row.iloc[0]; noisy, _ = read_image(Path(row.image_path)); h, w = noisy.shape
+        records.append({"dataset": "PKU37", "split": "test", "position_id": row.position_id, "sample_id": row.sample_id,
+                        "atlas_role": "sabids_d0_oversmoothing_candidate", "selection_rule": "traceable_preexisting_SABIDS_D0_atlas_asset",
+                        "criterion_score": np.nan, "selected_without_method_metrics": True, "noisy_sha256": sha256_file(Path(row.image_path)),
+                        "detail_crop_x": w // 4, "detail_crop_y": h // 3, "detail_crop_width": w // 4, "detail_crop_height": h // 4,
+                        "lower_crop_x": w // 4, "lower_crop_y": h // 2, "lower_crop_width": w // 2, "lower_crop_height": h // 4,
+                        "limitation": f"Candidate anchored to prior asset {d0_asset}; over-smoothing label requires human confirmation and did not use new benchmark metrics."})
     result = pd.DataFrame(records); result.to_csv(run_dir / "audit" / "fixed_atlas_selection.csv", index=False); return result
+
+
+def _write_montage(path: Path, rows: list[list[tuple[str, np.ndarray]]], cell_width: int = 240) -> None:
+    rendered = []
+    for row in rows:
+        cells = []
+        for label, image in row:
+            values = np.clip(image, 0, 1)
+            h, w = values.shape
+            resized = cv2.resize(values, (cell_width, max(1, round(h * cell_width / w))), interpolation=cv2.INTER_AREA)
+            canvas = np.round(resized * 255).astype(np.uint8)
+            canvas = cv2.cvtColor(canvas, cv2.COLOR_GRAY2BGR)
+            cv2.putText(canvas, label, (6, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (0, 255, 255), 1, cv2.LINE_AA)
+            cells.append(canvas)
+        target_h = max(cell.shape[0] for cell in cells)
+        cells = [cv2.copyMakeBorder(cell, 0, target_h - cell.shape[0], 0, 0, cv2.BORDER_CONSTANT) for cell in cells]
+        rendered.append(np.hstack(cells))
+    target_w = max(row.shape[1] for row in rendered)
+    rendered = [cv2.copyMakeBorder(row, 0, 0, 0, target_w - row.shape[1], cv2.BORDER_CONSTANT) for row in rendered]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    ok, encoded = cv2.imencode(".jpg", np.vstack(rendered), [cv2.IMWRITE_JPEG_QUALITY, 92])
+    if not ok: raise RuntimeError(f"cannot encode atlas montage {path}")
+    encoded.tofile(str(path))
+
+
+def materialize_fixed_atlas(project_root: Path, run_dir: Path, selection: pd.DataFrame) -> dict[str, object]:
+    """Create display-only atlas sheets, but never open sealed references before lock."""
+    lock_path = run_dir / "audit" / "config_lock.json"
+    status_path = run_dir / "audit" / "fixed_atlas_materialization.json"
+    if not lock_path.is_file() or json.loads(lock_path.read_text(encoding="utf-8")).get("status") != "locked":
+        status = {"status": "not_materialized_test_sealed", "sheets": 0}
+        status_path.write_text(json.dumps(status, indent=2), encoding="utf-8"); return status
+    metrics_path = run_dir / "metrics" / "per_image_metrics.csv"
+    if not metrics_path.is_file():
+        status = {"status": "not_materialized_metrics_missing", "sheets": 0}
+        status_path.write_text(json.dumps(status, indent=2), encoding="utf-8"); return status
+    metrics = pd.read_csv(metrics_path)
+    registry = load_yaml(run_dir / "configs" / "inference_registry.yaml")
+    primary_seeds = {method: int(entry.get("seed", 0)) for method, entry in registry.get("methods", {}).items()}
+    methods = [method for method in ("noisy_identity", "bm3d_standard", "tv_chambolle", "nlm", "ksvd_self", "dncnn_paired", "nafnet_paired") if method in primary_seeds]
+    manifest = load_protocol_manifest(project_root).set_index("sample_id")
+    sheets = []
+    for item in selection.itertuples():
+        if item.sample_id not in manifest.index: continue
+        source = manifest.loc[item.sample_id]
+        noisy, _ = read_image(Path(source.image_path)); reference, _ = read_image(Path(source.clean_path))
+        images: list[tuple[str, np.ndarray]] = [("noisy", noisy), ("reference", reference)]
+        complete = True
+        for method in methods:
+            subset = metrics[(metrics.sample_id.astype(str) == str(item.sample_id)) & (metrics.method_id == method) & (metrics.seed == primary_seeds[method]) & (metrics.status == "success")]
+            if subset.empty or not Path(subset.iloc[-1].denoised_path).is_file(): complete = False; break
+            output, _ = read_image(Path(subset.iloc[-1].denoised_path)); images.append((method, output))
+        if not complete: continue
+        errors = [("", np.zeros_like(noisy)), ("absolute error", np.zeros_like(noisy))] + [(name, np.abs(image - reference)) for name, image in images[2:]]
+        residuals = [("", np.zeros_like(noisy)), ("residual x2", np.zeros_like(noisy))] + [(name, np.clip(0.5 + 2.0 * (noisy - image), 0, 1)) for name, image in images[2:]]
+        role = str(item.atlas_role); stem = f"{role}__{item.sample_id}"
+        full_path = run_dir / "previews" / "fixed_atlas" / f"{stem}__full.jpg"
+        _write_montage(full_path, [images, errors, residuals])
+        x, y, w, h = int(item.detail_crop_x), int(item.detail_crop_y), int(item.detail_crop_width), int(item.detail_crop_height)
+        lx, ly, lw, lh = int(item.lower_crop_x), int(item.lower_crop_y), int(item.lower_crop_width), int(item.lower_crop_height)
+        crop_path = run_dir / "previews" / "fixed_atlas" / f"{stem}__crops.jpg"
+        _write_montage(crop_path, [[(name, image[y:y+h, x:x+w]) for name, image in images], [(name, image[ly:ly+lh, lx:lx+lw]) for name, image in images]])
+        sheets.extend([str(full_path), str(crop_path)])
+    status = {"status": "materialized" if sheets else "not_materialized_outputs_incomplete", "sheets": len(sheets),
+              "display_note": "JPEG sheets are qualitative previews. Absolute error uses [0,1]; signed noisy-output residual is centered at 0.5 and amplified 2x. Metrics use original float outputs."}
+    status_path.write_text(json.dumps(status, indent=2, ensure_ascii=False), encoding="utf-8"); return status
 
 
 def write_report(project_root: Path, run_dir: Path) -> None:
@@ -111,9 +242,12 @@ def write_inference_commands(run_dir: Path) -> None:
 
 
 def package(project_root: Path, run_dir: Path) -> Path:
-    _ensure_result_tables(run_dir); select_fixed_atlas(project_root, run_dir); write_report(project_root, run_dir); write_inference_commands(run_dir)
-    stage = run_dir / "gpt_light"; stage.mkdir(exist_ok=True)
-    include = [run_dir / "metrics", run_dir / "audit", run_dir / "configs", run_dir / "reports", run_dir / "manifests", run_dir / "previews" / "smoke", run_dir / "benchmark_summary.xlsx", project_root / "configs" / "dncnn_paired.yaml", project_root / "configs" / "nafnet_paired.yaml", project_root / "tools" / "oct_denoise_benchmark", project_root / "tests" / "test_denoise_protocol_v1.py", project_root / "docs" / "EXPERIMENT_LOG.md"]
+    _ensure_result_tables(run_dir); selection = select_fixed_atlas(project_root, run_dir); materialize_fixed_atlas(project_root, run_dir, selection); write_report(project_root, run_dir); write_inference_commands(run_dir)
+    stage = (run_dir / "gpt_light").resolve()
+    if stage.parent != run_dir.resolve(): raise RuntimeError("unsafe GPT-light staging path")
+    if stage.exists(): shutil.rmtree(stage)
+    stage.mkdir()
+    include = [run_dir / "metrics", run_dir / "audit", run_dir / "configs", run_dir / "reports", run_dir / "manifests", run_dir / "previews" / "smoke", run_dir / "previews" / "fixed_atlas", run_dir / "benchmark_summary.xlsx", project_root / "configs" / "dncnn_paired.yaml", project_root / "configs" / "nafnet_paired.yaml", project_root / "tools" / "oct_denoise_benchmark", project_root / "tests" / "test_denoise_protocol_v1.py", project_root / "docs" / "EXPERIMENT_LOG.md"]
     for source in include:
         if not source.exists(): continue
         if source.is_dir():

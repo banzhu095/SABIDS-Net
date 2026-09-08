@@ -41,12 +41,23 @@ def lock_run(project_root: Path, run_dir: Path, test_started: bool = False) -> d
     registry = load_yaml(registry_path) if registry_path.exists() else {}
     checkpoints = {}
     for method, entry in registry.get("methods", {}).items():
-        checkpoint = entry.get("checkpoint")
-        if checkpoint:
+        candidates = []
+        if entry.get("checkpoint"):
+            candidates.append({"seed": entry.get("seed"), "checkpoint": entry["checkpoint"]})
+        candidates.extend(entry.get("evaluation_checkpoints", []))
+        seen = set()
+        inventory = []
+        for candidate in candidates:
+            checkpoint = candidate.get("checkpoint")
             resolved = Path(checkpoint)
             if not resolved.is_absolute():
                 resolved = (project_root / resolved).resolve()
-            checkpoints[method] = {"path": str(resolved), "sha256": sha256_file(resolved) if resolved.is_file() else "missing"}
+            key = (candidate.get("seed"), str(resolved))
+            if key not in seen:
+                inventory.append({"seed": candidate.get("seed"), "path": str(resolved), "sha256": sha256_file(resolved) if resolved.is_file() else "missing"})
+                seen.add(key)
+        if inventory:
+            checkpoints[method] = inventory
     now = datetime.now(timezone.utc).isoformat()
     value = {
         "status": "locked",

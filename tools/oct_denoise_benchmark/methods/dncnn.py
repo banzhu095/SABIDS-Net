@@ -23,6 +23,9 @@ class DnCNN(nn.Module):
 
 
 def dncnn_adapter(image: np.ndarray, config: Mapping[str, Any], context: AdapterContext) -> np.ndarray:
-    model = DnCNN(depth=int(config.get("depth", 17)), features=int(config.get("features", 64)))
-    load_checkpoint(model, context, "dncnn_paired")
+    model = context.extras.get("loaded_model")
+    if model is None:
+        model = DnCNN(depth=int(config.get("depth", 17)), features=int(config.get("features", 64)))
+        load_checkpoint(model, context, "dncnn_paired")
+        context.extras["loaded_model"] = model
     return tiled_forward(model, image, context)

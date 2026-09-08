@@ -8,6 +8,7 @@ from typing import Any, Iterable, Sequence
 
 import cv2
 import numpy as np
+import torch
 
 from .io import read_image, save_image
 from .methods import AdapterContext, denoise
@@ -51,6 +52,7 @@ def run(args: argparse.Namespace) -> list[dict[str, Any]]:
     if not files:
         raise FileNotFoundError(f"no supported images under {input_root}")
     rows = []
+    context_cache: dict[str, AdapterContext] = {}
     for source in files:
         image, metadata = read_image(source)
         relative = source.relative_to(input_root) if input_root.is_dir() and args.preserve_relative_path else Path(source.name)
@@ -64,7 +66,7 @@ def run(args: argparse.Namespace) -> list[dict[str, Any]]:
             if method in {"dncnn_paired", "nafnet_paired"} and not checkpoint:
                 raise ValueError(f"{method} has no locked checkpoint; random weights are forbidden")
             checkpoint_path = Path(checkpoint).resolve() if checkpoint else None
-            context = AdapterContext(device=args.device, checkpoint=checkpoint_path, tile_size=args.tile_size, tile_overlap=args.tile_overlap, seed=int(entry.get("seed", 42)))
+            context = context_cache.setdefault(method, AdapterContext(device=args.device, checkpoint=checkpoint_path, tile_size=args.tile_size, tile_overlap=args.tile_overlap, seed=int(entry.get("seed", 42))))
             destination_root = args.output / method if args.method == "all" else args.output
             destination = destination_root / relative
             if destination.suffix.lower() not in {".png", ".tif", ".tiff"}:
@@ -72,8 +74,10 @@ def run(args: argparse.Namespace) -> list[dict[str, Any]]:
             if destination.exists() and not args.overwrite:
                 rows.append({"input": str(source), "method_id": method, "output": str(destination), "status": "skipped_exists"})
                 continue
+            if args.device.startswith("cuda") and torch.cuda.is_available(): torch.cuda.synchronize(torch.device(args.device))
             started = time.perf_counter()
             output = denoise(image, config, context)
+            if args.device.startswith("cuda") and torch.cuda.is_available(): torch.cuda.synchronize(torch.device(args.device))
             elapsed = time.perf_counter() - started
             save_image(destination, output, metadata, args.preserve_bit_depth)
             comparisons.append((method, output))

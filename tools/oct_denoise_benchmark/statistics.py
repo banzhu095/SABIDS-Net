@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-from itertools import combinations
-from typing import Iterable
-
 import numpy as np
 import pandas as pd
 
@@ -64,5 +61,28 @@ def bootstrap_confidence_intervals(position: pd.DataFrame, iterations: int = 10_
                 indices = rng.integers(0, len(values), size=(iterations, len(values)))
                 samples = values[indices].mean(axis=1)
                 low, high = np.quantile(samples, [0.025, 0.975])
-            rows.append({"dataset": dataset, "method_id": method, "metric": metric, "n_positions": len(values), "mean": float(values.mean()), "ci95_low": float(low), "ci95_high": float(high), "iterations": iterations, "seed": seed})
+            rows.append({"comparison_type": "method_mean", "dataset": dataset, "baseline_method": "", "method_id": method, "metric": metric, "n_positions": len(values), "mean": float(values.mean()), "ci95_low": float(low), "ci95_high": float(high), "iterations": iterations, "seed": seed})
+    methods = sorted(position["method_id"].unique())
+    requested = [("noisy_identity", method) for method in methods if method != "noisy_identity"]
+    requested += [("bm3d_standard", method) for method in methods if method != "bm3d_standard"]
+    requested += [("nafnet_paired", "dncnn_paired")]
+    for dataset, dataset_rows in position.groupby("dataset"):
+        collapsed = dataset_rows.groupby(["position_id", "method_id"], as_index=False)[metrics].mean(numeric_only=True)
+        for baseline, method in dict.fromkeys(requested):
+            left = collapsed[collapsed.method_id == baseline].set_index("position_id")
+            right = collapsed[collapsed.method_id == method].set_index("position_id")
+            common = left.index.intersection(right.index)
+            if common.empty:
+                continue
+            for metric in metrics:
+                values = (right.loc[common, metric] - left.loc[common, metric]).dropna().to_numpy(float)
+                if not len(values):
+                    continue
+                if len(values) == 1:
+                    low = high = values[0]
+                else:
+                    indices = rng.integers(0, len(values), size=(iterations, len(values)))
+                    samples = values[indices].mean(axis=1)
+                    low, high = np.quantile(samples, [0.025, 0.975])
+                rows.append({"comparison_type": "paired_difference", "dataset": dataset, "baseline_method": baseline, "method_id": method, "metric": metric, "n_positions": len(values), "mean": float(values.mean()), "ci95_low": float(low), "ci95_high": float(high), "iterations": iterations, "seed": seed})
     return pd.DataFrame(rows)

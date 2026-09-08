@@ -12,11 +12,11 @@ const sheets = await workbook.inspect({
   options: { maxResults: 100 },
   maxChars: 12000,
 });
-const macro = await workbook.inspect({
+const datasetResults = await workbook.inspect({
   kind: "table",
-  range: "三数据集宏平均!A1:U7",
+  range: "数据集结果!A1:AK10",
   tableMaxRows: 7,
-  tableMaxCols: 21,
+  tableMaxCols: 37,
   maxChars: 24000,
 });
 const acceptance = await workbook.inspect({
@@ -32,5 +32,6 @@ const errors = await workbook.inspect({
   options: { useRegex: true, maxResults: 200 },
   summary: "post-import formula error scan",
 });
-await fs.writeFile(outputFile, JSON.stringify({ sheets, macro, acceptance, errors }, null, 2), "utf8");
+const atlas = await workbook.inspect({ kind: "table", range: "图册登记!A1:R25", tableMaxRows: 25, tableMaxCols: 18, maxChars: 24000 });
+await fs.writeFile(outputFile, JSON.stringify({ sheets, datasetResults, acceptance, atlas, errors }, null, 2), "utf8");
 console.log(JSON.stringify({ inputFile, outputFile }));

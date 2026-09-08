@@ -36,6 +36,7 @@ from tqdm import tqdm
 from ..data import GroupUniformSampler, OCTManifestDataset, SparseAnnotationSampler
 from ..data.transforms import JointOCTTransform
 from ..losses import SABIDSLoss
+from ..training import PhaseStateMachine
 from ..metrics import binary_metrics, soft_dice_score, vessel_diagnostic_metrics
 from ..models import ModelEMA, SABIDSNet
 from ..utils import (
@@ -47,6 +48,7 @@ from ..utils import (
     seed_everything,
     write_json,
 )
+from ..experiments.protocol_lock import validate_checkpoint_config
 
 
 def _sha256_file(path: Path) -> str:
@@ -110,6 +112,7 @@ def build_loaders(config: Dict) -> tuple[DataLoader, DataLoader, object]:
         datasets=data_cfg.get("train_datasets"),
         groups=data_cfg.get("train_groups"),
         image_column=data_cfg.get("input_column", "image_path"),
+        guidance_mapping=data_cfg.get("guidance_mapping"),
     )
     val_dataset = OCTManifestDataset(
         data_cfg["manifest"],
@@ -120,23 +123,30 @@ def build_loaders(config: Dict) -> tuple[DataLoader, DataLoader, object]:
         datasets=data_cfg.get("val_datasets"),
         groups=data_cfg.get("val_groups"),
         image_column=data_cfg.get("input_column", "image_path"),
+        guidance_mapping=data_cfg.get("guidance_mapping"),
     )
     max_val_samples = data_cfg.get("max_val_samples")
     if max_val_samples is not None:
         count = min(int(max_val_samples), len(val_dataset))
         val_dataset = Subset(val_dataset, range(count))
+    samples_per_epoch = data_cfg.get("samples_per_epoch")
+    if data_cfg.get("max_train_samples") is not None:
+        samples_per_epoch = min(
+            int(data_cfg["max_train_samples"]),
+            int(samples_per_epoch or len(train_dataset)),
+        )
     vessel_fraction = float(data_cfg.get("vessel_oversample_fraction", 0.0) or 0.0)
     if vessel_fraction > 0.0:
         train_sampler = SparseAnnotationSampler(
             train_dataset,
             vessel_fraction=vessel_fraction,
-            samples_per_epoch=data_cfg.get("samples_per_epoch"),
+            samples_per_epoch=samples_per_epoch,
             seed=int(config.get("seed", 42)),
         )
     else:
         train_sampler = GroupUniformSampler(
             train_dataset,
-            samples_per_epoch=data_cfg.get("samples_per_epoch"),
+            samples_per_epoch=samples_per_epoch,
             seed=int(config.get("seed", 42)),
         )
     data_seed = int(config.get("seed", 42)) + 1_000_003
@@ -186,6 +196,7 @@ def build_diagnostic_loader(
             else data_cfg.get("val_groups")
         ),
         image_column=data_cfg.get("input_column", "image_path"),
+        guidance_mapping=data_cfg.get("guidance_mapping"),
     )
     frames_per_group = config["data"].get("train_eval_frames_per_group")
     if split == data_cfg.get("train_split", "train") and frames_per_group is not None:
@@ -331,8 +342,14 @@ class Trainer:
             self.output_dir / "parameter_audit.json",
         )
         epochs = int(config["train"].get("epochs", 100))
+        schedule = config["train"].get("schedule")
+        self.scheduler_step_per_optimizer = schedule in {
+            "order_ds", "order_sd", "order_alt"
+        }
         scheduler_name = str(config["train"].get("scheduler", "cosine"))
         self.scheduler_name = scheduler_name
+        if self.scheduler_step_per_optimizer and scheduler_name == "plateau":
+            raise ValueError("Continuous order schedules require the global-step cosine scheduler")
         if scheduler_name == "plateau":
             self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
                 self.optimizer,
@@ -344,7 +361,18 @@ class Trainer:
         elif scheduler_name == "cosine":
             self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
                 self.optimizer,
-                T_max=max(epochs, 1),
+                T_max=(
+                    max(
+                        epochs
+                        * math.ceil(
+                            len(self.train_loader)
+                            / max(1, int(config["train"].get("gradient_accumulation_steps", 1)))
+                        ),
+                        1,
+                    )
+                    if self.scheduler_step_per_optimizer
+                    else max(epochs, 1)
+                ),
                 eta_min=float(config["train"].get("minimum_learning_rate", 1e-6)),
             )
         else:
@@ -367,6 +395,17 @@ class Trainer:
         self.start_epoch = 0
         self.best_metric = -math.inf
         self.bad_epochs = 0
+        self.phase_machine = (
+            PhaseStateMachine(
+                str(schedule),
+                tuple(int(x) for x in config["train"].get("schedule_epochs", [20, 20, 20])),
+                optimizer_steps_per_epoch=math.ceil(
+                    len(self.train_loader)
+                    / max(1, int(config["train"].get("gradient_accumulation_steps", 1)))
+                ),
+            )
+            if schedule in {"order_ds", "order_sd", "order_alt"} else None
+        )
         self._resume_if_needed()
         self._write_initialization_audit()
         self._denoise_probe_image: Optional[torch.Tensor] = None
@@ -667,7 +706,18 @@ class Trainer:
     def _resume_if_needed(self) -> None:
         resume = self.config["train"].get("resume")
         pretrained = self.config["train"].get("pretrained")
+        expected = self.config.get("runtime", {}).get("active_protocol_lock", {})
+
+        def validate_protocol(checkpoint_path: str, checkpoint: Dict) -> None:
+            effective = {
+                key: expected.get(key, self.config.get(key))
+                for key in ("protocol_id", "data_plan_sha256", "label_inventory_sha256")
+            }
+            validate_checkpoint_config(checkpoint, effective, checkpoint_path)
+
         if resume:
+            raw = torch.load(resume, map_location="cpu", weights_only=False)
+            validate_protocol(str(resume), raw)
             checkpoint = load_checkpoint(
                 resume,
                 self.model,
@@ -679,6 +729,14 @@ class Trainer:
             )
             self.start_epoch = int(checkpoint.get("epoch", -1)) + 1
             self.best_metric = float(checkpoint.get("best_metric", -math.inf))
+            phase_state = checkpoint.get("phase_state") or checkpoint.get("config", {}).get("runtime", {}).get("phase_state")
+            if self.phase_machine is not None and phase_state:
+                self.phase_machine.restore(phase_state)
+                batch_plan_state = phase_state.get("batch_plan_state", {})
+                if batch_plan_state.get("train_loader_generator_state") is not None and self.train_loader.generator is not None:
+                    self.train_loader.generator.set_state(batch_plan_state["train_loader_generator_state"])
+                if batch_plan_state.get("val_loader_generator_state") is not None and self.val_loader.generator is not None:
+                    self.val_loader.generator.set_state(batch_plan_state["val_loader_generator_state"])
             if self.ema is not None:
                 if checkpoint.get("ema") is not None:
                     self.ema.load_state_dict(checkpoint["ema"])
@@ -687,6 +745,8 @@ class Trainer:
                     # teacher from the restored student instead of a random copy.
                     self.ema.load_state_dict(self.model.state_dict())
         elif pretrained:
+            raw = torch.load(pretrained, map_location="cpu", weights_only=False)
+            validate_protocol(str(pretrained), raw)
             load_checkpoint(
                 pretrained,
                 self.model,
@@ -806,6 +866,9 @@ class Trainer:
     def train_epoch(self, epoch: int) -> Dict[str, float]:
         self.model.train()
         self.model.enforce_frozen_eval()
+        if self.phase_machine is not None:
+            self.phase_machine.record_epoch_phase(epoch)
+            PhaseStateMachine.set_trainable(self.model, self.phase_machine.phase(epoch))
         if self.device.type == "cuda":
             torch.cuda.reset_peak_memory_stats(self.device)
         self.train_sampler.set_epoch(epoch)
@@ -816,6 +879,11 @@ class Trainer:
         seen_groups = set()
         layer_supervised_samples = 0
         vessel_supervised_samples = 0
+        shared_encoder_start = {
+            name: parameter.detach().clone()
+            for name, parameter in self.model.named_parameters()
+            if name.startswith(("stem", "encoder_blocks", "downsamples"))
+        }
         d2s_scale_start = {
             name: parameter.detach().clone()
             for name, parameter in self.model.named_parameters()
@@ -854,6 +922,9 @@ class Trainer:
         consecutive_amp_overflows = 0
         minimum_grad_scale = float(self.scaler.get_scale())
         diagnostic_counts = defaultdict(int)
+        shared_gradient_cosines = []
+        shared_denoise_gradient_norms = []
+        shared_segmentation_gradient_norms = []
         accumulation_steps = max(
             1, int(self.config["train"].get("gradient_accumulation_steps", 1))
         )
@@ -868,6 +939,9 @@ class Trainer:
         progress = tqdm(self.train_loader, desc=f"Train {epoch + 1}", leave=False)
         self.optimizer.zero_grad(set_to_none=True)
         for batch_index, batch in enumerate(progress):
+            active_phase = self.phase_machine.phase(epoch, batch_index) if self.phase_machine is not None else self.stage
+            if self.phase_machine is not None and self.phase_machine.schedule == "order_alt":
+                PhaseStateMachine.set_trainable(self.model, active_phase)
             batch = {
                 key: value.to(self.device, non_blocking=True) if torch.is_tensor(value) else value
                 for key, value in batch.items()
@@ -884,18 +958,51 @@ class Trainer:
                 )
                 output = (
                     self.model.forward_denoise_only(batch["image"])
-                    if self.stage == "denoise"
-                    else self.model(batch["image"], detach_cross=detach_cross)
+                    if active_phase == "denoise"
+                    else self.model(
+                        batch["image"],
+                        detach_cross=detach_cross,
+                        interaction_guidance_image=batch.get("interaction_guidance"),
+                    )
                 )
                 losses = self.loss_fn(
                     output,
                     batch,
-                    stage=self.stage,
+                    stage=active_phase,
                     repeat_output=repeat_output,
                     clean_output=clean_output,
                     teacher_output=teacher_output,
                     ramp=ramp,
                 )
+                if self.phase_machine is not None and active_phase == "joint" and batch_index == 0:
+                    shared_parameters = [
+                        parameter
+                        for name, parameter in self.model.named_parameters()
+                        if parameter.requires_grad
+                        and name.startswith(("stem", "encoder_blocks", "downsamples"))
+                    ]
+                    denoise_objective = losses["reconstruction_weighted"] + losses["residual_weighted"]
+                    segmentation_objective = (
+                        losses["layer_weighted"]
+                        + losses["vessel_weighted"]
+                        + losses["vessel_outside_weighted"]
+                        + losses["containment_weighted"]
+                    )
+                    d_grad = torch.autograd.grad(
+                        denoise_objective, shared_parameters, retain_graph=True, allow_unused=True
+                    )
+                    s_grad = torch.autograd.grad(
+                        segmentation_objective, shared_parameters, retain_graph=True, allow_unused=True
+                    )
+                    d_vector = torch.cat([value.reshape(-1) for value in d_grad if value is not None])
+                    s_vector = torch.cat([value.reshape(-1) for value in s_grad if value is not None])
+                    if d_vector.numel() and s_vector.numel():
+                        d_norm = torch.linalg.vector_norm(d_vector)
+                        s_norm = torch.linalg.vector_norm(s_vector)
+                        cosine = torch.dot(d_vector, s_vector) / (d_norm * s_norm + 1e-12)
+                        shared_denoise_gradient_norms.append(float(d_norm.item()))
+                        shared_segmentation_gradient_norms.append(float(s_norm.item()))
+                        shared_gradient_cosines.append(float(cosine.item()))
             if not bool(torch.isfinite(losses["total"])):
                 components = {
                     key: float(value.detach().float().item())
@@ -1082,8 +1189,12 @@ class Trainer:
                 post_clip_gradient_norm_total += float(gradient_norm.detach().item()) * coefficient
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
+                if self.scheduler_step_per_optimizer:
+                    self.scheduler.step()
                 minimum_grad_scale = min(minimum_grad_scale, float(self.scaler.get_scale()))
                 optimizer_steps += 1
+                if self.phase_machine is not None:
+                    self.phase_machine.step()
                 self.optimizer.zero_grad(set_to_none=True)
                 if self.ema is not None:
                     self.ema.update(self.model)
@@ -1101,6 +1212,10 @@ class Trainer:
                     "denoise_to_vessel_injection_relative_rms",
                     "requested_rho",
                     "actual_rho_mean",
+                    "actual_rho_median",
+                    "actual_rho_p95",
+                    "actual_rho_max",
+                    "delta_rms",
                     "layer_scale_abs_mean",
                     "vessel_scale_abs_mean",
                     "seg_scale_abs_mean",
@@ -1177,6 +1292,14 @@ class Trainer:
                 "interaction_scale_weight_decay": float(self.config["train"].get("weight_decay", 0.0)),
                 "amp_overflow_skips": float(amp_overflow_skips),
                 "amp_minimum_grad_scale": float(minimum_grad_scale),
+                "phase_global_step": float(
+                    self.phase_machine.global_step if self.phase_machine is not None else 0
+                ),
+                "shared_denoise_gradient_norm": float(np.mean(shared_denoise_gradient_norms)) if shared_denoise_gradient_norms else 0.0,
+                "shared_segmentation_gradient_norm": float(np.mean(shared_segmentation_gradient_norms)) if shared_segmentation_gradient_norms else 0.0,
+                "shared_gradient_cosine": float(np.mean(shared_gradient_cosines)) if shared_gradient_cosines else 0.0,
+                "shared_negative_cosine_fraction": float(np.mean(np.asarray(shared_gradient_cosines) < 0.0)) if shared_gradient_cosines else 0.0,
+                "shared_gradient_cosine_available": float(bool(shared_gradient_cosines)),
             }
         )
         for group, value in gradient_group_totals.items():
@@ -1205,6 +1328,16 @@ class Trainer:
             ]
             result["s2d_scale_update_abs_mean"] = float(torch.stack(deltas).mean().item())
         named_parameters = dict(self.model.named_parameters())
+        if shared_encoder_start:
+            delta_squared = sum(
+                float((named_parameters[name].detach().float() - initial.float()).square().sum().item())
+                for name, initial in shared_encoder_start.items()
+            )
+            initial_squared = sum(
+                float(initial.float().square().sum().item())
+                for initial in shared_encoder_start.values()
+            )
+            result["encoder_parameter_relative_drift"] = math.sqrt(delta_squared) / max(math.sqrt(initial_squared), 1e-12)
         for direction, starts in (("d2s", d2s_mapping_start), ("s2d", s2d_mapping_start)):
             if starts:
                 deltas = [
@@ -1294,7 +1427,10 @@ class Trainer:
         for batch in tqdm(loader, desc=description, leave=False):
             image = batch["image"].to(self.device, non_blocking=True)
             output = evaluation_model(
-                image, return_features=False, return_auxiliary=False
+                image,
+                return_features=False,
+                return_auxiliary=False,
+                interaction_guidance_image=batch.get("interaction_guidance", batch["image"]).to(self.device, non_blocking=True),
             )
             d2s_disabled_vessel_probability = None
             if bool(self.config["train"].get("monitor_d2s_sensitivity", False)):
@@ -1307,7 +1443,10 @@ class Trainer:
                     for interaction in interactions:
                         interaction.enable_denoise_to_seg = False
                     disabled_output = evaluation_model(
-                        image, return_features=False, return_auxiliary=False
+                        image,
+                        return_features=False,
+                        return_auxiliary=False,
+                        interaction_guidance_image=batch.get("interaction_guidance", batch["image"]).to(self.device, non_blocking=True),
                     )
                     d2s_disabled_vessel_probability = (
                         disabled_output["vessel_prob"].cpu().numpy()
@@ -1473,6 +1612,27 @@ class Trainer:
             f"stopgrad_repeat={self.config['train'].get('stopgrad_repeat_teacher', True)}"
         )
         diagnostics_dir = self.output_dir / "diagnostics"
+
+        def checkpoint_extra(epoch_index: int) -> Dict:
+            if self.phase_machine is None:
+                return {"phase_state": None}
+            state = self.phase_machine.snapshot(epoch_index)
+            state["batch_plan_state"].update({
+                "train_loader_generator_state": (
+                    self.train_loader.generator.get_state()
+                    if self.train_loader.generator is not None else None
+                ),
+                "val_loader_generator_state": (
+                    self.val_loader.generator.get_state()
+                    if self.val_loader.generator is not None else None
+                ),
+            })
+            state["active_parameter_groups"] = [
+                name for name, parameter in self.model.named_parameters()
+                if parameter.requires_grad
+            ]
+            return {"phase_state": state}
+
         if self.start_epoch == 0 and bool(
             self.config["train"].get("evaluate_epoch0", False)
         ):
@@ -1498,6 +1658,7 @@ class Trainer:
                 self.config,
                 self.scaler,
                 self.ema.state_dict() if self.ema is not None else None,
+                checkpoint_extra(-1),
             )
             print(f"Epoch 000 diagnostics: {epoch0}")
         for epoch in range(self.start_epoch, epochs):
@@ -1528,7 +1689,9 @@ class Trainer:
                     f"Validation monitor {monitor!r} is non-finite at epoch "
                     f"{epoch + 1}: {monitored!r}. Metrics={val_metrics}"
                 )
-            if self.scheduler_name == "plateau":
+            if self.scheduler_step_per_optimizer:
+                pass
+            elif self.scheduler_name == "plateau":
                 self.scheduler.step(float(monitored))
             else:
                 self.scheduler.step()
@@ -1542,6 +1705,15 @@ class Trainer:
                 "epoch": epoch + 1,
                 "seconds": round(time.time() - start, 2),
                 "lr": self.optimizer.param_groups[0]["lr"],
+                "training_phase": (
+                    "alternating"
+                    if self.phase_machine is not None
+                    and self.phase_machine.schedule == "order_alt"
+                    and epoch < self.phase_machine.phase_epochs[0]
+                    else self.phase_machine.phase(epoch)
+                    if self.phase_machine is not None
+                    else self.stage
+                ),
                 **{f"train_{k}": v for k, v in train_metrics.items()},
                 **{f"val_{k}": v for k, v in val_metrics.items()},
                 **{
@@ -1550,10 +1722,27 @@ class Trainer:
                 },
             }
             self.csv_logger.log(row)
+            interaction_row = {
+                key: value for key, value in row.items()
+                if key in {"epoch", "training_phase"}
+                or "interaction_" in key
+                or "mapping_" in key
+            }
+            if len(interaction_row) > 2:
+                CSVLogger(self.output_dir / "interaction_strength.csv").log(interaction_row)
+            gradient_row = {
+                key: value for key, value in row.items()
+                if key in {"epoch", "training_phase"}
+                or "gradient_" in key
+                or "parameter_relative_drift" in key
+            }
+            if len(gradient_row) > 2:
+                CSVLogger(self.output_dir / "gradient_audit.csv").log(gradient_row)
             for key, value in row.items():
                 if isinstance(value, (int, float)):
                     self.writer.add_scalar(key, value, epoch + 1)
             ema_state = self.ema.state_dict() if self.ema is not None else None
+            checkpoint_state = checkpoint_extra(epoch)
             save_checkpoint(
                 self.output_dir / "last.pth",
                 self.model,
@@ -1564,6 +1753,7 @@ class Trainer:
                 self.config,
                 self.scaler,
                 ema_state,
+                checkpoint_state,
             )
             if improved:
                 best_path = self.output_dir / "best.pth"
@@ -1577,6 +1767,7 @@ class Trainer:
                     self.config,
                     self.scaler,
                     ema_state,
+                    checkpoint_state,
                 )
                 self._write_run_metadata(epoch + 1, monitor, best_path)
             print(
