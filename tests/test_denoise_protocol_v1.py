@@ -8,6 +8,7 @@ import pytest
 import torch
 
 from tools.oct_denoise_benchmark.data import audit_protocol, load_protocol_manifest
+from tools.oct_denoise_benchmark.evaluate import mark_recovered_failures
 from tools.oct_denoise_benchmark.cli import _candidate_grid, _complete_summary, _evaluate_candidates, _expand_non_bm3d, _position_macro_candidates, _select_candidate
 from tools.oct_denoise_benchmark.metrics import ms_ssim
 from tools.oct_denoise_benchmark.methods import AdapterContext, denoise
@@ -15,6 +16,8 @@ from tools.oct_denoise_benchmark.methods.dncnn import DnCNN
 from tools.oct_denoise_benchmark.methods.ksvd_adapter import _dct_dictionary, _ksvd, omp
 from tools.oct_denoise_benchmark.package_light import materialize_fixed_atlas
 from tools.oct_denoise_benchmark.statistics import bootstrap_confidence_intervals
+from tools.oct_denoise_benchmark.table_store import merge_records
+from tools.oct_denoise_benchmark.train_paired import checkpoint_selection_reason
 
 
 @pytest.mark.parametrize("config", [
@@ -104,6 +107,61 @@ def test_fixed_atlas_materializer_does_not_open_reference_before_lock(tmp_path: 
     monkeypatch.setattr("tools.oct_denoise_benchmark.package_light.read_image", lambda path: pytest.fail("opened sealed image"))
     result = materialize_fixed_atlas(tmp_path, run, pd.DataFrame())
     assert result["status"] == "not_materialized_test_sealed"
+
+
+def test_best_psnr_keeps_same_checkpoint_ssim_and_resume_state(tmp_path: Path):
+    tolerance = 1e-4
+    initial = {"psnr": -float("inf"), "ssim": -float("inf"), "update": 0}
+    epochs = [(10, 30.0, 0.70), (20, 29.0, 0.90)]
+
+    def advance(state, candidates):
+        state = dict(state)
+        for update, psnr, ssim in candidates:
+            reason = checkpoint_selection_reason(state["psnr"], state["ssim"], psnr, ssim, tolerance)
+            if reason:
+                state = {"psnr": psnr, "ssim": ssim, "update": update, "reason": reason}
+        return state
+
+    continuous = advance(initial, epochs)
+    interrupted = advance(initial, epochs[:1])
+    state_path = tmp_path / "selection.pth"; torch.save(interrupted, state_path)
+    resumed = advance(torch.load(state_path, weights_only=False), epochs[1:])
+    assert continuous == resumed
+    assert resumed["update"] == 10 and resumed["psnr"] == 30.0 and resumed["ssim"] == 0.70
+
+
+def test_transactional_result_union_dedup_conflict_nan_and_backup(tmp_path: Path):
+    run = tmp_path / "run"; path = run / "metrics" / "records.csv"
+    keys = ["dataset", "split", "sample_id", "method_id", "seed"]
+    consistency = ["config_sha256", "checkpoint_sha256", "output_sha256"]
+    first = pd.DataFrame([
+        {"dataset": "PKU37", "split": "train", "sample_id": "p1", "method_id": "m", "seed": 0, "config_sha256": "c", "checkpoint_sha256": "", "output_sha256": "h1"},
+        {"dataset": "PKU37", "split": "val", "sample_id": "p2", "method_id": "m", "seed": 0, "config_sha256": "c", "checkpoint_sha256": "", "output_sha256": "h2"},
+    ])
+    second = pd.DataFrame([
+        {"dataset": "PKU37", "split": "test", "sample_id": "p3", "method_id": "m", "seed": 0, "config_sha256": "c", "checkpoint_sha256": "", "output_sha256": "h3"},
+        {"dataset": "Duke17", "split": "external_test", "sample_id": "d1", "method_id": "m", "seed": 0, "config_sha256": "c", "checkpoint_sha256": "", "output_sha256": "h4"},
+    ])
+    merge_records(path, first, run, keys, consistency)
+    assert len(merge_records(path, second, run, keys, consistency)) == 4
+    assert len(merge_records(path, second, run, keys, consistency)) == 4
+    assert list((run / "audit" / "backups").glob("records.csv.*.bak"))
+    conflict = first.iloc[[0]].copy(); conflict["checkpoint_sha256"] = "different"
+    with pytest.raises(RuntimeError, match="provenance conflict"):
+        merge_records(path, conflict, run, keys, consistency)
+    # CSV round-trip converts an empty checkpoint hash to NaN; normalization
+    # must still identify the record as the same successful item.
+    roundtrip = pd.read_csv(path); assert pd.isna(roundtrip.loc[roundtrip.sample_id == "p1", "checkpoint_sha256"]).all()
+    assert len(merge_records(path, first.iloc[[0]], run, keys, consistency)) == 4
+    extra_seed = first.iloc[[0]].copy(); extra_seed["seed"] = 42; extra_seed["checkpoint_sha256"] = "deep"
+    assert len(merge_records(path, extra_seed, run, keys, consistency)) == 5
+
+
+def test_failed_item_is_retained_and_marked_recovered_after_success():
+    failures = pd.DataFrame([{"sample_id": "p1", "method_id": "nlm", "error": "old failure"}])
+    result = mark_recovered_failures(failures, [{"sample_id": "p1", "method_id": "nlm"}], "2026-09-08T00:00:00Z")
+    assert len(result) == 1 and result.iloc[0].error == "old failure"
+    assert result.iloc[0].resolution_status == "recovered" and result.iloc[0].resolved_at_utc == "2026-09-08T00:00:00Z"
 
 
 def test_deep_adapter_never_uses_random_weights(tmp_path: Path):

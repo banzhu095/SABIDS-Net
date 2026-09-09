@@ -56,6 +56,14 @@ def build_model(method: str, config: dict[str, Any]) -> nn.Module:
     raise ValueError(method)
 
 
+def checkpoint_selection_reason(selected_psnr: float, selected_ssim: float, candidate_psnr: float, candidate_ssim: float, tolerance: float) -> str | None:
+    if candidate_psnr > selected_psnr + tolerance:
+        return "higher_validation_position_macro_psnr"
+    if abs(candidate_psnr - selected_psnr) <= tolerance and candidate_ssim > selected_ssim:
+        return "validation_position_macro_ssim_tiebreak_within_psnr_tolerance"
+    return None
+
+
 def _validation(model: nn.Module, rows: pd.DataFrame, device: torch.device, limit: int | None = None) -> tuple[float, float]:
     model.eval(); values = []
     selected = rows if limit is None else rows.groupby("position_id", sort=True).head(limit)
@@ -88,7 +96,7 @@ def train(args: argparse.Namespace) -> Path:
     model = build_model(args.method, config).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate, betas=(0.9, 0.9 if args.method == "nafnet_paired" else 0.999), weight_decay=args.weight_decay)
     scaler = torch.amp.GradScaler("cuda", enabled=args.amp and device.type == "cuda")
-    start_update, best_psnr, best_ssim, best_update, stale = 0, -float("inf"), -float("inf"), 0, 0
+    start_update, best_psnr, best_ssim, best_update, highest_ssim, stale = 0, -float("inf"), -float("inf"), 0, -float("inf"), 0
     last_path = output / "last.pth"
     curve_path = output / "training_curves.csv"
     curves = pd.read_csv(curve_path).to_dict("records") if args.resume and curve_path.exists() else []
@@ -103,6 +111,7 @@ def train(args: argparse.Namespace) -> Path:
         if "scaler" in state: scaler.load_state_dict(state["scaler"])
         start_update, best_psnr, best_ssim, stale = state["update"], state["best_psnr"], state["best_ssim"], state.get("stale", 0)
         best_update = int(state.get("best_update", state.get("update", 0)))
+        highest_ssim = float(state.get("highest_ssim", max((row["val_position_macro_ssim"] for row in curves), default=-float("inf"))))
         if "python_random_state" in state: random.setstate(state["python_random_state"])
         if "numpy_random_state" in state: np.random.set_state(state["numpy_random_state"])
         if "torch_rng_state" in state: torch.set_rng_state(state["torch_rng_state"])
@@ -129,24 +138,30 @@ def train(args: argparse.Namespace) -> Path:
         if update % args.val_frequency == 0 or update == args.max_updates:
             psnr, ssim = _validation(model, val_rows, device, args.validation_frames_per_position)
             curves.append({"method_id": args.method, "seed": args.seed, "optimizer_update": update, "train_loss": total_loss, "val_position_macro_psnr": psnr, "val_position_macro_ssim": ssim})
-            improved = psnr > best_psnr + args.psnr_tolerance or (abs(psnr - best_psnr) <= args.psnr_tolerance and ssim > best_ssim)
+            selection_reason = checkpoint_selection_reason(best_psnr, best_ssim, psnr, ssim, args.psnr_tolerance)
+            improved = selection_reason is not None
+            if improved:
+                best_psnr, best_ssim, best_update, stale = psnr, ssim, update, 0
+            else:
+                stale += 1
+            ssim_improved = ssim > highest_ssim
+            if ssim_improved: highest_ssim = ssim
             state = {
                 "architecture": args.method, "model": model.state_dict(), "optimizer": optimizer.state_dict(), "scaler": scaler.state_dict(),
-                "update": update, "best_psnr": best_psnr, "best_ssim": best_ssim, "best_update": best_update, "stale": stale,
+                "update": update, "checkpoint_val_position_macro_psnr": psnr, "checkpoint_val_position_macro_ssim": ssim,
+                "best_psnr": best_psnr, "best_ssim": best_ssim, "best_update": best_update, "highest_ssim": highest_ssim, "stale": stale,
                 "config": config, "manifest_sha256": sha256_file(args.manifest or root / "Manifests" / "manifest_denoise.csv"),
                 "python_random_state": random.getstate(), "numpy_random_state": np.random.get_state(), "torch_rng_state": torch.get_rng_state(),
                 "cuda_rng_state_all": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else [], "sampler_rng_state": sampler.rng.bit_generator.state,
             }
             if improved:
-                best_psnr, best_ssim, best_update, stale = psnr, ssim, update, 0
-                state["best_psnr"], state["best_ssim"], state["best_update"] = best_psnr, best_ssim, best_update
+                state["checkpoint_selection_reason"] = selection_reason
                 torch.save(state, output / "best_psnr.pth")
-            else:
-                stale += 1
-            state["stale"] = stale
-            torch.save(state, last_path)
-            if ssim >= max((row["val_position_macro_ssim"] for row in curves), default=-1):
+            if ssim_improved:
+                state["checkpoint_selection_reason"] = "highest_validation_position_macro_ssim"
                 torch.save(state, output / "best_ssim.pth")
+            state["checkpoint_selection_reason"] = "latest_training_state"
+            torch.save(state, last_path)
             pd.DataFrame(curves).to_csv(curve_path, index=False)
             print(json.dumps(curves[-1]), flush=True)
             if stale >= args.early_stopping_patience:
@@ -156,7 +171,10 @@ def train(args: argparse.Namespace) -> Path:
         metadata = torch.load(checkpoint, map_location="cpu", weights_only=False)
         inventory.append({"method_id": args.method, "seed": args.seed, "checkpoint": str(checkpoint), "sha256": sha256_file(checkpoint), "bytes": checkpoint.stat().st_size,
                           "optimizer_update": metadata.get("update"), "selected_best_update": metadata.get("best_update"),
-                          "selected_val_position_macro_psnr": metadata.get("best_psnr"), "selected_val_position_macro_ssim": metadata.get("best_ssim")})
+                          "checkpoint_val_position_macro_psnr": metadata.get("checkpoint_val_position_macro_psnr"),
+                          "checkpoint_val_position_macro_ssim": metadata.get("checkpoint_val_position_macro_ssim"),
+                          "selected_val_position_macro_psnr": metadata.get("best_psnr"), "selected_val_position_macro_ssim": metadata.get("best_ssim"),
+                          "selection_reason": metadata.get("checkpoint_selection_reason", "legacy_checkpoint_without_reason")})
     pd.DataFrame(inventory).to_csv(output / "checkpoint_inventory.csv", index=False)
     return output
 

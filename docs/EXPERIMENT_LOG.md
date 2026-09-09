@@ -714,3 +714,54 @@ Populate one row per independent fold after validation threshold selection.
   includes formal seed directories; and runtime plus asset inventories merge
   across the separate sealed-test and train/validation evaluation commands
   instead of being overwritten by the second command.
+
+# 2026-09-08 — Recovery, transactional merge, and formal TV calibration start
+
+- Recovery at 21:18 Asia/Shanghai found main Git HEAD `b04c164` with the
+  denoising continuation edits still uncommitted, and the independent
+  `OCT_denoise` repository with no commits plus its new `.gitignore` and
+  third-party source directories untracked. No pre-existing denoising Python,
+  calibration or training process was running. The active run remains
+  `runs/denoise_benchmark_pku_protocol_20260907_154644`; it was not
+  reinitialized.
+- No formal `parameter_search_partial.csv` existed at recovery. The only
+  relevant partial was the historical classical-run CSV; the current run had
+  120 TV smoke rows, which remain smoke-only. `config_lock.status` remains
+  `not_locked`, so PKU37 test and Duke17/Duke28 references remain sealed.
+- Corrected checkpoint selection so best-PSNR stores its own validation SSIM,
+  optimizer update, hash and selection reason. Best-SSIM remains an independent
+  checkpoint. The same paired selection state is restored on resume. A
+  regression case with a higher-PSNR/lower-SSIM epoch and a lower-PSNR/higher-
+  SSIM epoch gives the same result with and without interruption.
+- Added `table_store.py` for normalized hash fields, explicit logical keys,
+  provenance-conflict rejection, write-before backup under `audit/backups/`,
+  and temporary-file atomic replacement. Per-image metrics, primary manifests,
+  assets, runtime records/summaries and failure-resolution status now use this
+  path. Staged train/validation then test/external unions, idempotent replay,
+  conflicting checkpoint hashes, multiple seeds and CSV empty-hash-to-NaN
+  round trips are covered by tests.
+- Nineteen focused denoising tests and the complete 127-test repository suite
+  passed. Only the existing Pillow, AMP, tensorboard and no-accelerator
+  warnings remain. `git diff --check` reports no whitespace error (only the
+  Windows LF-to-CRLF notice).
+- Local CUDA remains unavailable. Formal TV-Chambolle calibration was started
+  in the existing run at 21:22:58 as PID 6476. Command, hashes and resume
+  command are in `logs/calibration_tv_full.job.json`; stdout/stderr are in
+  `logs/calibration_tv_full.stdout.log` and `.stderr.log`. At the last logged
+  checkpoint it had 760 successful rows, 0 failures, 3 candidates touched and
+  all 6 validation positions represented. The job writes
+  `metrics/parameter_search_partial.csv` atomically every 20 evaluations.
+- The refreshed workbook is
+  `runs/denoise_benchmark_pku_protocol_20260907_154644/benchmark_summary.xlsx`;
+  it has 20 rendered sheets, exposes the formal calibration partial on the
+  parameter-search sheet, and has zero formula-error matches. The current
+  development package is
+  `runs/SABIDS_PKU37_denoise_benchmark_GPT_light_DEV_UNLOCKED_20260908_213543.zip`
+  with SHA256
+  `7b16843249623939a79e59d7d0ea52bfeafa5e2ffa10e7fb083f9af8e0782927`.
+  It is a 10.82 MiB pre-lock snapshot and cannot enter the paper main table.
+- Next local command after the TV PID exits is the same command recorded in the
+  job JSON (it safely resumes if interrupted), followed by formal BM3D, NLM and
+  K-SVD calibration. The GPU continuation entry point is
+  `tools/oct_denoise_benchmark/scripts/run_modelwhale_protocol.sh` with an
+  explicit run directory and `--resume`.

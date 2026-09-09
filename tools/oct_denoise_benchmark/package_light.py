@@ -204,10 +204,16 @@ def write_report(project_root: Path, run_dir: Path) -> None:
     dataset_path = run_dir / "metrics" / "per_dataset_metrics.csv"
     dataset = pd.read_csv(dataset_path) if dataset_path.exists() else pd.DataFrame()
     table = dataset.to_markdown(index=False) if not dataset.empty else "当前仅完成工程 smoke，尚无可报告的正式比较结果。"
+    partial_path = run_dir / "metrics" / "parameter_search_partial.csv"
+    if partial_path.is_file():
+        partial = pd.read_csv(partial_path)
+        partial_note = f"正式 validation 校准正在进行或可恢复：partial CSV 当前 {len(partial)} 行；它不是已锁定参数。"
+    else:
+        partial_note = "尚未产生正式 validation 校准 partial CSV。"
     lines = [
         "# SABIDS-Net OCT 降噪基准报告", "",
         "## 当前完成状态", "",
-        "本目录是本机可验证的工程结果包，不是完成三种子 GPU 正式实验后的论文结果。正式参数搜索、三种子训练、配置锁定与封存测试尚未执行，因此没有根据 PKU37 test、Duke17 或 Duke28 结果进行任何回调。", "",
+        "本目录是 DEV_UNLOCKED 工程结果包，不是完成三种子 GPU 正式实验后的论文结果。当前没有正式深度三 seed 结果；PKU37 test 与 Duke17/Duke28 reference 仍封存；固定图册只有登记表、尚未物化。此包只能检查代码、validation、协议和运行准备，不能作为论文最终结果。", "",
         f"数据审计通过：PKU37 train/validation/test 为 1163/277/294 帧、25/6/6 个位置；Duke17 与 Duke28 分别为完整 17/28 例 external test。PKU37 跨 split 位置：{audit['pku_positions_crossing_splits']}。", "",
         "## 实现核验", "",
         "- BM3D：改为 `bm3d 4.0.3` 的 standard profile，并强制 hard-thresholding + Wiener 两阶段；LC 仅保留为补充。许可证仅允许非商业使用。",
@@ -218,6 +224,7 @@ def write_report(project_root: Path, run_dir: Path) -> None:
         "- NAFNet：单通道 I/O，复用 NAFBlock、encoder-decoder 和 padding；训练使用官方 PSNRLoss 方向。首次 smoke 发现符号错误后已修正，错误目录保留。", "",
         "## 当前数值", "", table, "",
         "上述若仅含 noisy_identity validation，它是开发基线，不是论文主测试表。", "",
+        partial_note, "",
         "## 尚未完成及原因", "",
         "本机只有 PyTorch CPU 2.8.0、没有 CUDA/nvidia-smi，且默认 Python 3.9.13 低于项目声明的 3.10。K-SVD、完整 BM3D 网格、三种子 DnCNN/NAFNet 正式训练和全量 7 方法推理需要 ModelWhale RTX 3090 环境。未生成正式 checkpoint 时，推理 registry 保持 unlocked，深度方法不会退回随机权重。", "",
         "因此目前不能回答 validation/test 一致性、Duke 跨域下降、正式最优方法或分割优先级。下一阶段分割实验只能在正式降噪表完成后，优先选择 noisy_identity、BM3D，以及在边缘/高频指标与 PSNR/SSIM 间表现互补的深度方法；不能仅凭 smoke PSNR 决策。", "",
@@ -260,7 +267,10 @@ def package(project_root: Path, run_dir: Path) -> Path:
     for path in sorted(stage.rglob("*")):
         if path.is_file() and path.name != "PACKAGE_MANIFEST.csv": inventory.append({"path": path.relative_to(stage).as_posix(), "bytes": path.stat().st_size, "sha256": sha256_file(path)})
     pd.DataFrame(inventory).to_csv(stage / "PACKAGE_MANIFEST.csv", index=False)
-    archive = run_dir.parent / f"SABIDS_PKU37_denoise_benchmark_GPT_light_{datetime.now():%Y%m%d_%H%M%S}.zip"
+    lock_path = run_dir / "audit" / "config_lock.json"
+    locked = lock_path.is_file() and json.loads(lock_path.read_text(encoding="utf-8")).get("status") == "locked"
+    state = "" if locked else "DEV_UNLOCKED_"
+    archive = run_dir.parent / f"SABIDS_PKU37_denoise_benchmark_GPT_light_{state}{datetime.now():%Y%m%d_%H%M%S}.zip"
     with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as bundle:
         for path in sorted(stage.rglob("*")):
             if path.is_file(): bundle.write(path, path.relative_to(stage).as_posix())

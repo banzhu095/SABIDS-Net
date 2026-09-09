@@ -18,9 +18,22 @@ from .metrics import compute_metrics
 from .methods import AdapterContext, denoise
 from .registry import load_yaml, stable_sha256
 from .statistics import aggregate, bootstrap_confidence_intervals, paired_differences
+from .table_store import atomic_write_csv, merge_records, normalize_hash_columns
 
 
 DEEP = {"dncnn_paired", "nafnet_paired"}
+
+
+def mark_recovered_failures(failure_table: pd.DataFrame, success_rows: list[dict[str, Any]], resolved_at: str) -> pd.DataFrame:
+    result = failure_table.copy()
+    if "resolution_status" not in result: result["resolution_status"] = "unresolved"
+    if "resolved_at_utc" not in result: result["resolved_at_utc"] = ""
+    if "sample_id" not in result or "method_id" not in result: return result
+    for success in success_rows:
+        recovered = (result.sample_id.astype(str) == str(success["sample_id"])) & (result.method_id == success["method_id"])
+        result.loc[recovered, "resolution_status"] = "recovered"
+        result.loc[recovered, "resolved_at_utc"] = resolved_at
+    return result
 
 
 def _cpu_peak_memory_mb() -> float:
@@ -119,7 +132,8 @@ def evaluate(args: argparse.Namespace) -> None:
                 output_hash = sha256_file(destination)
                 values = compute_metrics(noisy, reference, output, algorithm_seconds, io_seconds)
                 rows.append({"dataset": row.dataset, "split": split_name, "position_id": row.position_id, "frame_id": row.frame_id, "sample_id": row.sample_id, "method_id": method, "seed": seed, "noisy_path": str(source), "reference_path": row.clean_path, "denoised_path": str(destination), "config_sha256": config_hash, "checkpoint_sha256": checkpoint_hash, "output_sha256": output_hash, "width": metadata["width"], "height": metadata["height"], "bit_depth": metadata["bit_depth"], "status": "success", **values})
-                assets.append({"path": str(destination), "sha256": output_hash, "bytes": destination.stat().st_size, "kind": "denoised_image", "dataset": row.dataset, "split": split_name, "method_id": method, "seed": seed})
+                assets.append({"path": str(destination), "sha256": output_hash, "bytes": destination.stat().st_size, "kind": "denoised_image", "dataset": row.dataset, "split": split_name, "sample_id": row.sample_id, "method_id": method, "seed": seed,
+                               "config_sha256": config_hash, "checkpoint_sha256": checkpoint_hash})
                 gpu_peak = torch.cuda.max_memory_allocated(torch.device(args.device)) / (1024**2) if args.device.startswith("cuda") and torch.cuda.is_available() else float("nan")
                 runtimes.append({"method_id": method, "seed": seed, "dataset": row.dataset, "sample_id": row.sample_id, "config_sha256": config_hash, "checkpoint_sha256": checkpoint_hash, "is_startup_image": first_success, "algorithm_seconds": algorithm_seconds, "io_seconds": io_seconds, "width": metadata["width"], "height": metadata["height"], "cpu_peak_memory_mb": _cpu_peak_memory_mb(), "gpu_peak_memory_mb": gpu_peak, "cpu_model": platform.processor(), "gpu_model": torch.cuda.get_device_name(torch.device(args.device)) if args.device.startswith("cuda") and torch.cuda.is_available() else ""})
                 first_success = False
@@ -127,12 +141,18 @@ def evaluate(args: argparse.Namespace) -> None:
                 failures.append({"dataset": row.dataset, "split": split_name, "sample_id": row.sample_id, "method_id": method, "source": str(source), "error_type": type(exc).__name__, "error": str(exc), "traceback": traceback.format_exc(limit=4)})
             if index % 20 == 0:
                 print(f"{method} {row.dataset}/{split_name}: {index}/{len(table)}", flush=True)
-    combined = pd.concat([existing, pd.DataFrame(rows)], ignore_index=True) if not existing.empty else pd.DataFrame(rows)
+    incoming_metrics = pd.DataFrame(rows)
+    if not incoming_metrics.empty:
+        combined = merge_records(metric_path, incoming_metrics, run_dir,
+                                 ["dataset", "split", "sample_id", "method_id", "seed"],
+                                 ["config_sha256", "checkpoint_sha256", "output_sha256"], replace_consistent=True)
+    else:
+        combined = normalize_hash_columns(existing)
     if not combined.empty:
         combined["checkpoint_sha256"] = combined["checkpoint_sha256"].fillna("").astype(str)
         combined["config_sha256"] = combined["config_sha256"].fillna("").astype(str)
         combined = combined.drop_duplicates(["sample_id", "method_id", "seed", "config_sha256", "checkpoint_sha256"], keep="last")
-        metric_path.parent.mkdir(parents=True, exist_ok=True); combined.to_csv(metric_path, index=False)
+        metric_path.parent.mkdir(parents=True, exist_ok=True)
         summaries = aggregate(combined)
         for name, frame in summaries.items(): frame.to_csv(run_dir / "metrics" / f"{name}.csv", index=False)
         paired_differences(summaries["per_position_metrics"]).to_csv(run_dir / "metrics" / "paired_method_differences.csv", index=False)
@@ -141,20 +161,23 @@ def evaluate(args: argparse.Namespace) -> None:
         combined["is_primary_seed"] = [int(seed) == primary_seeds.get(method, 0) for method, seed in zip(combined.method_id, combined.seed)]
         manifest_columns = ["dataset", "split", "position_id", "frame_id", "noisy_path", "reference_path", "denoised_path", "method_id", "seed", "is_primary_seed", "config_sha256", "checkpoint_sha256", "width", "height", "bit_depth", "output_sha256", "status"]
         (run_dir / "manifests").mkdir(exist_ok=True)
-        combined[manifest_columns].to_csv(run_dir / "manifests" / "denoised_dataset_manifest.csv", index=False)
-        combined.loc[combined.is_primary_seed, manifest_columns].to_csv(run_dir / "manifests" / "denoised_dataset_manifest_primary.csv", index=False)
+        atomic_write_csv(combined[manifest_columns], run_dir / "manifests" / "denoised_dataset_manifest.csv", run_dir)
+        atomic_write_csv(combined.loc[combined.is_primary_seed, manifest_columns], run_dir / "manifests" / "denoised_dataset_manifest_primary.csv", run_dir)
     old_failures = pd.read_csv(failure_path) if failure_path.exists() and failure_path.stat().st_size else pd.DataFrame()
-    pd.concat([old_failures, pd.DataFrame(failures)], ignore_index=True).to_csv(failure_path, index=False)
+    failure_table = pd.concat([old_failures, pd.DataFrame(failures)], ignore_index=True)
+    if not failure_table.empty:
+        failure_table = mark_recovered_failures(failure_table, rows, datetime.now(timezone.utc).isoformat())
+    if failure_table.empty:
+        failure_table = pd.DataFrame(columns=["dataset", "split", "sample_id", "method_id", "stage", "error", "resolution_status", "resolved_at_utc"])
+    atomic_write_csv(failure_table, failure_path, run_dir)
     if assets:
         asset_path = run_dir / "metrics" / "asset_inventory.csv"
-        old_assets = pd.read_csv(asset_path) if asset_path.exists() and asset_path.stat().st_size else pd.DataFrame()
-        pd.concat([old_assets, pd.DataFrame(assets)], ignore_index=True).drop_duplicates("path", keep="last").to_csv(asset_path, index=False)
+        merge_records(asset_path, pd.DataFrame(assets), run_dir, ["path"], ["sha256", "config_sha256", "checkpoint_sha256"], replace_consistent=False)
     if runtimes:
         runtime_path = run_dir / "metrics" / "runtime_records.csv"
-        old_runtime = pd.read_csv(runtime_path) if runtime_path.exists() and runtime_path.stat().st_size else pd.DataFrame()
-        runtime = pd.concat([old_runtime, pd.DataFrame(runtimes)], ignore_index=True)
-        runtime = runtime.drop_duplicates(["method_id", "seed", "dataset", "sample_id", "config_sha256", "checkpoint_sha256"], keep="last")
-        runtime.to_csv(runtime_path, index=False)
+        runtime = merge_records(runtime_path, pd.DataFrame(runtimes), run_dir,
+                                ["method_id", "seed", "dataset", "sample_id"],
+                                ["config_sha256", "checkpoint_sha256"], replace_consistent=False)
         summary_rows = []
         for (method, seed, dataset), group in runtime.groupby(["method_id", "seed", "dataset"], sort=True):
             steady = group.loc[~group["is_startup_image"], "algorithm_seconds"]
@@ -163,7 +186,7 @@ def evaluate(args: argparse.Namespace) -> None:
                                  "image_heights": ",".join(map(str, sorted(group.height.unique()))), "image_widths": ",".join(map(str, sorted(group.width.unique()))),
                                  "startup_algorithm_seconds": float(startup.iloc[0]) if len(startup) else float("nan"),
                                  "steady_algorithm_seconds_mean": float(steady.mean()) if len(steady) else float("nan"), "algorithm_seconds_mean": float(group.algorithm_seconds.mean()), "algorithm_seconds_median": float(group.algorithm_seconds.median()), "io_seconds_mean": float(group.io_seconds.mean()), "cpu_peak_memory_mb": float(group.cpu_peak_memory_mb.max()), "gpu_peak_memory_mb": float(group.gpu_peak_memory_mb.max()), "cpu_model": group.iloc[0].cpu_model, "gpu_model": group.iloc[0].gpu_model})
-        pd.DataFrame(summary_rows).to_csv(run_dir / "metrics" / "runtime_summary.csv", index=False)
+        atomic_write_csv(pd.DataFrame(summary_rows), run_dir / "metrics" / "runtime_summary.csv", run_dir)
 
 
 def parser() -> argparse.ArgumentParser:

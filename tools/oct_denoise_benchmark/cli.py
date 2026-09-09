@@ -20,6 +20,7 @@ from .io import read_image, save_image, sha256_file
 from .metrics import compute_metrics
 from .methods import AdapterContext, denoise
 from .registry import lock_run, save_yaml, stable_sha256
+from .table_store import atomic_write_csv
 
 
 MAIN_METHODS = ["noisy_identity", "bm3d_standard", "tv_chambolle", "nlm", "ksvd_self", "dncnn_paired", "nafnet_paired"]
@@ -172,7 +173,7 @@ def _expand_non_bm3d(method: str, best: dict[str, Any], evaluated: list[dict[str
 def _evaluate_candidates(method: str, candidates: list[dict[str, Any]], rows: pd.DataFrame, search_round: int, phase: str, partial_path: Path | None = None) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
     total = len(candidates) * len(rows)
-    completed = 0
+    completed = 0; resumed = 0; failed = 0; batch_started = time.perf_counter()
     existing = pd.read_csv(partial_path) if partial_path and partial_path.is_file() else pd.DataFrame()
 
     def flush() -> None:
@@ -196,7 +197,7 @@ def _evaluate_candidates(method: str, candidates: list[dict[str, Any]], rows: pd
                     & (existing.sample_id.astype(str) == str(row.sample_id)) & (existing.status == "success")
                 ]
                 if not match.empty:
-                    results.append(match.iloc[-1].to_dict()); completed += 1
+                    results.append(match.iloc[-1].to_dict()); completed += 1; resumed += 1
                     continue
             record = {"method_id": method, "search_phase": phase, "search_round": search_round,
                       "candidate_index": candidate_index, "candidate_uid": candidate_uid,
@@ -209,101 +210,95 @@ def _evaluate_candidates(method: str, candidates: list[dict[str, Any]], rows: pd
                 results.append({**record, "status": "success", "error": "", **metrics})
             except Exception as exc:
                 results.append({**record, "status": "failed", "error": f"{type(exc).__name__}: {exc}"})
+                failed += 1
             completed += 1
             if completed % 20 == 0 or completed == total:
                 flush()
-                print(f"calibrate {method}/{phase}: {completed}/{total}", flush=True)
+                elapsed = time.perf_counter() - batch_started
+                eta = elapsed / max(completed - resumed, 1) * max(total - completed, 0)
+                print(f"calibrate {method}/{phase}: candidate={candidate_index + 1}/{len(candidates)} sample={row.sample_id} position={row.position_id} frame={getattr(row, 'frame_id', '')} completed={completed}/{total} resumed={resumed} failed={failed} eta_seconds={eta:.1f}", flush=True)
+    if resumed:
+        print(f"calibrate {method}/{phase}: resume reused {resumed}/{total} hash-matched successful rows", flush=True)
     flush()
     return [record for record in results if record.get("status") == "success"]
 
 
+def _calibrate_method(method: str, full_val: pd.DataFrame, val: pd.DataFrame, partial_path: Path, smoke: bool, ksvd_coarse_frames_per_position: int, ksvd_top_candidates: int, psnr_tolerance: float) -> dict[str, Any]:
+    candidates = _candidate_grid(method)
+    if method == "ksvd_self" and not smoke:
+        coarse = pd.concat([group.iloc[np.linspace(0, len(group) - 1, min(ksvd_coarse_frames_per_position, len(group)), dtype=int)] for _, group in full_val.groupby("position_id", sort=True)], ignore_index=True)
+        coarse_rows = _evaluate_candidates(method, candidates, coarse, 0, "coarse_equal_frames_per_position", partial_path)
+        coarse_summary = _complete_summary(coarse_rows, coarse).sort_values(["position_macro_psnr", "position_macro_ssim"], ascending=False)
+        finalists = [json.loads(value) for value in coarse_summary.head(ksvd_top_candidates)["candidate_json"]]
+        final_rows = _evaluate_candidates(method, finalists, full_val, 1, "full_validation_reevaluation", partial_path)
+        best = _select_candidate(_complete_summary(final_rows, full_val), psnr_tolerance)
+        best_config = json.loads(best.candidate_json)
+        stop_reason = f"two_stage_search_top_{len(finalists)}_fully_reevaluated"
+        selection_evaluated = candidates
+    else:
+        method_rows: list[dict[str, Any]] = []; round_index = 0; evaluated_sigmas: set[float] = set()
+        while True:
+            phase = "smoke_subset" if smoke else "full_validation"
+            round_rows = _evaluate_candidates(method, candidates, val, round_index, phase, partial_path)
+            method_rows.extend(round_rows)
+            summary = _complete_summary(method_rows, val)
+            best = _select_candidate(summary, psnr_tolerance); best_config = json.loads(best.candidate_json)
+            stop_reason = "nonadaptive_grid_complete"
+            evaluated_configs = [json.loads(value) for value in summary["candidate_json"]]
+            if method in {"tv_chambolle", "nlm"}:
+                expanded, boundaries = _expand_non_bm3d(method, best_config, evaluated_configs)
+                if not boundaries: stop_reason = "best_numeric_parameters_interior"; break
+                if expanded and round_index < 3: candidates = expanded; round_index += 1; continue
+                stop_reason = "maximum_adaptive_rounds_or_scientific_limit_reached"; break
+            if method != "bm3d_standard": break
+            evaluated_sigmas.update(float(json.loads(value)["sigma_psd"]) for value in summary["candidate_json"])
+            best_sigma = float(best_config["sigma_psd"]); low, high = min(evaluated_sigmas), max(evaluated_sigmas)
+            if best_sigma not in {low, high}: stop_reason = "best_sigma_interior"; break
+            if round_index >= 3: stop_reason = "maximum_adaptive_rounds_reached"; break
+            if best_sigma == high and high < 0.4: new_values = [min(high * 1.5, 0.4), min(high * 2.0, 0.4)]
+            elif best_sigma == low and low > 0.002: new_values = [max(low / 2.0, 0.002), max(low * 0.75, 0.002)]
+            else: new_values = []
+            new_values = sorted(set(new_values) - evaluated_sigmas)
+            if not new_values: stop_reason = "scientific_sigma_limit_reached"; break
+            candidates = [{"method_id": method, "sigma_psd": value, "profile": "standard", "stage": "all"} for value in new_values]
+            round_index += 1
+        selection_evaluated = [json.loads(value) for value in summary["candidate_json"]]
+    parameter_values = {key: sorted({config.get(key) for config in selection_evaluated if key in config}) for key in selection_evaluated[0] if key != "method_id"}
+    boundary = {key: best_config.get(key) in {values[0], values[-1]} for key, values in parameter_values.items() if values and isinstance(values[0], (int, float)) and not isinstance(values[0], bool)}
+    best_config.update({"selection_rule": f"PKU37 validation frame-to-position macro PSNR; SSIM tie-break within {psnr_tolerance} dB", "search_stop_reason": stop_reason, "boundary_parameters": [key for key, value in boundary.items() if value]})
+    return best_config
+
+
 def calibrate(project_root: Path, run_dir: Path, methods: list[str], limit_frames_per_position: int | None = None, ksvd_coarse_frames_per_position: int = 2, ksvd_top_candidates: int = 4, psnr_tolerance: float = 1e-4) -> None:
-    full_val = development_rows(load_protocol_manifest(project_root), "val").sort_values(["position_id", "frame_id"])
+    full_val = development_rows(load_protocol_manifest(project_root), "val").sort_values(["position_id", "frame_index"])
     val = full_val.groupby("position_id", as_index=False, group_keys=False).head(limit_frames_per_position) if limit_frames_per_position else full_val
-    all_rows: list[dict[str, Any]] = []
-    selected: dict[str, dict[str, Any]] = {}
-    partial_name = "parameter_search_smoke_partial.csv" if limit_frames_per_position else "parameter_search_partial.csv"
-    partial_path = run_dir / "metrics" / partial_name
+    smoke = limit_frames_per_position is not None
+    partial_path = run_dir / "metrics" / ("parameter_search_smoke_partial.csv" if smoke else "parameter_search_partial.csv")
+    config_path = run_dir / "configs" / ("calibration_smoke_selected.yaml" if smoke else "locked_classical_configs.yaml")
+    prior = yaml.safe_load(config_path.read_text(encoding="utf-8")) if config_path.is_file() else {}
+    selected: dict[str, dict[str, Any]] = dict(prior.get("methods", {}))
+    failures = []
     for method in methods:
-        candidates = _candidate_grid(method)
-        if method == "ksvd_self" and not limit_frames_per_position:
-            coarse_parts = []
-            for _, group in full_val.groupby("position_id", sort=True):
-                indices = np.linspace(0, len(group) - 1, min(ksvd_coarse_frames_per_position, len(group)), dtype=int)
-                coarse_parts.append(group.iloc[indices])
-            coarse = pd.concat(coarse_parts, ignore_index=True)
-            coarse_rows = _evaluate_candidates(method, candidates, coarse, 0, "coarse_equal_frames_per_position", partial_path)
-            all_rows.extend(coarse_rows)
-            coarse_summary = _complete_summary(coarse_rows, coarse).sort_values(["position_macro_psnr", "position_macro_ssim"], ascending=False)
-            top_json = coarse_summary.head(ksvd_top_candidates)["candidate_json"]
-            finalists = [json.loads(value) for value in top_json]
-            final_rows = _evaluate_candidates(method, finalists, full_val, 1, "full_validation_reevaluation", partial_path)
-            all_rows.extend(final_rows)
-            best = _select_candidate(_complete_summary(final_rows, full_val), psnr_tolerance)
-            best_config = json.loads(best.candidate_json)
-            stop_reason = f"two_stage_search_top_{len(finalists)}_fully_reevaluated"
-            selection_evaluated = candidates
-        else:
-            method_rows: list[dict[str, Any]] = []
-            round_index = 0
-            evaluated_sigmas: set[float] = set()
-            while True:
-                round_rows = _evaluate_candidates(method, candidates, val, round_index, "full_validation" if not limit_frames_per_position else "smoke_subset", partial_path)
-                method_rows.extend(round_rows); all_rows.extend(round_rows)
-                summary = _complete_summary(method_rows, val)
-                best = _select_candidate(summary, psnr_tolerance); best_config = json.loads(best.candidate_json)
-                stop_reason = "nonadaptive_grid_complete"
-                evaluated_configs = [json.loads(value) for value in summary["candidate_json"]]
-                if method in {"tv_chambolle", "nlm"}:
-                    expanded, boundaries = _expand_non_bm3d(method, best_config, evaluated_configs)
-                    if not boundaries:
-                        stop_reason = "best_numeric_parameters_interior"; break
-                    if expanded and round_index < 3:
-                        candidates = expanded; round_index += 1; continue
-                    stop_reason = "maximum_adaptive_rounds_or_scientific_limit_reached"
-                    break
-                if method != "bm3d_standard":
-                    break
-                evaluated_sigmas.update(float(json.loads(value)["sigma_psd"]) for value in summary["candidate_json"])
-                best_sigma = float(best_config["sigma_psd"]); low, high = min(evaluated_sigmas), max(evaluated_sigmas)
-                if best_sigma not in {low, high}:
-                    stop_reason = "best_sigma_interior"; break
-                if round_index >= 3:
-                    stop_reason = "maximum_adaptive_rounds_reached"; break
-                if best_sigma == high and high < 0.4:
-                    new_values = [min(high * 1.5, 0.4), min(high * 2.0, 0.4)]
-                elif best_sigma == low and low > 0.002:
-                    new_values = [max(low / 2.0, 0.002), max(low * 0.75, 0.002)]
-                else:
-                    new_values = []
-                new_values = sorted(set(new_values) - evaluated_sigmas)
-                if not new_values:
-                    stop_reason = "scientific_sigma_limit_reached"; break
-                candidates = [{"method_id": method, "sigma_psd": value, "profile": "standard", "stage": "all"} for value in new_values]
-                round_index += 1
-            selection_evaluated = [json.loads(value) for value in summary["candidate_json"]]
-        parameter_values = {key: sorted({config.get(key) for config in selection_evaluated if key in config}) for key in selection_evaluated[0] if key != "method_id"}
-        boundary = {key: best_config.get(key) in {values[0], values[-1]} for key, values in parameter_values.items() if values and isinstance(values[0], (int, float)) and not isinstance(values[0], bool)}
-        best_config.update({
-            "selection_rule": f"PKU37 validation frame-to-position macro PSNR; SSIM tie-break within {psnr_tolerance} dB",
-            "search_stop_reason": stop_reason, "boundary_parameters": [key for key, value in boundary.items() if value],
-        })
-        selected[method] = best_config
-        result_name = "parameter_search_smoke_results.csv" if limit_frames_per_position else "parameter_search_results.csv"
+        try:
+            selected[method] = _calibrate_method(method, full_val, val, partial_path, smoke, ksvd_coarse_frames_per_position, ksvd_top_candidates, psnr_tolerance)
+        except Exception as exc:
+            failures.append({"method_id": method, "stage": "calibration", "error": f"{type(exc).__name__}: {exc}", "severity": "blocking_for_method", "status": "incomplete", "recorded_at": datetime.now().isoformat()})
         if partial_path.is_file():
-            pd.read_csv(partial_path).to_csv(run_dir / "metrics" / result_name, index=False)
+            atomic_write_csv(pd.read_csv(partial_path), run_dir / "metrics" / ("parameter_search_smoke_results.csv" if smoke else "parameter_search_results.csv"), run_dir)
+        if smoke:
+            save_yaml(config_path, {"status": "smoke_only_not_locked", "reason": "subset calibration cannot satisfy the complete-PKU37-validation protocol", "methods": selected})
         else:
-            pd.DataFrame(all_rows).to_csv(run_dir / "metrics" / result_name, index=False)
-    if limit_frames_per_position:
-        save_yaml(run_dir / "configs" / "calibration_smoke_selected.yaml", {
-            "status": "smoke_only_not_locked",
-            "reason": "subset calibration cannot satisfy the complete-PKU37-validation protocol",
-            "methods": selected,
-        })
-        return
-    save_yaml(run_dir / "configs" / "locked_classical_configs.yaml", {"status": "locked_on_pku37_validation", "methods": selected})
-    pd.DataFrame([{"method_id": key, **value} for key, value in selected.items()]).to_csv(run_dir / "metrics" / "selected_parameters.csv", index=False)
-    save_yaml(run_dir / "configs" / "inference_registry.yaml", {"status": "classical_locked", "methods": {key: {"config": value, "seed": 0} for key, value in selected.items()}})
+            pending = sorted(set(("bm3d_standard", "tv_chambolle", "nlm", "ksvd_self")) - set(selected))
+            status = "locked_on_pku37_validation" if not pending else "partially_locked_on_pku37_validation"
+            save_yaml(config_path, {"status": status, "completed_methods": sorted(selected), "pending_methods": pending, "methods": selected})
+            save_yaml(run_dir / "configs" / "inference_registry.yaml", {"status": "classical_locked" if not pending else "classical_partially_locked", "methods": {key: {"config": value, "seed": 0} for key, value in selected.items()}})
+    if failures:
+        failure_path = run_dir / "failures.csv"; existing = pd.read_csv(failure_path) if failure_path.is_file() and failure_path.stat().st_size else pd.DataFrame()
+        atomic_write_csv(pd.concat([existing, pd.DataFrame(failures)], ignore_index=True), failure_path, run_dir)
+    if not smoke:
+        selected_path = run_dir / "metrics" / "selected_parameters.csv"; existing = pd.read_csv(selected_path) if selected_path.is_file() else pd.DataFrame()
+        if not existing.empty: existing = existing[~existing.method_id.isin(selected)]
+        atomic_write_csv(pd.concat([existing, pd.DataFrame([{"method_id": key, "status": "selected_on_complete_PKU37_validation", **value} for key, value in selected.items()])], ignore_index=True), selected_path, run_dir)
 
 
 def main(argv: Sequence[str] | None = None) -> None:

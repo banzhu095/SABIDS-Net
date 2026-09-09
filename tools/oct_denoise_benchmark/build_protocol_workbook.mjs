@@ -25,6 +25,11 @@ async function csv(relative) {
   catch { return [["status", "detail"], ["missing", relative]]; }
 }
 
+async function csvWithPartial(primary, partial) {
+  const completed = await csv(primary);
+  return completed.length > 1 ? completed : await csv(partial);
+}
+
 function columnName(index) { let value = index + 1; let name = ""; while (value) { const part = (value - 1) % 26; name = String.fromCharCode(65 + part) + name; value = Math.floor((value - 1) / 26); } return name; }
 function typed(rows) {
   if (!rows.length) return [["status"], ["empty"]];
@@ -56,7 +61,7 @@ const specs = [
   ["数据集结果", await csv("metrics/per_dataset_metrics.csv")], ["逐位置结果", await csv("metrics/per_position_metrics.csv")],
   ["逐图结果", await csv("metrics/per_image_metrics.csv")], ["逐种子结果", await csv("metrics/per_seed_metrics.csv")],
   ["配对差值", await csv("metrics/paired_method_differences.csv")],
-  ["置信区间", await csv("metrics/bootstrap_confidence_intervals.csv")], ["参数搜索", await csv("metrics/parameter_search_results.csv")],
+  ["置信区间", await csv("metrics/bootstrap_confidence_intervals.csv")], ["参数搜索", await csvWithPartial("metrics/parameter_search_results.csv", "metrics/parameter_search_partial.csv")],
   ["参数选择", await csv("metrics/selected_parameters.csv")], ["Checkpoint", await csv("metrics/checkpoint_inventory.csv")],
   ["训练曲线", await csv("metrics/training_curves.csv")], ["运行时间", await csv("metrics/runtime_summary.csv")],
   ["模型复杂度", await csv("metrics/model_complexity.csv")], ["图册登记", await csv("audit/fixed_atlas_selection.csv")],
