@@ -6,9 +6,22 @@ features: 64
 loss: residual_mse
 optimizer: AdamW
 learning_rate: 0.001
+min_learning_rate: 0.000001
+scheduler: cosine
+scheduler_note: OCT adaptation; not claimed as the original DnCNN training recipe
 patch_size: 256
+physical_batch_size: 4
+gradient_accumulation_steps: 1
+effective_batch_size: 4
 max_updates: 100000
-validation_frequency_updates: 1000
+fast_validation_frequency_updates: 1000
+fast_validation_frames_per_position: 3
+full_validation_frequency_updates: 5000
+checkpoint_selection_uses_full_validation_only: true
+num_workers: 4
+persistent_workers: true
+pin_memory: true
+prefetch_factor: 2
 early_stopping_patience_validations: 20
 gradient_clip: 1.0
 amp: true

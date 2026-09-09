@@ -1,52 +1,99 @@
-# Classical OCT denoising benchmark reproduction
+# PKU37 OCT denoising benchmark
 
-Run from the SABIDS-Net repository root. Python 3.9+, MATLAB R2024a (only for auditing the protected packages), and the packages imported by `tools/oct_denoise_benchmark/adapters.py` are required. Sealed test is excluded by default.
+This package is the active seven-method benchmark. The sibling `OCT_denoise`
+directory is a historical third-party archive and is not the runtime repository.
+Raw data, manifests, runs, checkpoints and predictions stay outside Git.
 
-## One-command run
+## Scientific contract
 
-```powershell
-python -m tools.oct_denoise_benchmark.benchmark all `
-  --project-root . `
-  --run-dir "E:\1-脉络膜\OCT降噪\SABIDS-Net\SABIDS-Net\runs\denoise_classical_benchmark_20260902_224920" `
-  --methods noisy_identity bm3d nlm_speckle wavelet tv gaussian msbtd ascibp
+- Calibration and checkpoint selection use PKU37 validation only, aggregated
+  frame -> position -> dataset. PKU37 test and Duke references stay sealed until
+  `audit/config_lock.json` says `locked`.
+- Deep models use seeds 42, 123 and 2026. Results report all seeds; seed 42 is
+  preregistered as the primary downstream checkpoint and is never chosen from
+  test performance.
+- DnCNN is grayscale, 17-layer, 64-feature residual-noise prediction with
+  residual MSE. AdamW plus cosine decay is an explicit OCT adaptation, not a
+  claim of reproducing the original DnCNN training recipe.
+- `NAFNet-paired-OCT` uses the official SIDD width-32 topology
+  `enc=[2,2,4,8], middle=12, dec=[2,2,2,2]`, adapted to one channel and trained
+  from random initialization on PKU37. No SIDD pretrained weights are used.
+- Deep training targets 100,000 optimizer updates and effective batch 4.
+  Fixed fast validation runs every 1,000 updates; complete 277-frame validation
+  runs every 5,000 updates and alone can select a formal checkpoint.
+- `ksvd_self` is a local K-SVD-style implementation. Its standard comparison
+  fixes `noise_weight=1` and `aggregation_weight=0`; its finite fractional grid
+  is not claimed to be a global optimum.
+
+The official NAFBlock reference is
+https://github.com/megvii-research/NAFNet/blob/main/basicsr/models/archs/NAFNet_arch.py.
+The local order is norm1 -> conv1 -> depthwise conv2 -> SimpleGate -> SCA ->
+conv3 -> beta residual.
+
+## ModelWhale/Juchiyun tracks
+
+Use a new run directory after checking out the final committed tag. The deep
+track does not wait for classical calibration, and each track records its own
+hash-bound state under `audit/tracks`.
+
+```bash
+cd /mnt/SABIDS-Net
+RUN=/mnt/SABIDS-Net/runs/denoise_benchmark_pku_protocol_$(date +%Y%m%d_%H%M%S)
+bash tools/oct_denoise_benchmark/scripts/run_modelwhale_protocol.sh --project-root /mnt/SABIDS-Net --run-dir "$RUN" --track preflight
+bash tools/oct_denoise_benchmark/scripts/run_modelwhale_protocol.sh --project-root /mnt/SABIDS-Net --run-dir "$RUN" --track deep --resume
+bash tools/oct_denoise_benchmark/scripts/run_modelwhale_protocol.sh --project-root /mnt/SABIDS-Net --run-dir "$RUN" --track classical --resume
+bash tools/oct_denoise_benchmark/scripts/run_modelwhale_protocol.sh --project-root /mnt/SABIDS-Net --run-dir "$RUN" --track merge --resume
+bash tools/oct_denoise_benchmark/scripts/run_modelwhale_protocol.sh --project-root /mnt/SABIDS-Net --run-dir "$RUN" --track evaluate --resume
+bash tools/oct_denoise_benchmark/scripts/run_modelwhale_protocol.sh --project-root /mnt/SABIDS-Net --run-dir "$RUN" --track package --resume
 ```
 
-The equivalent auditable stages are:
+`--track full` runs the same sequence. The deep track first performs a 1,000
+update GPU smoke plus a resume load for each architecture, then starts the three
+formal seeds. If physical batch 4 is not viable, rerun in a fresh formal run
+with a preregistered `--batch-size`/`--accumulation-steps` pair whose product is
+4. Do not change it after sealed evaluation starts.
+
+Workbook generation is optional. Missing Node or artifact-tool marks that step
+`skipped_optional`; CSV, JSON, images and checkpoints remain valid outputs.
+
+## Protocol-locked file inference
+
+Windows PowerShell, single file:
 
 ```powershell
-$run = "E:\1-脉络膜\OCT降噪\SABIDS-Net\SABIDS-Net\runs\denoise_classical_benchmark_20260902_224920"
-$methods = @("noisy_identity", "bm3d", "nlm_speckle", "wavelet", "tv", "gaussian", "msbtd", "ascibp")
-python -m tools.oct_denoise_benchmark.benchmark audit --project-root . --run-dir $run --methods $methods
-python -m tools.oct_denoise_benchmark.benchmark smoke --project-root . --run-dir $run --methods $methods
-python -m tools.oct_denoise_benchmark.benchmark calibrate --project-root . --run-dir $run --methods $methods --workers 6
-python -m tools.oct_denoise_benchmark.benchmark run --project-root . --run-dir $run --methods $methods --workers 6
-python -m tools.oct_denoise_benchmark.benchmark summarize --project-root . --run-dir $run
+python -m tools.oct_denoise_benchmark.cli denoise-file `
+  --project-root "E:\1-脉络膜\OCT降噪\SABIDS-Net\SABIDS-Net" `
+  --method nafnet_paired --input-file C:\input\scan.tif `
+  --output-file C:\output\scan.tif `
+  --config C:\run\configs\inference_registry.yaml `
+  --checkpoint C:\run\checkpoints\nafnet_paired\seed_42\best_psnr.pth --device cuda:0
 ```
 
-Resume full inference with the `run` command and the same run directory. Completed images are skipped only when the locked method configuration and adapter source hash match. A changed adapter intentionally receives a new source/config hash and is not mixed with the previous output.
+Linux, recursive folder:
 
-The optional `--include-sealed-test` switch exists for an explicitly authorized final test run. Do not use it for development, calibration, method selection or report iteration.
+```bash
+python -m tools.oct_denoise_benchmark.cli denoise-folder \
+  --project-root /mnt/SABIDS-Net --method tv_chambolle \
+  --input-dir /path/input --output-dir /path/output \
+  --config "$RUN/configs/inference_registry.yaml" --recursive --resume
+```
 
-## Workbook
+Supported inputs are PNG, TIFF, JPEG and BMP. Processing is grayscale
+`float32 [0,1]` with clipping only: no gamma, histogram equalization, resize or
+crop. Output keeps source geometry and, for PNG/TIFF, source bit depth when the
+codec supports it. Folder mode preserves relative paths. Existing output is
+skipped only when input, adapter source, config, checkpoint and output hashes
+all match `inference_manifest.csv`; failures are retained in `failures.csv`.
 
-The Excel summary is built with `@oai/artifact-tool` after the CSV summaries and acceptance checks exist:
+Full-frame inference is the default. If a 640x640 frame does not fit, use
+`--tile-size 512 --tile-overlap 64`; tiled inference uses cosine feathering.
+Compare overlaps 32/64/128 against full-frame output on validation and lock the
+choice before opening test or Duke references.
+
+## Local verification
 
 ```powershell
-$node = "C:\Users\ASUS\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin\node.exe"
-$modules = "C:\Users\ASUS\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\node_modules"
-if (-not (Test-Path tools\oct_denoise_benchmark\node_modules)) {
-  New-Item -ItemType Junction -Path tools\oct_denoise_benchmark\node_modules -Target $modules | Out-Null
-}
-& $node tools\oct_denoise_benchmark\build_benchmark_workbook.mjs "E:\1-脉络膜\OCT降噪\SABIDS-Net\SABIDS-Net\runs\denoise_classical_benchmark_20260902_224920" "E:\1-脉络膜\OCT降噪\SABIDS-Net\SABIDS-Net\runs\denoise_classical_benchmark_20260902_224920\benchmark_summary.xlsx"
-$builderExit = $LASTEXITCODE
-& $node tools\oct_denoise_benchmark\validate_benchmark_workbook.mjs "E:\1-脉络膜\OCT降噪\SABIDS-Net\SABIDS-Net\runs\denoise_classical_benchmark_20260902_224920\benchmark_summary.xlsx" "E:\1-脉络膜\OCT降噪\SABIDS-Net\SABIDS-Net\runs\denoise_classical_benchmark_20260902_224920\reports\workbook_post_import_validation.json"
-if ($LASTEXITCODE -ne 0) { throw "Workbook round-trip validation failed." }
-if ($builderExit -ne 0) { Write-Warning "The Windows artifact-tool process reported a cleanup-stage exit after export; the saved workbook passed independent round-trip validation." }
+python -m compileall -q tools\oct_denoise_benchmark tests\test_denoise_protocol_v1.py
+python -m pytest -q
+git diff --check
 ```
-
-On the bundled Windows runtime, artifact-tool may report `0xC0000409` during
-native process cleanup after the workbook and previews have already been
-written. The separate import/inspect validator is therefore the authoritative
-success gate; it must exit zero.
-
-Re-run `summarize` after any completed inference extension; it deterministically rebuilds position/dataset/overall aggregates, 10,000-sample bootstrap intervals (`seed=42`), the fixed atlas, report, acceptance table and asset inventory.

@@ -1,0 +1,10 @@
+# Reproducible PKU37 denoising benchmark runtime (Python 3.10+).
+numpy>=1.24,<3
+pandas>=2.0,<3
+scipy>=1.10,<2
+scikit-image>=0.21,<1
+Pillow>=10,<12
+PyYAML>=6,<7
+opencv-python-headless>=4.8,<5
+bm3d==4.0.3
+torch>=2.2,<3

@@ -1,18 +1,33 @@
 method_id: nafnet_paired
-name_for_report: NAFNet-width32-1-1-1-28
+name_for_report: NAFNet-paired-OCT
+topology_origin: official SIDD NAFNet-width32 adapted to one-channel OCT
 initialization: random
 pretrained: false
 width: 32
-enc_blocks: [1, 1, 1, 28]
-middle_blocks: 1
-dec_blocks: [1, 1, 1, 1]
+img_channel: 1
+enc_blocks: [2, 2, 4, 8]
+middle_blocks: 12
+dec_blocks: [2, 2, 2, 2]
+legacy_nonformal_topology: {enc_blocks: [1, 1, 1, 28], middle_blocks: 1, dec_blocks: [1, 1, 1, 1]}
 loss: official_psnr_loss
 optimizer: AdamW
 betas: [0.9, 0.9]
 learning_rate: 0.001
+min_learning_rate: 0.000001
+scheduler: cosine
 patch_size: 256
+physical_batch_size: 4
+gradient_accumulation_steps: 1
+effective_batch_size: 4
 max_updates: 100000
-validation_frequency_updates: 1000
+fast_validation_frequency_updates: 1000
+fast_validation_frames_per_position: 3
+full_validation_frequency_updates: 5000
+checkpoint_selection_uses_full_validation_only: true
+num_workers: 4
+persistent_workers: true
+pin_memory: true
+prefetch_factor: 2
 early_stopping_patience_validations: 20
 gradient_clip: 1.0
 amp: true

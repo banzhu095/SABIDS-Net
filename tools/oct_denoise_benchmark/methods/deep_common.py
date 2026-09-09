@@ -10,6 +10,23 @@ from torch import nn
 from .base import AdapterContext
 
 
+def _blend_weight(height: int, width: int, overlap: int, *, top: bool, bottom: bool, left: bool, right: bool,
+                  device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+    """Cosine feathering with unit weight on image-boundary edges."""
+    wy = torch.ones(height, device=device, dtype=dtype)
+    wx = torch.ones(width, device=device, dtype=dtype)
+    oy, ox = min(overlap, height), min(overlap, width)
+    if oy:
+        ramp = 0.5 - 0.5 * torch.cos(torch.linspace(0, torch.pi, oy, device=device, dtype=dtype))
+        if not top: wy[:oy] = ramp
+        if not bottom: wy[-oy:] = torch.flip(ramp, dims=(0,))
+    if ox:
+        ramp = 0.5 - 0.5 * torch.cos(torch.linspace(0, torch.pi, ox, device=device, dtype=dtype))
+        if not left: wx[:ox] = ramp
+        if not right: wx[-ox:] = torch.flip(ramp, dims=(0,))
+    return (wy[:, None] * wx[None, :]).clamp_min(torch.finfo(dtype).eps)[None, None]
+
+
 def tiled_forward(model: nn.Module, image: np.ndarray, context: AdapterContext) -> np.ndarray:
     device = torch.device(context.device)
     tensor = torch.from_numpy(image)[None, None].to(device)
@@ -29,8 +46,11 @@ def tiled_forward(model: nn.Module, image: np.ndarray, context: AdapterContext) 
                 for x in sorted(set(xs)):
                     patch = tensor[..., y:y + tile, x:x + tile]
                     pred = model(patch)
-                    result[..., y:y + pred.shape[-2], x:x + pred.shape[-1]] += pred
-                    weight[..., y:y + pred.shape[-2], x:x + pred.shape[-1]] += 1
+                    height, width = pred.shape[-2:]
+                    blend = _blend_weight(height, width, overlap, top=y == 0, bottom=y + height >= image.shape[0],
+                                          left=x == 0, right=x + width >= image.shape[1], device=device, dtype=pred.dtype)
+                    result[..., y:y + height, x:x + width] += pred * blend
+                    weight[..., y:y + height, x:x + width] += blend
             result = result / weight.clamp_min(1)
     return result[0, 0].detach().cpu().numpy()
 

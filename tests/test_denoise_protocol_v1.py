@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from pathlib import Path
+import argparse
 
 import numpy as np
 import pandas as pd
 import pytest
 import torch
+import cv2
 
 from tools.oct_denoise_benchmark.data import audit_protocol, load_protocol_manifest
 from tools.oct_denoise_benchmark.evaluate import mark_recovered_failures
@@ -14,10 +16,137 @@ from tools.oct_denoise_benchmark.metrics import ms_ssim
 from tools.oct_denoise_benchmark.methods import AdapterContext, denoise
 from tools.oct_denoise_benchmark.methods.dncnn import DnCNN
 from tools.oct_denoise_benchmark.methods.ksvd_adapter import _dct_dictionary, _ksvd, omp
-from tools.oct_denoise_benchmark.package_light import materialize_fixed_atlas
+from tools.oct_denoise_benchmark.methods.nafnet import NAFBlock, NAFNet
+from tools.oct_denoise_benchmark.package_light import _ascii_stage_paths, materialize_fixed_atlas
 from tools.oct_denoise_benchmark.statistics import bootstrap_confidence_intervals
 from tools.oct_denoise_benchmark.table_store import merge_records
-from tools.oct_denoise_benchmark.train_paired import checkpoint_selection_reason
+from tools.oct_denoise_benchmark.train_paired import PositionBalancedPairDataset, checkpoint_selection_reason, validation_can_select_checkpoint
+from tools.oct_denoise_benchmark.methods.deep_common import tiled_forward
+from tools.oct_denoise_benchmark.inference import run as run_inference
+from tools.oct_denoise_benchmark.registry import save_yaml
+from tools.oct_denoise_benchmark.merge_tracks import merge_tracks
+
+
+def test_nafblock_matches_official_operation_order_and_channels():
+    block = NAFBlock(8)
+    assert block.sca[1].in_channels == 8 and block.sca[1].out_channels == 8
+    assert block.conv3.in_channels == 8 and block.conv3.out_channels == 8
+    with torch.no_grad():
+        block.beta.fill_(0.7); block.gamma.fill_(0.4)
+    source = torch.randn(2, 8, 11, 13, requires_grad=True)
+    actual = block(source)
+    x = block.norm1(source)
+    x = block.conv1(x)
+    x = block.conv2(x)
+    x = block.sg(x)
+    x = x * block.sca(x)
+    x = block.conv3(x)
+    expected_y = source + block.dropout1(x) * block.beta
+    x = block.conv4(block.norm2(expected_y))
+    x = block.sg(x)
+    x = block.conv5(x)
+    expected = expected_y + block.dropout2(x) * block.gamma
+    torch.testing.assert_close(actual, expected, rtol=1e-6, atol=1e-7)
+    actual.square().mean().backward()
+    assert actual.shape == source.shape and torch.isfinite(actual).all()
+    assert source.grad is not None and torch.isfinite(source.grad).all()
+
+
+def test_nafnet_single_channel_padding_restores_source_shape():
+    model = NAFNet(width=4, enc_blocks=(1, 1), middle_blocks=1, dec_blocks=(1, 1))
+    source = torch.rand(1, 1, 31, 47, requires_grad=True)
+    result = model(source)
+    assert result.shape == source.shape and torch.isfinite(result).all()
+    result.mean().backward()
+    assert source.grad is not None and torch.isfinite(source.grad).all()
+
+
+def test_position_balanced_dataset_is_resume_exact_and_position_balanced(monkeypatch):
+    rows = pd.DataFrame([
+        {"dataset": "PKU37", "split": "train", "position_id": "p1", "sample_id": "a", "image_path": "a", "clean_path": "a"},
+        {"dataset": "PKU37", "split": "train", "position_id": "p2", "sample_id": "b", "image_path": "b", "clean_path": "b"},
+        {"dataset": "PKU37", "split": "train", "position_id": "p2", "sample_id": "c", "image_path": "c", "clean_path": "c"},
+    ])
+    monkeypatch.setattr("tools.oct_denoise_benchmark.train_paired.read_image", lambda path: (np.full((12, 12), len(str(path)), np.float32) / 10, {}))
+    whole = PositionBalancedPairDataset(rows, 8, 42, 2000)
+    positions = [whole[index][2] for index in range(2000)]
+    assert abs(positions.count("p1") - positions.count("p2")) < 120
+    uninterrupted = [whole[index][0] for index in range(15, 25)]
+    resumed = PositionBalancedPairDataset(rows, 8, 42, 10, start_index=15)
+    for expected, actual in zip(uninterrupted, (resumed[index][0] for index in range(10))):
+        torch.testing.assert_close(expected, actual)
+
+
+def test_cosine_scheduler_state_restores_exactly():
+    parameter_a = torch.nn.Parameter(torch.ones(())); optimizer_a = torch.optim.AdamW([parameter_a], lr=1e-3)
+    scheduler_a = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer_a, T_max=10, eta_min=1e-6)
+    continuous = []
+    saved = None
+    for update in range(10):
+        optimizer_a.step(); scheduler_a.step(); continuous.append(scheduler_a.get_last_lr()[0])
+        if update == 4: saved = (optimizer_a.state_dict(), scheduler_a.state_dict())
+    parameter_b = torch.nn.Parameter(torch.ones(())); optimizer_b = torch.optim.AdamW([parameter_b], lr=1e-3)
+    scheduler_b = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer_b, T_max=10, eta_min=1e-6)
+    assert saved is not None
+    optimizer_b.load_state_dict(saved[0]); scheduler_b.load_state_dict(saved[1])
+    resumed = []
+    for _ in range(5):
+        optimizer_b.step(); scheduler_b.step(); resumed.append(scheduler_b.get_last_lr()[0])
+    assert resumed == pytest.approx(continuous[5:])
+
+
+def test_fast_validation_cannot_select_checkpoint():
+    assert not validation_can_select_checkpoint("fixed_fast_subset_not_checkpoint_eligible")
+    assert validation_can_select_checkpoint("full_277_checkpoint_eligible")
+
+
+def test_cosine_tiling_preserves_identity_output():
+    image = np.random.default_rng(2).random((37, 53), dtype=np.float32)
+    result = tiled_forward(torch.nn.Identity(), image, AdapterContext(tile_size=16, tile_overlap=8))
+    np.testing.assert_allclose(result, image, rtol=1e-6, atol=1e-7)
+
+
+def test_package_stage_paths_are_ascii_and_manifest_safe(tmp_path: Path):
+    nested = tmp_path / "预览图"
+    nested.mkdir()
+    (nested / "方法比较.png").write_bytes(b"png")
+    _ascii_stage_paths(tmp_path)
+    paths = [path.relative_to(tmp_path).as_posix() for path in tmp_path.rglob("*")]
+    assert paths and all(path.isascii() for path in paths)
+
+
+def test_single_file_inference_preserves_uint16_and_resumes_by_hash(tmp_path: Path):
+    source = tmp_path / "input.tif"; output = tmp_path / "result.tif"; registry = tmp_path / "registry.yaml"
+    raw = np.arange(20 * 24, dtype=np.uint16).reshape(20, 24)
+    ok, encoded = cv2.imencode(".tif", raw); assert ok
+    encoded.tofile(str(source))
+    save_yaml(registry, {"status": "locked", "methods": {"noisy_identity": {"config": {"method_id": "noisy_identity"}, "seed": 0}}})
+    args = argparse.Namespace(method="noisy_identity", input=source, output=output, registry=registry, checkpoint=None,
+                              device="cpu", recursive=False, extensions=".tif", preserve_relative_path=False,
+                              preserve_bit_depth=True, save_preview=False, overwrite=False, tile_size=None, tile_overlap=64)
+    first = run_inference(args); second = run_inference(args)
+    restored = cv2.imdecode(np.fromfile(str(output), np.uint8), cv2.IMREAD_UNCHANGED)
+    assert first[0]["status"] == "success" and second[0]["status"] == "success"
+    assert restored.dtype == np.uint16 and restored.shape == raw.shape
+    np.testing.assert_array_equal(restored, raw)
+    manifest = pd.read_csv(tmp_path / "inference_manifest.csv")
+    assert len(manifest) == 1 and manifest.source_code_sha256.str.len().item() == 64
+
+
+def test_classical_track_merge_is_idempotent_and_rejects_source_conflict(tmp_path: Path):
+    run = tmp_path / "run"; classical = run / "tracks" / "classical"
+    save_yaml(run / "configs" / "locked_classical_configs.yaml", {"status": "unlocked", "methods": {}})
+    save_yaml(classical / "configs" / "locked_classical_configs.yaml",
+              {"status": "locked_on_pku37_validation", "methods": {"tv_chambolle": {"method_id": "tv_chambolle", "weight": 0.1}}})
+    row = {"method_id": "tv_chambolle", "search_phase": "full_validation", "search_round": 0,
+           "candidate_uid": "x", "sample_id": "a", "candidate_json": "{}", "source_sha256": "source-a"}
+    (classical / "metrics").mkdir(parents=True)
+    pd.DataFrame([row]).to_csv(classical / "metrics" / "parameter_search_partial.csv", index=False)
+    merge_tracks(run, classical); merge_tracks(run, classical)
+    assert len(pd.read_csv(run / "metrics" / "parameter_search_partial.csv")) == 1
+    pd.DataFrame([{**row, "source_sha256": "source-b"}]).to_csv(classical / "metrics" / "parameter_search_partial.csv", index=False)
+    with pytest.raises(RuntimeError, match="source_sha256"):
+        merge_tracks(run, classical)
 
 
 @pytest.mark.parametrize("config", [
@@ -65,10 +194,12 @@ def test_ksvd_reconstructs_without_holes_and_has_no_clean_context():
     assert not hasattr(AdapterContext(), "clean") and not hasattr(AdapterContext(), "reference")
 
 
-def test_ksvd_required_search_dimensions_vary_and_noise_weight_is_effective():
+def test_ksvd_standard_grid_fixes_weights_and_noise_weight_is_effective():
     grid = _candidate_grid("ksvd_self")
-    for key in ("patch_size", "dictionary_atoms", "iterations", "omp_max_nonzero", "noise_weight", "stride", "aggregation_weight"):
+    for key in ("patch_size", "dictionary_atoms", "iterations", "omp_max_nonzero", "stride"):
         assert len({item[key] for item in grid}) > 1
+    assert {item["noise_weight"] for item in grid} == {1.0}
+    assert {item["aggregation_weight"] for item in grid} == {0.0}
     image = np.random.default_rng(8).random((16, 18), dtype=np.float32)
     config = {"method_id": "ksvd_self", "patch_size": 4, "dictionary_atoms": 12, "iterations": 1,
               "omp_max_nonzero": 2, "stride": 4, "max_training_patches": 24, "aggregation_weight": 1.0}

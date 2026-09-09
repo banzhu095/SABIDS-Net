@@ -5,6 +5,7 @@ import hashlib
 import json
 import shutil
 import zipfile
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Sequence
@@ -205,7 +206,14 @@ def write_report(project_root: Path, run_dir: Path) -> None:
     dataset = pd.read_csv(dataset_path) if dataset_path.exists() else pd.DataFrame()
     table = dataset.to_markdown(index=False) if not dataset.empty else "当前仅完成工程 smoke，尚无可报告的正式比较结果。"
     partial_path = run_dir / "metrics" / "parameter_search_partial.csv"
-    if partial_path.is_file():
+    classical_path = run_dir / "configs" / "locked_classical_configs.yaml"
+    classical = load_yaml(classical_path) if classical_path.is_file() else {}
+    if "tv_chambolle" in classical.get("methods", {}):
+        tv = classical["methods"]["tv_chambolle"]
+        partial_note = (f"TV-Chambolle 已完成全部 PKU37 validation 校准并形成单方法部分锁定："
+                        f"weight={tv['weight']}, eps={tv['eps']}, max_num_iter={tv['max_num_iter']}。"
+                        "该旧开发 run 不得混入代码重构后的全新云端正式 run。")
+    elif partial_path.is_file():
         partial = pd.read_csv(partial_path)
         partial_note = f"正式 validation 校准正在进行或可恢复：partial CSV 当前 {len(partial)} 行；它不是已锁定参数。"
     else:
@@ -219,9 +227,9 @@ def write_report(project_root: Path, run_dir: Path) -> None:
         "- BM3D：改为 `bm3d 4.0.3` 的 standard profile，并强制 hard-thresholding + Wiener 两阶段；LC 仅保留为补充。许可证仅允许非商业使用。",
         "- TV：调用 `skimage.restoration.denoise_tv_chambolle`，独立记录 weight、eps 与 max_num_iter。",
         "- NLM：调用 `skimage.restoration.denoise_nl_means` 与 noisy-only `estimate_sigma`；旧 speckle-NLM 不进入主表。",
-        "- K-SVD：逐图 noisy-only 学习，OMP 编码、逐原子 `numpy.linalg.svd` 更新、重叠 patch 聚合；单测覆盖归一化、稀疏度、SVD 路径、无空洞、确定性和无 clean context。",
+        "- K-SVD：本地 K-SVD-style noisy-only 实现；标准主表固定 noise_weight=1、aggregation_weight=0，有限分数网格不声称全局最优。",
         "- DnCNN：单通道、经典 BN/卷积结构、预测 noisy-clean 残差，训练损失为残差 MSE。",
-        "- NAFNet：单通道 I/O，复用 NAFBlock、encoder-decoder 和 padding；训练使用官方 PSNRLoss 方向。首次 smoke 发现符号错误后已修正，错误目录保留。", "",
+        "- NAFNet：NAFBlock 按官方 SimpleGate→SCA→conv3 顺序；NAFNet-paired-OCT 使用 SIDD width32 拓扑 [2,2,4,8]/12/[2,2,2,2]，单通道且从随机初始化训练。", "",
         "## 当前数值", "", table, "",
         "上述若仅含 noisy_identity validation，它是开发基线，不是论文主测试表。", "",
         partial_note, "",
@@ -248,6 +256,21 @@ def write_inference_commands(run_dir: Path) -> None:
     (run_dir / "reports" / "inference_commands.md").write_text("\n".join(lines), encoding="utf-8")
 
 
+def _ascii_stage_paths(stage: Path) -> None:
+    """Make every packaged member portable across Windows/Linux unzip tools."""
+    for path in sorted(stage.rglob("*"), key=lambda item: len(item.parts), reverse=True):
+        if path.name.isascii():
+            continue
+        suffix = "".join(path.suffixes) if path.is_file() else ""
+        stem = path.name[:-len(suffix)] if suffix else path.name
+        safe = re.sub(r"[^A-Za-z0-9._-]+", "_", stem.encode("ascii", "ignore").decode("ascii")).strip("_.-")
+        digest = __import__("hashlib").sha256(path.name.encode("utf-8")).hexdigest()[:10]
+        target = path.with_name(f"{safe or 'asset'}_{digest}{suffix}")
+        if target.exists():
+            raise FileExistsError(f"ASCII package path collision: {target}")
+        path.rename(target)
+
+
 def package(project_root: Path, run_dir: Path) -> Path:
     _ensure_result_tables(run_dir); selection = select_fixed_atlas(project_root, run_dir); materialize_fixed_atlas(project_root, run_dir, selection); write_report(project_root, run_dir); write_inference_commands(run_dir)
     stage = (run_dir / "gpt_light").resolve()
@@ -263,6 +286,7 @@ def package(project_root: Path, run_dir: Path) -> Path:
         else: shutil.copy2(source, stage / source.name)
     guide = """# GPT analysis guide\n\n正式结果完成后重点检查：PKU37 到 Duke17/Duke28 的跨域退化；PSNR/SSIM 与 EPI、边缘 MAE、高频和 Laplacian 能量的冲突；参数搜索边界；过度平滑；以及固定分割网络应优先比较的方法。当前包若标记 incomplete，只能审查代码、协议和 smoke，不得推断正式方法排名。\n"""
     (stage / "GPT_ANALYSIS_GUIDE.md").write_text(guide, encoding="utf-8")
+    _ascii_stage_paths(stage)
     inventory = []
     for path in sorted(stage.rglob("*")):
         if path.is_file() and path.name != "PACKAGE_MANIFEST.csv": inventory.append({"path": path.relative_to(stage).as_posix(), "bytes": path.stat().st_size, "sha256": sha256_file(path)})

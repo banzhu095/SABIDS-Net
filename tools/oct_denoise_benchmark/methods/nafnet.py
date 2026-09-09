@@ -51,15 +51,16 @@ class NAFBlock(nn.Module):
         self.gamma = nn.Parameter(torch.zeros(1, channels, 1, 1))
 
     def forward(self, inp: torch.Tensor) -> torch.Tensor:
-        x = self.conv3(self.sg(self.conv2(self.conv1(self.norm1(inp)))))
+        x = self.sg(self.conv2(self.conv1(self.norm1(inp))))
         x = x * self.sca(x)
+        x = self.conv3(x)
         y = inp + self.dropout1(x) * self.beta
         x = self.conv5(self.sg(self.conv4(self.norm2(y))))
         return y + self.dropout2(x) * self.gamma
 
 
 class NAFNet(nn.Module):
-    def __init__(self, width: int = 32, enc_blocks: Sequence[int] = (1, 1, 1, 28), middle_blocks: int = 1, dec_blocks: Sequence[int] = (1, 1, 1, 1)):
+    def __init__(self, width: int = 32, enc_blocks: Sequence[int] = (2, 2, 4, 8), middle_blocks: int = 12, dec_blocks: Sequence[int] = (2, 2, 2, 2)):
         super().__init__()
         if len(enc_blocks) != len(dec_blocks):
             raise ValueError("encoder and decoder levels must match")
@@ -101,9 +102,9 @@ def nafnet_adapter(image: np.ndarray, config: Mapping[str, Any], context: Adapte
     if model is None:
         model = NAFNet(
             width=int(config.get("width", 32)),
-            enc_blocks=_int_tuple(config.get("enc_blocks", [1, 1, 1, 28])),
-            middle_blocks=int(config.get("middle_blocks", 1)),
-            dec_blocks=_int_tuple(config.get("dec_blocks", [1, 1, 1, 1])),
+            enc_blocks=_int_tuple(config.get("enc_blocks", [2, 2, 4, 8])),
+            middle_blocks=int(config.get("middle_blocks", 12)),
+            dec_blocks=_int_tuple(config.get("dec_blocks", [2, 2, 2, 2])),
         )
         load_checkpoint(model, context, "nafnet_paired")
         context.extras["loaded_model"] = model

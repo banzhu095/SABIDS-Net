@@ -36,11 +36,12 @@ def main(argv: Sequence[str] | None = None) -> None:
     rows = []
     models = [
         ("dncnn_paired", "depth17-features64", DnCNN(17, 64)),
-        ("nafnet_paired", "width32-enc1,1,1,28-middle1-dec1,1,1,1", NAFNet(32, (1, 1, 1, 28), 1, (1, 1, 1, 1))),
+        ("nafnet_paired", "NAFNet-paired-OCT-width32-enc2,2,4,8-middle12-dec2,2,2,2", NAFNet(32, (2, 2, 4, 8), 12, (2, 2, 2, 2))),
     ]
     for method, configuration, model in models:
         parameters, flops = profile(model, args.height, args.width)
-        rows.append({"method_id": method, "configuration": configuration, "input_height": args.height, "input_width": args.width, "parameters": parameters, "flops": flops, "gflops": flops / 1e9, "status": "architecture_profile_untrained"})
+        rows.append({"method_id": method, "configuration": configuration, "input_height": args.height, "input_width": args.width, "parameters": parameters,
+                     "macs": flops // 2, "gmacs": flops / 2e9, "flops": flops, "gflops": flops / 1e9, "status": "architecture_profile_untrained"})
     args.output.parent.mkdir(parents=True, exist_ok=True); pd.DataFrame(rows).to_csv(args.output, index=False)
 
 

@@ -18,7 +18,7 @@ import yaml
 from .data import audit_protocol, development_rows, load_protocol_manifest
 from .io import read_image, save_image, sha256_file
 from .metrics import compute_metrics
-from .methods import AdapterContext, denoise
+from .methods import AdapterContext, adapter_source_sha256, denoise
 from .registry import lock_run, save_yaml, stable_sha256
 from .table_store import atomic_write_csv
 
@@ -61,7 +61,7 @@ def _smoke_configs() -> dict[str, dict[str, Any]]:
         "bm3d_standard": {"method_id": "bm3d_standard", "sigma_psd": 0.08, "profile": "standard", "stage": "all"},
         "tv_chambolle": {"method_id": "tv_chambolle", "weight": 0.05, "eps": 0.0002, "max_num_iter": 20},
         "nlm": {"method_id": "nlm", "h_sigma_multiplier": 0.8, "patch_size": 3, "patch_distance": 3, "fast_mode": True, "provide_sigma": True},
-        "ksvd_self": {"method_id": "ksvd_self", "patch_size": 4, "dictionary_atoms": 16, "iterations": 1, "omp_max_nonzero": 2, "stride": 4, "max_training_patches": 64, "aggregation_weight": 1.0},
+        "ksvd_self": {"method_id": "ksvd_self", "patch_size": 4, "dictionary_atoms": 16, "iterations": 1, "omp_max_nonzero": 2, "stride": 4, "max_training_patches": 64, "noise_weight": 1.0, "aggregation_weight": 0.0},
     }
 
 
@@ -92,15 +92,13 @@ def _candidate_grid(method: str) -> list[dict[str, Any]]:
     if method == "tv_chambolle": return [{"method_id": method, "weight": weight, "eps": eps, "max_num_iter": iterations} for weight in (0.01, 0.03, 0.06, 0.12, 0.24) for eps in (0.0001, 0.0002) for iterations in (100, 300)]
     if method == "nlm": return [{"method_id": method, "h_sigma_multiplier": h, "patch_size": patch, "patch_distance": distance, "fast_mode": True, "provide_sigma": provide} for h in (0.5, 0.8, 1.1, 1.5) for patch in (3, 5, 7) for distance in (3, 6, 10) for provide in (True, False)]
     if method == "ksvd_self":
-        base = {"method_id": method, "patch_size": 7, "dictionary_atoms": 64, "iterations": 5, "omp_max_nonzero": 4, "omp_residual_threshold": 0.0, "stride": 6, "noise_weight": 1.0, "aggregation_weight": 1.0, "max_training_patches": 2000}
+        base = {"method_id": method, "patch_size": 7, "dictionary_atoms": 64, "iterations": 5, "omp_max_nonzero": 4, "omp_residual_threshold": 0.0, "stride": 6, "noise_weight": 1.0, "aggregation_weight": 0.0, "max_training_patches": 2000}
         # A deterministic fractional grid varies every required dimension while
         # avoiding the prohibitive 2^7 full Cartesian product.
         variants = [
             {}, {"patch_size": 5}, {"dictionary_atoms": 32}, {"dictionary_atoms": 96},
             {"iterations": 3}, {"iterations": 7}, {"omp_max_nonzero": 3},
-            {"omp_max_nonzero": 5}, {"noise_weight": 0.6}, {"noise_weight": 0.8},
-            {"stride": 4}, {"stride": 8}, {"aggregation_weight": 0.0},
-            {"aggregation_weight": 3.0},
+            {"omp_max_nonzero": 5}, {"stride": 4}, {"stride": 8},
         ]
         return [{**base, **variant} for variant in variants]
     raise ValueError(method)
@@ -202,7 +200,7 @@ def _evaluate_candidates(method: str, candidates: list[dict[str, Any]], rows: pd
             record = {"method_id": method, "search_phase": phase, "search_round": search_round,
                       "candidate_index": candidate_index, "candidate_uid": candidate_uid,
                       "candidate_json": candidate_json, "position_id": row.position_id,
-                      "sample_id": row.sample_id}
+                      "sample_id": row.sample_id, "source_sha256": adapter_source_sha256(method)}
             try:
                 noisy, _ = read_image(Path(row.image_path)); reference, _ = read_image(Path(row.clean_path))
                 started = time.perf_counter(); output = denoise(noisy, config, AdapterContext(seed=42)); elapsed = time.perf_counter() - started
@@ -309,7 +307,34 @@ def main(argv: Sequence[str] | None = None) -> None:
         if name == "calibrate":
             p.add_argument("--methods", nargs="+", default=["bm3d_standard", "tv_chambolle", "nlm", "ksvd_self"]); p.add_argument("--limit-frames-per-position", type=int)
             p.add_argument("--ksvd-coarse-frames-per-position", type=int, default=2); p.add_argument("--ksvd-top-candidates", type=int, default=4); p.add_argument("--psnr-tolerance", type=float, default=1e-4)
-    args = parser.parse_args(argv); run = args.run_dir
+    file_parser = sub.add_parser("denoise-file")
+    file_parser.add_argument("--project-root", type=Path, default=Path(".")); file_parser.add_argument("--method", required=True)
+    file_parser.add_argument("--input-file", type=Path, required=True); file_parser.add_argument("--output-file", type=Path, required=True)
+    file_parser.add_argument("--config", type=Path, required=True); file_parser.add_argument("--checkpoint", type=Path); file_parser.add_argument("--device", default="cpu")
+    file_parser.add_argument("--preserve-bit-depth", action=argparse.BooleanOptionalAction, default=True); file_parser.add_argument("--overwrite", action="store_true")
+    file_parser.add_argument("--tile-size", type=int); file_parser.add_argument("--tile-overlap", type=int, default=64)
+    folder_parser = sub.add_parser("denoise-folder")
+    folder_parser.add_argument("--project-root", type=Path, default=Path(".")); folder_parser.add_argument("--method", required=True)
+    folder_parser.add_argument("--input-dir", type=Path, required=True); folder_parser.add_argument("--output-dir", type=Path, required=True)
+    folder_parser.add_argument("--config", type=Path, required=True); folder_parser.add_argument("--checkpoint", type=Path); folder_parser.add_argument("--device", default="cpu")
+    folder_parser.add_argument("--recursive", action="store_true"); folder_parser.add_argument("--resume", action="store_true")
+    folder_parser.add_argument("--preserve-bit-depth", action=argparse.BooleanOptionalAction, default=True); folder_parser.add_argument("--overwrite", action="store_true")
+    folder_parser.add_argument("--tile-size", type=int); folder_parser.add_argument("--tile-overlap", type=int, default=64)
+    args = parser.parse_args(argv); run = getattr(args, "run_dir", None)
+    if args.command in {"denoise-file", "denoise-folder"}:
+        from .inference import DEFAULT_EXTENSIONS, run as run_inference
+        single = args.command == "denoise-file"
+        inference_args = argparse.Namespace(
+            method=args.method, input=args.input_file if single else args.input_dir,
+            output=args.output_file if single else args.output_dir, registry=args.config,
+            checkpoint=args.checkpoint, device=args.device, recursive=False if single else args.recursive,
+            extensions=DEFAULT_EXTENSIONS, preserve_relative_path=not single,
+            preserve_bit_depth=args.preserve_bit_depth, save_preview=False, overwrite=args.overwrite,
+            tile_size=args.tile_size, tile_overlap=args.tile_overlap,
+        )
+        rows = run_inference(inference_args)
+        print(json.dumps({"processed": len(rows), "success": sum(row.get("status") == "success" for row in rows)}, ensure_ascii=False))
+        return
     if args.command == "init": print(create_run(args.project_root, run)); return
     if run is None: parser.error("--run-dir is required")
     if args.command == "audit": print(json.dumps(audit(args.project_root, run), ensure_ascii=False)); return

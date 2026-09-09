@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Mapping
+import hashlib
+import inspect
 
 import numpy as np
 
@@ -39,6 +41,14 @@ def _registry() -> dict[str, Adapter]:
         "dncnn_paired": dncnn_adapter,
         "nafnet_paired": nafnet_adapter,
     }
+
+
+def adapter_source_sha256(method_id: str) -> str:
+    adapter = _registry()[method_id]
+    source = inspect.getsourcefile(adapter)
+    if source is None:
+        raise RuntimeError(f"cannot resolve adapter source for {method_id}")
+    return hashlib.sha256(Path(source).read_bytes()).hexdigest()
 
 
 def denoise(image_float32_01: np.ndarray, method_config: Mapping[str, Any], context: AdapterContext | Mapping[str, Any] | None = None) -> np.ndarray:

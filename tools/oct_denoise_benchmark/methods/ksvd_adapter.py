@@ -97,7 +97,7 @@ def ksvd_adapter(image: np.ndarray, config: Mapping[str, Any], context: AdapterC
     sparsity = int(config.get("omp_max_nonzero", 4))
     threshold = float(config.get("omp_residual_threshold", 0.0))
     noise_weight = float(config.get("noise_weight", 1.0))
-    aggregation_weight = float(config.get("aggregation_weight", 1.0))
+    aggregation_weight = float(config.get("aggregation_weight", 0.0))
     max_train = int(config.get("max_training_patches", 4000))
     if patch < 2 or patch > min(image.shape) or stride < 1 or atoms < 1 or sparsity < 1:
         raise ValueError("invalid K-SVD configuration")

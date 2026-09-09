@@ -783,3 +783,39 @@ Populate one row per independent fold after validation threshold selection.
   are opened by this audit.
 - The focused next-stage test suite passed (22 tests); cloud D1 artifacts and
   the resulting active protocol lock remain to be audited after code sync.
+
+# 2026-09-09 — PKU37 denoising benchmark v2 cloud-readiness refactor
+
+- Created the dedicated `denoise-benchmark-v2` branch from clean
+  `main@0b604b4387f73a026b71f861016dabbee030ccf0`. The active implementation is
+  `tools/oct_denoise_benchmark`; the sibling `OCT_denoise` repository remains
+  an unverified historical third-party archive.
+- Corrected NAFBlock to the official order: SimpleGate output is multiplied by
+  SCA before `conv3`. The formal one-channel `NAFNet-paired-OCT` configuration
+  now uses the official SIDD width-32 topology `[2,2,4,8]/12/[2,2,2,2]`; the old
+  `[1,1,1,28]/1/[1,1,1,1]` topology is recorded as legacy/non-formal.
+- Replaced per-update direct image opening with an index-deterministic,
+  position-balanced DataLoader path supporting worker count, persistent
+  workers, pinned memory, prefetch and optional uint8/uint16 worker-local cache.
+  Optimizer, cosine scheduler, AMP scaler, Python/NumPy/Torch RNG and loader
+  generator state are checkpointed. Effective batch defaults to 4.
+- Split validation into a fixed per-position fast subset every 1,000 updates
+  and complete 277-frame validation every 5,000 updates. Only the latter can
+  update formal best checkpoints. Checkpoints and curves record update count,
+  seen patches, throughput, peak GPU allocation, training time and exact
+  selection metrics.
+- Split the ModelWhale entry point into `preflight`, `deep`, `classical`,
+  `merge`, `evaluate`, `package` and `full` tracks. Deep and classical tracks
+  have isolated partial/state paths; atomic merge rejects key, config, adapter
+  source and checkpoint provenance conflicts. Workbook generation is optional.
+- Added hash-verified single-file/folder resume manifests, cosine tile blending,
+  primary-seed downstream manifest generation, benchmark requirements and
+  Windows/Linux commands. GPT-light staging renames every non-ASCII member so
+  Windows/Linux ZIP extraction cannot disagree about manifest paths.
+- The prior Windows TV job ended normally: 6,925/6,925 successful rows,
+  25 candidates, 277 frames, 6 positions and no failures. Validation selected
+  `weight=0.24, eps=5e-5, max_num_iter=300` with position-macro
+  PSNR/SSIM `30.5147655051/0.7258321740`. It remains development-only and will
+  not be merged into the fresh formal cloud run.
+- Local CUDA remains unavailable. No formal deep checkpoint, PKU37 test metric,
+  Duke metric, or downstream segmentation result was produced in this change.
