@@ -149,6 +149,12 @@ def test_classical_track_merge_is_idempotent_and_rejects_source_conflict(tmp_pat
         merge_tracks(run, classical)
 
 
+def test_modelwhale_clean_gate_allows_runtime_untracked_files_but_not_source():
+    script = (Path(__file__).parents[1] / "tools" / "oct_denoise_benchmark" / "scripts" / "run_modelwhale_protocol.sh").read_text(encoding="utf-8")
+    assert "git status --porcelain --untracked-files=no" in script
+    assert "git ls-files --others --exclude-standard -- configs docs sabids tests tools" in script
+
+
 @pytest.mark.parametrize("config", [
     {"method_id": "noisy_identity"},
     {"method_id": "tv_chambolle", "weight": 0.03, "eps": 2e-4, "max_num_iter": 10},

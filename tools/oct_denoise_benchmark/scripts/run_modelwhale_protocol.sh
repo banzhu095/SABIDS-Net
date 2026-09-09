@@ -32,7 +32,22 @@ fi
 conda activate myconda
 
 commit="$(git rev-parse HEAD)"
-if [[ -n "$(git status --porcelain)" ]]; then echo "Formal runs require a clean committed checkout" >&2; exit 1; fi
+tracked_dirty="$(git status --porcelain --untracked-files=no)"
+if [[ -n "$tracked_dirty" ]]; then
+  echo "Formal runs require committed tracked files. Current tracked changes:" >&2
+  printf '%s\n' "$tracked_dirty" >&2
+  echo "Commit/stash those changes, or restore the checkout to the intended benchmark commit." >&2
+  exit 1
+fi
+# Runtime datasets, manifests, logs and server notes may legitimately be
+# untracked. Still reject untracked source/config/test files because Python can
+# import them even though they are absent from the recorded commit.
+untracked_source="$(git ls-files --others --exclude-standard -- configs docs sabids tests tools '*.py' '*.sh' 'requirements*.txt')"
+if [[ -n "$untracked_source" ]]; then
+  echo "Formal runs refuse untracked source/config/test files:" >&2
+  printf '%s\n' "$untracked_source" >&2
+  exit 1
+fi
 signature="$({ printf '%s\n' "$commit"; sha256sum Manifests/manifest_denoise.csv configs/protocol.yaml configs/dncnn_paired.yaml configs/nafnet_paired.yaml requirements-denoise-benchmark.txt; } | sha256sum | awk '{print $1}')"
 gpu_monitor_pid=""
 stop_gpu_monitor() { if [[ -n "$gpu_monitor_pid" ]] && kill -0 "$gpu_monitor_pid" 2>/dev/null; then kill "$gpu_monitor_pid"; wait "$gpu_monitor_pid" 2>/dev/null || true; fi; }
