@@ -765,3 +765,21 @@ Populate one row per independent fold after validation threshold selection.
   K-SVD calibration. The GPU continuation entry point is
   `tools/oct_denoise_benchmark/scripts/run_modelwhale_protocol.sh` with an
   explicit run directory and `--resume`.
+
+# 2026-09-09 — D1 active-protocol audit hash-semantics correction
+
+- Diagnosed a false D1 cohort conflict: `initialization_audit.json` historically
+  stored the seed-dependent sampler/augmentation schedule under
+  `data_plan_sha256`, while the active-protocol extractor interpreted it as the
+  immutable protocol data-plan digest. Seeds 42/43/44 therefore appeared to
+  disagree even when their resolved configurations used the same protocol.
+- Active-lock extraction now reads immutable protocol identity from the
+  run-captured resolved configuration and never from initialization audit.
+  New initialization audits also expose the digest as
+  `sampler_plan_sha256`, retaining the old key only as an explicit legacy alias.
+- `audit_active_d1.py` now writes candidate CSV/JSON evidence before extraction,
+  returns a structured `blocked` result on a real mismatch, and supports exact
+  `--run-dirs` selection without weakening consistency checks. No test assets
+  are opened by this audit.
+- The focused next-stage test suite passed (22 tests); cloud D1 artifacts and
+  the resulting active protocol lock remain to be audited after code sync.

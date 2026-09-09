@@ -14,6 +14,15 @@ subsequent launch, evaluation, report and package commands require the resulting
 disagreement is a hard blocker. The lock records sealed-test IDs as metadata;
 the tools do not open those assets.
 
+`initialization_audit.json` contains a seed-dependent sampler schedule digest.
+New runs expose it as `sampler_plan_sha256`; its historical
+`data_plan_sha256` alias is not protocol identity and is never used to construct
+the active lock. The authoritative protocol digest is read from the resolved
+run configuration (including its embedded active lock). Candidate evidence is
+written to `runs/reports/d1_active_protocol_audit/`. If unrelated historical D1
+runs are present, pass their exact intended replacements with `--run-dirs`;
+explicit selection does not bypass any consistency check.
+
 ## Implemented scope
 
 - D0 and residual D1 configurations use PKU37 only. D1 combines Charbonnier,

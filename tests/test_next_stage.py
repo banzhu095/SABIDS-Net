@@ -13,7 +13,7 @@ from sabids.engine.trainer import Trainer
 from sabids.config import load_config
 from sabids.data.io import write_gray
 from sabids.experiments.atlas import build_report_atlas
-from sabids.experiments.protocol_lock import extract_active_protocol_lock, find_d1_runs, load_protocol_lock, validate_checkpoint_config
+from sabids.experiments.protocol_lock import d1_protocol_evidence_rows, extract_active_protocol_lock, find_d1_runs, load_protocol_lock, validate_checkpoint_config
 from sabids.losses.total import SABIDSLoss
 from sabids.losses.common import multiscale_gradient_loss, multiscale_laplacian_loss
 from sabids.models.ugbi import UGBIBlock
@@ -82,6 +82,24 @@ def test_d1_seed_sha_disagreement_blocks_lock(tmp_path):
     _write_d1_run(tmp_path, 42, "one"); _write_d1_run(tmp_path, 43, "two")
     with pytest.raises(RuntimeError, match="data_plan_sha256"):
         extract_active_protocol_lock(find_d1_runs(tmp_path))
+
+
+def test_protocol_lock_does_not_confuse_seed_sampler_hash_with_protocol_hash(tmp_path):
+    for seed in (42, 43, 44):
+        run = _write_d1_run(tmp_path, seed, "stable-protocol-plan")
+        (run / "initialization_audit.json").write_text(
+            json.dumps({"data_plan_sha256": f"seed-dependent-sampler-{seed}"}),
+            encoding="utf-8",
+        )
+    runs = find_d1_runs(tmp_path)
+    lock = extract_active_protocol_lock(runs)
+    evidence = d1_protocol_evidence_rows(runs)
+    assert lock["data_plan_sha256"] == "stable-protocol-plan"
+    assert {row["sampler_plan_sha256"] for row in evidence} == {
+        "seed-dependent-sampler-42",
+        "seed-dependent-sampler-43",
+        "seed-dependent-sampler-44",
+    }
 
 
 def test_incomplete_or_test_tainted_protocol_lock_is_rejected(tmp_path):

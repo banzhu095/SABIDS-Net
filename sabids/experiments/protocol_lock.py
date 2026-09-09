@@ -94,11 +94,57 @@ def _fact(documents: dict[str, dict[str, Any]], key: str) -> Any:
         "epochs": ("train.epochs", "train.fixed_epoch"),
         "loss": ("loss",),
     }
-    for source in ("metadata", "data", "initialization", "protocol", "config"):
+    # Protocol identity must come from evidence captured for the run.  In
+    # particular, initialization_audit.json historically called the
+    # seed-dependent sampler-order digest ``data_plan_sha256``.  That digest is
+    # useful for paired-RNG checks, but it is not the immutable dataset protocol
+    # digest and therefore must never be used to build an active protocol lock.
+    if key in (*CONSISTENCY_KEYS, "manifest_root"):
+        sources = ("config", "metadata", "data", "protocol")
+    elif key in ("train_positions", "validation_positions", "sealed_test_positions"):
+        sources = ("config", "data", "protocol", "metadata")
+    elif key in ("input_resolution", "normalization", "seed", "fold", "epochs", "loss"):
+        sources = ("config", "metadata", "data", "protocol")
+    else:
+        sources = ("metadata", "data", "initialization", "protocol", "config")
+    for source in sources:
         value = _first(documents[source], *aliases[key])
         if value not in (None, "", []):
             return value
     return None
+
+
+def d1_protocol_evidence_rows(run_dirs: Iterable[Path]) -> list[dict[str, Any]]:
+    """Return human-readable protocol and sampler evidence for D1 candidates."""
+    rows: list[dict[str, Any]] = []
+    for run_dir in run_dirs:
+        documents = _load_run_documents(Path(run_dir))
+        initialization = documents["initialization"]
+        rows.append({
+            "run_id": Path(run_dir).name,
+            "run_dir": str(Path(run_dir).resolve()),
+            "seed": _fact(documents, "seed") or "",
+            "fold": _fact(documents, "fold") or "",
+            "protocol_id": _fact(documents, "protocol_id") or "",
+            "data_plan_sha256": _fact(documents, "data_plan_sha256") or "",
+            "sampler_plan_sha256": _first(
+                initialization,
+                "sampler_plan_sha256",
+                # Backward compatibility for audits written before the field
+                # was renamed to describe its actual semantics.
+                "data_plan_sha256",
+            ) or "",
+            "label_inventory_sha256": _fact(documents, "label_inventory_sha256") or "",
+            "dataset_inventory_sha256": _fact(documents, "dataset_inventory_sha256") or "",
+            "split_contract_sha256": _fact(documents, "split_contract_sha256") or "",
+            "validation_positions": json.dumps(
+                _fact(documents, "validation_positions") or [],
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
+            "epochs": _fact(documents, "epochs") or "",
+        })
+    return rows
 
 
 def find_d1_runs(project_root: str | Path) -> list[Path]:

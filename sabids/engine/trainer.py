@@ -476,6 +476,7 @@ class Trainer:
             },
             sort_keys=True,
         ).encode("utf-8")
+        sampler_plan_sha256 = hashlib.sha256(plan_payload).hexdigest()
         write_json(
             {
                 "seed": int(self.config.get("seed", 42)),
@@ -501,7 +502,13 @@ class Trainer:
                 "optimizer_parameter_elements": int(
                     sum(parameter.numel() for group in self.optimizer.param_groups for parameter in group["params"])
                 ),
-                "data_plan_sha256": hashlib.sha256(plan_payload).hexdigest(),
+                # This is the seed-dependent sampler/augmentation schedule, not
+                # the immutable protocol-level data_plan_sha256.  Keep the old
+                # key for consumers of historical factorial audits and expose
+                # the unambiguous name for new code.
+                "sampler_plan_sha256": sampler_plan_sha256,
+                "data_plan_sha256": sampler_plan_sha256,
+                "data_plan_sha256_semantics": "legacy_alias_of_sampler_plan_sha256",
                 "data_rng_seed": int(self.config.get("seed", 42)) + 1_000_003,
                 "model_rng_seed": int(self.config.get("seed", 42)),
             },
