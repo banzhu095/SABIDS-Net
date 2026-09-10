@@ -20,7 +20,7 @@ from tools.oct_denoise_benchmark.methods.nafnet import NAFBlock, NAFNet
 from tools.oct_denoise_benchmark.package_light import _ascii_stage_paths, materialize_fixed_atlas
 from tools.oct_denoise_benchmark.statistics import bootstrap_confidence_intervals
 from tools.oct_denoise_benchmark.table_store import merge_records
-from tools.oct_denoise_benchmark.train_paired import PositionBalancedPairDataset, checkpoint_selection_reason, validation_can_select_checkpoint
+from tools.oct_denoise_benchmark.train_paired import PositionBalancedPairDataset, checkpoint_selection_reason, cpu_rng_state, validation_can_select_checkpoint
 from tools.oct_denoise_benchmark.methods.deep_common import tiled_forward
 from tools.oct_denoise_benchmark.inference import run as run_inference
 from tools.oct_denoise_benchmark.registry import save_yaml
@@ -153,6 +153,15 @@ def test_modelwhale_clean_gate_allows_runtime_untracked_files_but_not_source():
     script = (Path(__file__).parents[1] / "tools" / "oct_denoise_benchmark" / "scripts" / "run_modelwhale_protocol.sh").read_text(encoding="utf-8")
     assert "git status --porcelain --untracked-files=no" in script
     assert "git ls-files --others --exclude-standard -- configs docs sabids tests tools" in script
+
+
+def test_rng_checkpoint_states_are_restored_as_cpu_byte_tensors():
+    state = torch.get_rng_state()
+    restored = cpu_rng_state(state, "test_rng")
+    assert restored.device.type == "cpu" and restored.dtype == torch.uint8
+    torch.set_rng_state(restored)
+    with pytest.raises(TypeError, match="torch.uint8"):
+        cpu_rng_state(torch.ones(2), "invalid_rng")
 
 
 @pytest.mark.parametrize("config", [

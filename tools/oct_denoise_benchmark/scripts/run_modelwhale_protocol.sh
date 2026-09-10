@@ -115,7 +115,7 @@ PY
   for method in dncnn_paired nafnet_paired; do
     smoke="$run/tracks/deep/smoke/$method"
     extra=(); [[ "$method" == nafnet_paired ]] && extra=(--width 32 --enc-blocks 2 2 4 8 --middle-blocks 12 --dec-blocks 2 2 2 2)
-    python -m tools.oct_denoise_benchmark.train_paired --project-root "$root" --method "$method" --output "$smoke" --device cuda:0 --seed 42 --patch-size 256 --batch-size 4 --max-updates 1000 --fast-val-frequency 1000 --full-val-frequency 1000 --num-workers 4 --amp "${extra[@]}"
+    python -m tools.oct_denoise_benchmark.train_paired --project-root "$root" --method "$method" --output "$smoke" --device cuda:0 --seed 42 --patch-size 256 --batch-size 4 --max-updates 1000 --fast-val-frequency 1000 --full-val-frequency 1000 --num-workers 4 --amp --resume "${extra[@]}"
     python -m tools.oct_denoise_benchmark.train_paired --project-root "$root" --method "$method" --output "$smoke" --device cuda:0 --seed 42 --patch-size 256 --batch-size 4 --max-updates 1000 --fast-val-frequency 1000 --full-val-frequency 1000 --num-workers 4 --amp --resume "${extra[@]}"
   done
   for seed in 42 123 2026; do train_one dncnn_paired "$seed" "$run/checkpoints/dncnn_paired/seed_$seed"; done

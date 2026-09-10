@@ -130,6 +130,13 @@ def validation_can_select_checkpoint(scope: str) -> bool:
     return scope == "full_277_checkpoint_eligible"
 
 
+def cpu_rng_state(value: torch.Tensor, name: str) -> torch.Tensor:
+    """Return a generator state on CPU after device-remapped checkpoint load."""
+    if not isinstance(value, torch.Tensor) or value.dtype != torch.uint8:
+        raise TypeError(f"{name} must be a torch.uint8 tensor")
+    return value.detach().cpu()
+
+
 def _validation(model: nn.Module, rows: pd.DataFrame, device: torch.device, limit: int | None = None) -> tuple[float, float]:
     model.eval(); values = []
     selected = rows if limit is None else rows.groupby("position_id", sort=True).head(limit)
@@ -186,9 +193,12 @@ def train(args: argparse.Namespace) -> Path:
         prior_elapsed_seconds = float(state.get("training_elapsed_seconds", 0.0))
         if "python_random_state" in state: random.setstate(state["python_random_state"])
         if "numpy_random_state" in state: np.random.set_state(state["numpy_random_state"])
-        if "torch_rng_state" in state: torch.set_rng_state(state["torch_rng_state"])
-        if torch.cuda.is_available() and state.get("cuda_rng_state_all"): torch.cuda.set_rng_state_all(state["cuda_rng_state_all"])
-        if "loader_generator_state" in state: loader_generator.set_state(state["loader_generator_state"])
+        if "torch_rng_state" in state:
+            torch.set_rng_state(cpu_rng_state(state["torch_rng_state"], "torch_rng_state"))
+        if torch.cuda.is_available() and state.get("cuda_rng_state_all"):
+            torch.cuda.set_rng_state_all([cpu_rng_state(value, "cuda_rng_state_all") for value in state["cuda_rng_state_all"]])
+        if "loader_generator_state" in state:
+            loader_generator.set_state(cpu_rng_state(state["loader_generator_state"], "loader_generator_state"))
     samples_per_update = args.batch_size * args.accumulation_steps
     dataset = PositionBalancedPairDataset(
         train_rows, args.patch_size, args.seed,
