@@ -16,6 +16,7 @@ if str(ROOT) not in sys.path:
 
 from sabids.data.io import read_gray
 from sabids.data.transforms import JointOCTTransform
+from sabids.config import load_config
 from sabids.engine.trainer import build_model
 from sabids.experiments.protocol_lock import load_protocol_lock, sha256_file, validate_checkpoint_config
 
@@ -25,22 +26,117 @@ def _resolve(root: Path, value: str) -> Path:
     return path if path.is_absolute() else (root / path).resolve()
 
 
-def _resolve_d1_checkpoint(root: Path, value: str, prefix: str, seed: int, lock: dict) -> Path:
+def _denoiser_role(config: dict) -> str | None:
+    if str(config.get("train", {}).get("stage", "")) != "denoise":
+        return None
+    loss = config.get("loss", {})
+    if str(loss.get("restoration_mode", "")) == "structure_d1":
+        return "d1"
+    definition = str(loss.get("definition_version", "")).lower()
+    if "d0" in definition.replace("_", "-").split("-"):
+        return "d0"
+    return None
+
+
+def _write_checkpoint_resolution_audit(
+    root: Path,
+    role: str,
+    seed: int,
+    evidence: list[dict],
+) -> Path:
+    destination = (
+        root
+        / "runs"
+        / "reports"
+        / "input_probe_checkpoint_resolution"
+        / f"seed{seed}_{role}.json"
+    )
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(
+        json.dumps(evidence, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return destination
+
+
+def _resolve_d1_checkpoint(root: Path, value: str, role: str, seed: int, lock: dict) -> Path:
     if value != "auto": return _resolve(root, value)
-    matches = []
-    for run in (root / "runs" / "current").glob(f"{prefix}*seed{seed}"):
+    matches: list[Path] = []
+    evidence: list[dict] = []
+    current = root / "runs" / "current"
+    for run in sorted(path for path in current.iterdir() if path.is_dir()) if current.is_dir() else []:
+        config_path = next(
+            (
+                run / name
+                for name in ("resolved_config.yaml", "config_resolved.yaml")
+                if (run / name).is_file()
+            ),
+            None,
+        )
+        if config_path is None:
+            continue
+        try:
+            config = load_config(config_path)
+        except Exception as error:
+            evidence.append({"run_id": run.name, "status": "rejected", "reason": f"config unreadable: {error}"})
+            continue
+        if str(config.get("train", {}).get("stage", "")) != "denoise":
+            continue
+        if int(config.get("seed", -1)) != int(seed):
+            continue
+        detected_role = _denoiser_role(config)
+        row = {
+            "run_id": run.name,
+            "resolved_config": str(config_path),
+            "requested_role": role,
+            "detected_role": detected_role or "unknown",
+            "seed": config.get("seed"),
+            "fold": config.get("fold"),
+            "protocol_id": config.get("protocol_id"),
+            "data_plan_sha256": config.get("data_plan_sha256"),
+        }
+        if detected_role != role:
+            row.update(status="rejected", reason="denoiser role mismatch")
+            evidence.append(row)
+            continue
         candidate = run / "last.pth"
-        if not candidate.is_file(): continue
+        if not candidate.is_file():
+            row.update(status="rejected", reason="last.pth is missing")
+            evidence.append(row)
+            continue
+        expected_epochs = int(config.get("train", {}).get("epochs", 0))
+        if expected_epochs < 60:
+            row.update(status="rejected", reason=f"configured epochs {expected_epochs} < 60")
+            evidence.append(row)
+            continue
         try:
             raw = torch.load(candidate, map_location="cpu", weights_only=False)
             validate_checkpoint_config(raw, lock, str(candidate))
-            if int(raw.get("config", {}).get("train", {}).get("epochs", 0)) < 60:
+            completed_epochs = int(raw.get("epoch", -1)) + 1
+            if completed_epochs < expected_epochs:
+                row.update(
+                    status="rejected",
+                    reason=f"checkpoint epoch {completed_epochs} < configured epochs {expected_epochs}",
+                )
+                evidence.append(row)
                 continue
             matches.append(candidate)
-        except RuntimeError:
-            continue
+            row.update(
+                status="accepted",
+                reason="complete active-protocol checkpoint",
+                checkpoint=str(candidate),
+                checkpoint_epoch=completed_epochs,
+            )
+            evidence.append(row)
+        except Exception as error:
+            row.update(status="rejected", reason=f"checkpoint validation failed: {error}")
+            evidence.append(row)
+    audit_path = _write_checkpoint_resolution_audit(root, role, seed, evidence)
     if len(matches) != 1:
-        raise RuntimeError(f"Expected one active-protocol {prefix} seed {seed} checkpoint, found {matches}")
+        raise RuntimeError(
+            f"Expected one complete active-protocol {role.upper()} seed {seed} checkpoint, "
+            f"found {[str(path) for path in matches]}; see {audit_path}"
+        )
     return matches[0]
 
 
@@ -84,8 +180,8 @@ def main() -> None:
     if missing_assets:
         raise FileNotFoundError(f"Input probe cohort has missing assets: {missing_assets[:10]}")
     device = torch.device(args.device)
-    d0_path = _resolve_d1_checkpoint(root, args.d0_checkpoint, "d1_denoise_d0", args.seed, lock)
-    d1_path = _resolve_d1_checkpoint(root, args.d1_checkpoint, "d1_denoise_struct", args.seed, lock)
+    d0_path = _resolve_d1_checkpoint(root, args.d0_checkpoint, "d0", args.seed, lock)
+    d1_path = _resolve_d1_checkpoint(root, args.d1_checkpoint, "d1", args.seed, lock)
     d0, d0_cfg = _load_denoiser(d0_path, lock, device)
     d1, d1_cfg = _load_denoiser(d1_path, lock, device)
     target_size = tuple(int(value) for value in lock.get("input_resolution") or d0_cfg["data"]["target_size"])

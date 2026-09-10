@@ -35,7 +35,11 @@ explicit selection does not bypass any consistency check.
   frozen task decoders are placed in eval mode.
 - Input probes train a neutral segmentation model against noisy, D0, D1 or
   aligned clean inputs. D0/D1 are prepared as external float caches and are not
-  loaded into the segmentation encoder.
+  loaded into the segmentation encoder. Automatic D0/D1 checkpoint discovery
+  classifies completed active-protocol runs from their resolved configuration;
+  it does not depend on a historical run-directory prefix. Per-seed resolution
+  evidence is written under
+  `runs/reports/input_probe_checkpoint_resolution/`.
 - Shuffle and receiver-capacity controls use the same UGBI parameterization.
   Shuffle maps are fixed, within split, cross-position derangements.
 - Report and lightweight tar tools exclude test-named paths, checkpoints,

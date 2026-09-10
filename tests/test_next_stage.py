@@ -19,6 +19,7 @@ from sabids.losses.common import multiscale_gradient_loss, multiscale_laplacian_
 from sabids.models.ugbi import UGBIBlock
 from sabids.training.phase_state_machine import PhaseStateMachine
 from tools.package_next_stage_for_gpt import forbidden
+from tools.prepare_input_probe_manifest import _resolve_d1_checkpoint
 from tools.prepare_interaction_shuffle import make_mapping
 from tools.run_next_stage_suite import SUITES
 
@@ -100,6 +101,37 @@ def test_protocol_lock_does_not_confuse_seed_sampler_hash_with_protocol_hash(tmp
         "seed-dependent-sampler-43",
         "seed-dependent-sampler-44",
     }
+
+
+def test_input_probe_auto_checkpoint_resolution_is_semantic_not_name_based(tmp_path):
+    lock = {
+        "protocol_id": "pku37_binary_v3",
+        "data_plan_sha256": "plan",
+        "label_inventory_sha256": "labels",
+    }
+    run = tmp_path / "runs" / "current" / "d1_d0_pku37_v3_fold0_seed42"
+    run.mkdir(parents=True)
+    config = {
+        **lock,
+        "seed": 42,
+        "fold": 0,
+        "train": {"stage": "denoise", "epochs": 60},
+        "loss": {"definition_version": "pku37-v3-d0"},
+    }
+    (run / "resolved_config.yaml").write_text(yaml.safe_dump(config), encoding="utf-8")
+    torch.save({"config": config, "epoch": 59}, run / "last.pth")
+    resolved = _resolve_d1_checkpoint(tmp_path, "auto", "d0", 42, lock)
+    assert resolved == run / "last.pth"
+    audit = json.loads(
+        (
+            tmp_path
+            / "runs"
+            / "reports"
+            / "input_probe_checkpoint_resolution"
+            / "seed42_d0.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert audit[0]["status"] == "accepted"
 
 
 def test_incomplete_or_test_tainted_protocol_lock_is_rejected(tmp_path):

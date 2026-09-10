@@ -784,6 +784,18 @@ Populate one row per independent fold after validation threshold selection.
 - The focused next-stage test suite passed (22 tests); cloud D1 artifacts and
   the resulting active protocol lock remain to be audited after code sync.
 
+# 2026-09-10 — Input-probe checkpoint discovery naming correction
+
+- Corrected D0/D1 cache preparation after the v3 launcher produced semantic
+  run names such as `d1_d0_pku37_v3_*` while the cache tool still globbed only
+  the historical `d1_denoise_d0*` prefix.
+- Automatic discovery now identifies D0 versus structure-D1 from each run's
+  resolved stage/loss configuration, requires the requested seed, validates the
+  active-protocol hashes, and requires `last.pth` to reach its configured fixed
+  epoch. Missing, incomplete, mismatched and ambiguous candidates remain hard
+  blockers. A per-seed JSON resolution audit is written without opening test
+  assets.
+
 # 2026-09-09 — PKU37 denoising benchmark v2 cloud-readiness refactor
 
 - Created the dedicated `denoise-benchmark-v2` branch from clean
