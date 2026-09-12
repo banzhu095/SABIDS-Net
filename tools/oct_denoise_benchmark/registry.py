@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
+import numpy as np
 import yaml
 
 from .io import sha256_file
@@ -22,9 +25,33 @@ def load_yaml(path: Path) -> dict[str, Any]:
         return yaml.safe_load(stream) or {}
 
 
+def yaml_plain_value(value: Any) -> Any:
+    """Recursively remove NumPy/path objects before SafeDumper sees them."""
+    if isinstance(value, np.generic):
+        return yaml_plain_value(value.item())
+    if isinstance(value, np.ndarray):
+        return [yaml_plain_value(item) for item in value.tolist()]
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, Mapping):
+        return {yaml_plain_value(key): yaml_plain_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [yaml_plain_value(item) for item in value]
+    return value
+
+
 def save_yaml(path: Path, value: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(yaml.safe_dump(dict(value), sort_keys=False, allow_unicode=True), encoding="utf-8")
+    payload = yaml.safe_dump(yaml_plain_value(dict(value)), sort_keys=False, allow_unicode=True)
+    descriptor, temporary_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as stream:
+            stream.write(payload)
+        os.replace(temporary, path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
 
 
 def git_commit(project_root: Path) -> str:

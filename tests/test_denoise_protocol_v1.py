@@ -23,7 +23,7 @@ from tools.oct_denoise_benchmark.table_store import merge_records
 from tools.oct_denoise_benchmark.train_paired import PositionBalancedPairDataset, checkpoint_selection_reason, cpu_rng_state, validation_can_select_checkpoint
 from tools.oct_denoise_benchmark.methods.deep_common import tiled_forward
 from tools.oct_denoise_benchmark.inference import run as run_inference
-from tools.oct_denoise_benchmark.registry import save_yaml
+from tools.oct_denoise_benchmark.registry import load_yaml, save_yaml
 from tools.oct_denoise_benchmark.merge_tracks import merge_tracks
 
 
@@ -162,6 +162,16 @@ def test_rng_checkpoint_states_are_restored_as_cpu_byte_tensors():
     torch.set_rng_state(restored)
     with pytest.raises(TypeError, match="torch.uint8"):
         cpu_rng_state(torch.ones(2), "invalid_rng")
+
+
+def test_save_yaml_normalizes_numpy_inventory_scalars_atomically(tmp_path: Path):
+    path = tmp_path / "locked_deep_configs.yaml"
+    save_yaml(path, {"update": np.int64(100000), "score": np.float64(30.5), "passed": np.bool_(True),
+                     "checkpoint": tmp_path / "best.pth", "seeds": np.asarray([42, 123, 2026], dtype=np.int64)})
+    restored = load_yaml(path)
+    assert restored == {"update": 100000, "score": 30.5, "passed": True,
+                        "checkpoint": str(tmp_path / "best.pth"), "seeds": [42, 123, 2026]}
+    assert not list(tmp_path.glob("*.tmp"))
 
 
 @pytest.mark.parametrize("config", [

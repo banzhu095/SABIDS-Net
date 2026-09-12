@@ -131,12 +131,18 @@ classical() {
 }
 
 merge() {
+  [[ -f "$run/configs/protocol.yaml" ]] || python -m tools.oct_denoise_benchmark.cli init --project-root "$root" --run-dir "$run"
+  [[ -f "$run/audit/data_split_audit.json" ]] || python -m tools.oct_denoise_benchmark.cli audit --project-root "$root" --run-dir "$run"
   python -m tools.oct_denoise_benchmark.merge_tracks --project-root "$root" --run-dir "$run" --classical-dir "$run/tracks/classical"
   python -m tools.oct_denoise_benchmark.finalize_registry --project-root "$root" --run-dir "$run" --main-seed 42
   python -m tools.oct_denoise_benchmark.model_complexity --output "$run/metrics/model_complexity.csv" --height 640 --width 640
 }
 
 evaluate() {
+  if [[ ! -f "$run/audit/config_lock.json" ]]; then
+    echo "evaluate requires a successful merge track; config_lock.json is missing" >&2
+    exit 1
+  fi
   python - "$run/audit/config_lock.json" <<'PY'
 import json, sys
 lock = json.load(open(sys.argv[1], encoding="utf-8"))
@@ -148,6 +154,10 @@ PY
 }
 
 package() {
+  if [[ ! -f "$run/audit/data_split_audit.json" || ! -f "$run/audit/config_lock.json" ]]; then
+    echo "package requires successful merge and evaluate prerequisites" >&2
+    exit 1
+  fi
   python -m tools.oct_denoise_benchmark.package_light --project-root "$root" --run-dir "$run"
   if command -v node >/dev/null 2>&1 && [[ -d tools/oct_denoise_benchmark/node_modules ]]; then
     node tools/oct_denoise_benchmark/build_protocol_workbook.mjs "$run" "$run/benchmark_summary.xlsx" || echo "workbook skipped_optional: artifact tool unavailable or export failed"
