@@ -31,8 +31,8 @@ REPORT_NAMES = {
 
 
 def suite_and_arm(run_id: str) -> tuple[str | None, str | None]:
-    if run_id.startswith("d1_denoise_d0"): return "d1_structure", "D0"
-    if run_id.startswith("d1_denoise_struct"): return "d1_structure", "D1"
+    if run_id.startswith(("d1_denoise_d0", "d1_d0_")): return "d1_structure", "D0"
+    if run_id.startswith(("d1_denoise_struct", "d1_structure_")): return "d1_structure", "D1"
     match = re.match(r"input_(noisy|d0|d1|clean)_", run_id)
     if match: return "input_image", "I-" + match.group(1).upper()
     match = re.match(r"order_(ds|sd|alt)_", run_id)
@@ -152,6 +152,13 @@ def main() -> None:
         if cfg.get("protocol_id") != lock["protocol_id"]: continue
         sha_ok = cfg.get("data_plan_sha256") == lock["data_plan_sha256"] and cfg.get("label_inventory_sha256") == lock["label_inventory_sha256"]
         for target in targets: inventories[target].append((run, arm, cfg, sha_ok))
+
+    empty_suites = sorted(suite for suite, items in inventories.items() if not items)
+    if empty_suites:
+        raise SystemExit(
+            "BLOCKED: no active-protocol runs were discovered for suites "
+            f"{empty_suites}; refusing to create an empty passed report"
+        )
 
     outputs = []
     for suite in wanted:

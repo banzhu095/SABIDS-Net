@@ -19,6 +19,8 @@ from sabids.losses.common import multiscale_gradient_loss, multiscale_laplacian_
 from sabids.models.ugbi import UGBIBlock
 from sabids.training.phase_state_machine import PhaseStateMachine
 from tools.package_next_stage_for_gpt import forbidden
+from tools.build_next_stage_report import suite_and_arm
+from tools.evaluate_next_stage_runs import _suite as evaluation_suite
 from tools.prepare_input_probe_manifest import _resolve_d1_checkpoint
 from tools.prepare_interaction_shuffle import make_mapping
 from tools.run_next_stage_suite import SUITES
@@ -132,6 +134,18 @@ def test_input_probe_auto_checkpoint_resolution_is_semantic_not_name_based(tmp_p
         ).read_text(encoding="utf-8")
     )
     assert audit[0]["status"] == "accepted"
+
+
+def test_v3_d1_run_names_are_discovered_by_evaluation_and_reporting():
+    cases = {
+        "d1_d0_pku37_v3_fold0_seed42": ("d1_structure", "D0"),
+        "d1_structure_pku37_v3_fold0_seed42": ("d1_structure", "D1"),
+        "d1_denoise_d0_pku37_v3_fold0_seed42": ("d1_structure", "D0"),
+        "d1_denoise_struct_pku37_v3_fold0_seed42": ("d1_structure", "D1"),
+    }
+    for run_id, expected in cases.items():
+        assert evaluation_suite(run_id) == "d1_structure"
+        assert suite_and_arm(run_id) == expected
 
 
 def test_incomplete_or_test_tainted_protocol_lock_is_rejected(tmp_path):

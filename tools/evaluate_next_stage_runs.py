@@ -25,7 +25,10 @@ def _config(run: Path) -> Path | None:
 
 
 def _suite(run_id: str) -> str | None:
-    if run_id.startswith(("d1_denoise_d0", "d1_denoise_struct")): return "d1_structure"
+    if run_id.startswith((
+        "d1_denoise_d0", "d1_denoise_struct",
+        "d1_d0_", "d1_structure_",
+    )): return "d1_structure"
     if run_id.startswith("input_"): return "input_image"
     if run_id.startswith("order_"): return "training_order"
     if "shuffle" in run_id or "self_adapter" in run_id: return "decoder_interaction_controls"
@@ -87,6 +90,11 @@ def main() -> None:
             evaluate_model(model, atlas_loader, device, atlas_dir, threshold=0.5, layer_threshold=0.5, vessel_threshold=0.5, save_predictions=True, stage=stage, input_normalization=cfg["data"].get("normalization"), tasks=tasks, postprocess_modes=("p0",), restore_original_geometry=True)
             pd.DataFrame({"group_id": groups, "selection_rule": "lexicographic validation group ID before metrics"}).to_csv(output / "atlas_selection.csv", index=False, encoding="utf-8-sig")
         records.append({"run_id": run.name, "status": "passed", "checkpoint": str(checkpoint), "checkpoint_sha256": sha256_file(checkpoint), "n_frames": summary.get("n_frames"), "n_groups": summary.get("n_groups")})
+    if not records:
+        raise SystemExit(
+            "BLOCKED: no active-protocol runs were discovered for suites "
+            f"{sorted(wanted)}; training/evaluation cannot be reported as passed"
+        )
     print(json.dumps({"status": "passed", "records": records, "test_assets_opened": 0}, indent=2))
 
 

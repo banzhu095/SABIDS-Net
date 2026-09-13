@@ -807,6 +807,10 @@ Populate one row per independent fold after validation threshold selection.
   padding or unknown-label intersections. A regression test verifies that
   native-size float validity masks exclude unknown pixels and produce finite
   layer/vessel evaluation without changing trained checkpoints.
+- Next-stage evaluation/report discovery now accepts both the historical
+  `d1_denoise_*` and current v3 `d1_d0_*`/`d1_structure_*` run names. Evaluation
+  and reporting fail closed when a requested suite has no matching runs, rather
+  than emitting `status: passed` with empty records or an empty report.
 
 # 2026-09-09 — PKU37 denoising benchmark v2 cloud-readiness refactor
 
