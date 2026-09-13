@@ -67,12 +67,12 @@ def git_commit(project_root: Path) -> str:
 
 
 def lock_run(project_root: Path, run_dir: Path, test_started: bool = False) -> dict[str, Any]:
-    path = run_dir / "audit" / "config_lock.json"
-    previous = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+    lock_path = run_dir / "audit" / "config_lock.json"
+    previous = json.loads(lock_path.read_text(encoding="utf-8")) if lock_path.is_file() else {}
     config_dir = run_dir / "configs"
     configs = {}
-    for path in sorted(config_dir.glob("*.yaml")):
-        configs[path.name] = sha256_file(path)
+    for config_path in sorted(config_dir.glob("*.yaml")):
+        configs[config_path.name] = sha256_file(config_path)
     registry_path = config_dir / "inference_registry.yaml"
     registry = load_yaml(registry_path) if registry_path.exists() else {}
     checkpoints = {}
@@ -109,5 +109,5 @@ def lock_run(project_root: Path, run_dir: Path, test_started: bool = False) -> d
             "locked_at_utc": previous.get("locked_at_utc"),
             "test_started_at_utc": previous.get("test_started_at_utc"),
         }
-    _atomic_write_text(path, json.dumps(value, indent=2, ensure_ascii=False))
+    _atomic_write_text(lock_path, json.dumps(value, indent=2, ensure_ascii=False))
     return value
