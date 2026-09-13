@@ -37,6 +37,15 @@ def _suite(run_id: str) -> str | None:
     return None
 
 
+def _eligible_for_suite(suite: str | None, config: dict) -> bool:
+    # D1 pilot/smoke directories predate the explicit `_pilot_` naming rule.
+    # Formal D0/D1 comparison is preregistered at a fixed 60 epochs, so the
+    # configured budget is part of eligibility rather than merely completion.
+    if suite == "d1_structure":
+        return int(config.get("train", {}).get("epochs", 0)) >= 60
+    return True
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--project-root", default=".")
@@ -63,6 +72,8 @@ def main() -> None:
             continue
         cfg = load_config(config_path)
         if cfg.get("protocol_id") != lock["protocol_id"]:
+            continue
+        if not _eligible_for_suite(suite, cfg):
             continue
         for key in ("data_plan_sha256", "label_inventory_sha256"):
             if cfg.get(key) != lock.get(key): raise RuntimeError(f"{run.name}: {key} mismatch")

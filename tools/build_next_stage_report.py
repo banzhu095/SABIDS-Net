@@ -48,6 +48,15 @@ def suite_and_arm(run_id: str) -> tuple[str | None, str | None]:
     return None, None
 
 
+def eligible_for_suite(suite: str | None, config: dict) -> bool:
+    # Some early D1 smoke runs used production-like directory names without a
+    # `_pilot_` marker. The formal comparison requires the fixed 60-epoch
+    # budget, so those runs must not enter completion matrices or archives.
+    if suite == "d1_structure":
+        return int(config.get("train", {}).get("epochs", 0)) >= 60
+    return True
+
+
 def config_path(run: Path) -> Path | None:
     return next((run / name for name in ("resolved_config.yaml", "config_resolved.yaml", "config.yaml") if (run / name).is_file()), None)
 
@@ -201,6 +210,7 @@ def main() -> None:
         if not targets or cfg_path is None: continue
         cfg = load_config(cfg_path)
         if cfg.get("protocol_id") != lock["protocol_id"]: continue
+        if not eligible_for_suite(suite, cfg): continue
         sha_ok = cfg.get("data_plan_sha256") == lock["data_plan_sha256"] and cfg.get("label_inventory_sha256") == lock["label_inventory_sha256"]
         for target in targets: inventories[target].append((run, arm, cfg, sha_ok))
 

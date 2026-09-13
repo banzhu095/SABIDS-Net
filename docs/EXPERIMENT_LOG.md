@@ -817,6 +817,11 @@ Populate one row per independent fold after validation threshold selection.
   retaining the raw source and recording every padded row and unlabelled
   trailing value in `history_parse_audit.csv`; it does not fabricate metric
   names for legacy values that were written without a header.
+- Formal D1 evaluation/report eligibility now requires the preregistered
+  60-epoch budget. Two historical two-epoch smoke directories used names
+  without a `_pilot_` suffix and were otherwise entering the D0/D1 completion
+  matrix as `safe_to_merge`; they are now excluded without altering their run
+  artifacts.
 
 # 2026-09-09 — PKU37 denoising benchmark v2 cloud-readiness refactor
 

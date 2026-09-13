@@ -19,7 +19,8 @@ from sabids.losses.common import multiscale_gradient_loss, multiscale_laplacian_
 from sabids.models.ugbi import UGBIBlock
 from sabids.training.phase_state_machine import PhaseStateMachine
 from tools.package_next_stage_for_gpt import forbidden
-from tools.build_next_stage_report import read_history_csv, suite_and_arm
+from tools.build_next_stage_report import eligible_for_suite, read_history_csv, suite_and_arm
+from tools.evaluate_next_stage_runs import _eligible_for_suite as evaluation_eligible
 from tools.evaluate_next_stage_runs import _suite as evaluation_suite
 from tools.prepare_input_probe_manifest import _resolve_d1_checkpoint
 from tools.prepare_interaction_shuffle import make_mapping
@@ -146,6 +147,15 @@ def test_v3_d1_run_names_are_discovered_by_evaluation_and_reporting():
     for run_id, expected in cases.items():
         assert evaluation_suite(run_id) == "d1_structure"
         assert suite_and_arm(run_id) == expected
+
+
+def test_two_epoch_d1_smoke_is_ineligible_for_formal_report_and_evaluation():
+    smoke = {"train": {"stage": "denoise", "epochs": 2}}
+    formal = {"train": {"stage": "denoise", "epochs": 60}}
+    assert not eligible_for_suite("d1_structure", smoke)
+    assert not evaluation_eligible("d1_structure", smoke)
+    assert eligible_for_suite("d1_structure", formal)
+    assert evaluation_eligible("d1_structure", formal)
 
 
 def test_next_stage_report_reads_ragged_legacy_history_with_explicit_audit(tmp_path):
