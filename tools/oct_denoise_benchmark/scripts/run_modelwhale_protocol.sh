@@ -144,7 +144,7 @@ deep() {
   python - <<'PY'
 import torch
 if not torch.cuda.is_available(): raise SystemExit("CUDA is required for the deep track")
-print(torch.cuda.get_device_name(0))
+print(torch.cuda.get_device_name())
 PY
   if command -v nvidia-smi >/dev/null 2>&1; then
     nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv

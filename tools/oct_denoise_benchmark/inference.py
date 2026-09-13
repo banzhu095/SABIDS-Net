@@ -13,7 +13,7 @@ import torch
 
 from .io import read_image, save_image, sha256_file
 from .methods import AdapterContext, adapter_source_sha256, denoise
-from .methods.deep_common import cuda_device_index
+from .methods.deep_common import activate_cuda_device, synchronize_cuda
 from .registry import load_yaml, stable_sha256
 from .table_store import atomic_write_csv, merge_records
 
@@ -57,7 +57,7 @@ def run(args: argparse.Namespace) -> list[dict[str, Any]]:
     rows = []
     failures = []
     context_cache: dict[str, AdapterContext] = {}
-    cuda_index = cuda_device_index(args.device) if args.device.startswith("cuda") and torch.cuda.is_available() else None
+    cuda_index = activate_cuda_device(args.device) if args.device.startswith("cuda") and torch.cuda.is_available() else None
     manifest_path = args.output / "inference_manifest.csv" if input_root.is_dir() else args.output.parent / "inference_manifest.csv"
     failure_path = manifest_path.with_name("failures.csv")
     existing = pd.read_csv(manifest_path) if manifest_path.is_file() else pd.DataFrame()
@@ -94,10 +94,10 @@ def run(args: argparse.Namespace) -> list[dict[str, Any]]:
                     rows.append(matched.iloc[-1].to_dict()); continue
                 raise FileExistsError(f"existing output provenance does not match manifest; use --overwrite: {destination}")
             try:
-                if cuda_index is not None: torch.cuda.synchronize(cuda_index)
+                if cuda_index is not None: synchronize_cuda()
                 started = time.perf_counter()
                 output = denoise(image, config, context)
-                if cuda_index is not None: torch.cuda.synchronize(cuda_index)
+                if cuda_index is not None: synchronize_cuda()
                 elapsed = time.perf_counter() - started
                 if output.shape != image.shape or not np.isfinite(output).all():
                     raise ValueError(f"invalid output shape/finite: {output.shape}, {bool(np.isfinite(output).all())}")

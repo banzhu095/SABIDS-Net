@@ -18,6 +18,32 @@ def cuda_device_index(device: str | torch.device) -> int:
     return torch.cuda.current_device() if resolved.index is None else int(resolved.index)
 
 
+def activate_cuda_device(device: str | torch.device) -> int:
+    """Select a CUDA device once so vendor runtimes can use no-arg APIs."""
+    index = cuda_device_index(device)
+    if torch.cuda.current_device() != index:
+        torch.cuda.set_device(index)
+    return index
+
+
+def reset_cuda_peak_memory_stats() -> None:
+    """Reset telemetry on the active device without vendor-specific arguments."""
+    torch.cuda.reset_peak_memory_stats()
+
+
+def synchronize_cuda() -> None:
+    """Synchronize the active device without passing a rejected device object."""
+    torch.cuda.synchronize()
+
+
+def cuda_max_memory_allocated() -> int:
+    return int(torch.cuda.max_memory_allocated())
+
+
+def cuda_device_name() -> str:
+    return str(torch.cuda.get_device_name())
+
+
 def _blend_weight(height: int, width: int, overlap: int, *, top: bool, bottom: bool, left: bool, right: bool,
                   device: torch.device, dtype: torch.dtype) -> torch.Tensor:
     """Cosine feathering with unit weight on image-boundary edges."""

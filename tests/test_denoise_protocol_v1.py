@@ -21,7 +21,12 @@ from tools.oct_denoise_benchmark.package_light import _ascii_stage_paths, materi
 from tools.oct_denoise_benchmark.statistics import bootstrap_confidence_intervals
 from tools.oct_denoise_benchmark.table_store import merge_records
 from tools.oct_denoise_benchmark.train_paired import PositionBalancedPairDataset, checkpoint_selection_reason, cpu_rng_state, validation_can_select_checkpoint
-from tools.oct_denoise_benchmark.methods.deep_common import cuda_device_index, tiled_forward
+from tools.oct_denoise_benchmark.methods.deep_common import (
+    activate_cuda_device,
+    cuda_device_index,
+    reset_cuda_peak_memory_stats,
+    tiled_forward,
+)
 from tools.oct_denoise_benchmark.inference import run as run_inference
 from tools.oct_denoise_benchmark.registry import load_yaml, lock_run, save_yaml
 from tools.oct_denoise_benchmark.merge_tracks import merge_tracks
@@ -188,6 +193,16 @@ def test_cuda_runtime_device_arguments_are_integer_indices(monkeypatch):
     assert cuda_device_index("cuda") == 2
     with pytest.raises(ValueError, match="expected a CUDA device"):
         cuda_device_index("cpu")
+
+
+def test_cuda_telemetry_uses_active_device_without_argument(monkeypatch):
+    calls = []
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
+    monkeypatch.setattr(torch.cuda, "set_device", lambda value: calls.append(("set", value)))
+    monkeypatch.setattr(torch.cuda, "reset_peak_memory_stats", lambda *args: calls.append(("reset", args)))
+    assert activate_cuda_device("cuda:0") == 0
+    reset_cuda_peak_memory_stats()
+    assert calls == [("reset", ())]
 
 
 def test_relock_preserves_prior_sealed_evaluation_timestamp(tmp_path: Path, monkeypatch):
