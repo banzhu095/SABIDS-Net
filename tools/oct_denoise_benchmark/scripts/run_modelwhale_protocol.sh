@@ -216,12 +216,14 @@ package() {
     echo "package requires successful merge and evaluate prerequisites" >&2
     exit 1
   fi
-  python -m tools.oct_denoise_benchmark.package_light --project-root "$root" --run-dir "$run"
   if command -v node >/dev/null 2>&1 && [[ -d tools/oct_denoise_benchmark/node_modules ]]; then
     node tools/oct_denoise_benchmark/build_protocol_workbook.mjs "$run" "$run/benchmark_summary.xlsx" || echo "workbook skipped_optional: artifact tool unavailable or export failed"
   else
     echo "workbook skipped_optional: Node/artifact-tool unavailable"
   fi
+  # Build the archive only after the optional workbook, so a workbook created
+  # during this track is present in the same GPT-light package.
+  python -m tools.oct_denoise_benchmark.package_light --project-root "$root" --run-dir "$run"
 }
 
 case "$track" in

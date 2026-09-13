@@ -159,6 +159,7 @@ def test_modelwhale_clean_gate_allows_runtime_untracked_files_but_not_source():
     assert "Wrong benchmark module imported" in script
     assert "Stale config lock" in script
     assert "sealed evaluation requires config_lock.git_commit" in script
+    assert script.index("build_protocol_workbook.mjs") < script.index("tools.oct_denoise_benchmark.package_light")
 
 
 def test_rng_checkpoint_states_are_restored_as_cpu_byte_tensors():
