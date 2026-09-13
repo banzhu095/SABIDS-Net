@@ -34,6 +34,26 @@ conda activate myconda
 # Put this checkout ahead of any globally installed or stale project copy, and
 # prove that Python is importing the benchmark code from the recorded root.
 export PYTHONPATH="$root${PYTHONPATH:+:$PYTHONPATH}"
+index_overrides="$(git ls-files -v -- configs docs sabids tests tools | awk 'substr($0,1,1) == "S" || substr($0,1,1) ~ /[a-z]/')"
+if [[ -n "$index_overrides" ]]; then
+  echo "Formal runs refuse source files hidden by assume-unchanged/skip-worktree:" >&2
+  printf '%s\n' "$index_overrides" >&2
+  echo "Clear the index flags and restore those files from the benchmark tag." >&2
+  exit 1
+fi
+verify_checkout_file() {
+  local path="$1" actual expected
+  actual="$(git hash-object -- "$path")"
+  expected="$(git rev-parse "HEAD:$path")"
+  if [[ "$actual" != "$expected" ]]; then
+    echo "Tracked file content does not match HEAD: $path" >&2
+    echo "working-tree blob: $actual" >&2
+    echo "HEAD blob:         $expected" >&2
+    exit 1
+  fi
+}
+verify_checkout_file tools/oct_denoise_benchmark/registry.py
+verify_checkout_file tools/oct_denoise_benchmark/finalize_registry.py
 python - "$root" <<'PY'
 import sys
 from pathlib import Path

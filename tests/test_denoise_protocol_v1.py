@@ -154,6 +154,8 @@ def test_modelwhale_clean_gate_allows_runtime_untracked_files_but_not_source():
     assert "git status --porcelain --untracked-files=no" in script
     assert "git ls-files --others --exclude-standard -- configs docs sabids tests tools" in script
     assert 'export PYTHONPATH="$root${PYTHONPATH:+:$PYTHONPATH}"' in script
+    assert "Formal runs refuse source files hidden by assume-unchanged/skip-worktree" in script
+    assert "git hash-object" in script and 'git rev-parse "HEAD:$path"' in script
     assert "Wrong benchmark module imported" in script
     assert "Stale config lock" in script
     assert "sealed evaluation requires config_lock.git_commit" in script
