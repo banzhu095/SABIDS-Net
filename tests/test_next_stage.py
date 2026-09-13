@@ -19,7 +19,7 @@ from sabids.losses.common import multiscale_gradient_loss, multiscale_laplacian_
 from sabids.models.ugbi import UGBIBlock
 from sabids.training.phase_state_machine import PhaseStateMachine
 from tools.package_next_stage_for_gpt import forbidden
-from tools.build_next_stage_report import suite_and_arm
+from tools.build_next_stage_report import read_history_csv, suite_and_arm
 from tools.evaluate_next_stage_runs import _suite as evaluation_suite
 from tools.prepare_input_probe_manifest import _resolve_d1_checkpoint
 from tools.prepare_interaction_shuffle import make_mapping
@@ -146,6 +146,35 @@ def test_v3_d1_run_names_are_discovered_by_evaluation_and_reporting():
     for run_id, expected in cases.items():
         assert evaluation_suite(run_id) == "d1_structure"
         assert suite_and_arm(run_id) == expected
+
+
+def test_next_stage_report_reads_ragged_legacy_history_with_explicit_audit(tmp_path):
+    path = tmp_path / "history.csv"
+    path.write_text(
+        "epoch,val_psnr\n1,30.0\n2,31.0,unlabelled-new-metric\n3\n",
+        encoding="utf-8",
+    )
+    table, audit = read_history_csv(path)
+    assert table["epoch"].tolist() == [1, 2, 3]
+    assert table.loc[1, "val_psnr"] == pytest.approx(31.0)
+    assert pd.isna(table.loc[2, "val_psnr"])
+    assert audit["status"] == "recovered_with_audit"
+    assert audit["ragged_rows"] == 2
+    assert audit["dropped_unlabelled_extra_values"] == 1
+
+
+def test_csv_logger_rewrites_union_schema_before_appending_new_metrics(tmp_path):
+    from sabids.utils import CSVLogger
+
+    path = tmp_path / "history.csv"
+    logger = CSVLogger(path)
+    logger.log({"epoch": 1, "val_psnr": 30.0})
+    logger.log({"epoch": 2, "val_psnr": 31.0, "val_vessel_dice": 0.5})
+    logger.log({"epoch": 3, "val_vessel_dice": 0.6})
+    table = pd.read_csv(path)
+    assert list(table.columns) == ["epoch", "val_psnr", "val_vessel_dice"]
+    assert pd.isna(table.loc[0, "val_vessel_dice"])
+    assert pd.isna(table.loc[2, "val_psnr"])
 
 
 def test_incomplete_or_test_tainted_protocol_lock_is_rejected(tmp_path):

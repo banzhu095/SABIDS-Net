@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import re
 import shutil
@@ -49,6 +50,56 @@ def suite_and_arm(run_id: str) -> tuple[str | None, str | None]:
 
 def config_path(run: Path) -> Path | None:
     return next((run / name for name in ("resolved_config.yaml", "config_resolved.yaml", "config.yaml") if (run / name).is_file()), None)
+
+
+def read_history_csv(path: Path) -> tuple[pd.DataFrame, dict[str, object]]:
+    """Read legacy ragged histories without modifying or inventing column names."""
+    if not path.is_file():
+        return pd.DataFrame(), {
+            "path": str(path), "status": "missing", "rows": 0,
+            "ragged_rows": 0, "dropped_unlabelled_extra_values": 0,
+        }
+    with path.open("r", newline="", encoding="utf-8-sig") as handle:
+        reader = csv.reader(handle)
+        try:
+            header = next(reader)
+        except StopIteration:
+            return pd.DataFrame(), {
+                "path": str(path), "status": "empty", "rows": 0,
+                "ragged_rows": 0, "dropped_unlabelled_extra_values": 0,
+            }
+        if len(header) != len(set(header)):
+            raise RuntimeError(f"History has duplicate header names and cannot be audited safely: {path}")
+        normalized = []
+        ragged_rows = short_rows = long_rows = dropped = max_extra = 0
+        for values in reader:
+            difference = len(values) - len(header)
+            if difference:
+                ragged_rows += 1
+                short_rows += int(difference < 0)
+                long_rows += int(difference > 0)
+            if difference > 0:
+                dropped += difference
+                max_extra = max(max_extra, difference)
+            normalized.append((values + [""] * len(header))[: len(header)])
+    table = pd.DataFrame(normalized, columns=header)
+    for column in table.columns:
+        nonempty = table[column].astype(str).str.strip().ne("")
+        numeric = pd.to_numeric(table[column], errors="coerce")
+        if nonempty.any() and numeric[nonempty].notna().all():
+            table[column] = numeric
+    return table, {
+        "path": str(path),
+        "status": "recovered_with_audit" if ragged_rows else "rectangular",
+        "rows": len(table),
+        "header_columns": len(header),
+        "ragged_rows": ragged_rows,
+        "short_rows": short_rows,
+        "long_rows": long_rows,
+        "dropped_unlabelled_extra_values": dropped,
+        "maximum_extra_values_in_one_row": max_extra,
+        "strategy": "map values to original header order; pad short rows; retain raw source; do not invent names for trailing values",
+    }
 
 
 def contrasts(suite: str) -> list[tuple[str, str, str]]:
@@ -164,11 +215,13 @@ def main() -> None:
     for suite in wanted:
         out = root / "runs" / "reports" / f"{REPORT_NAMES[suite]}_{lock['protocol_id']}"
         out.mkdir(parents=True, exist_ok=True)
-        completion, frames, positions, histories, missing = [], [], [], [], []
+        completion, frames, positions, histories, missing, history_audits = [], [], [], [], [], []
         atlas_selection = None
         for run, arm, cfg, sha_ok in inventories[suite]:
             history_path = run / "history.csv"; final = run / "last.pth"
-            history = pd.read_csv(history_path) if history_path.is_file() else pd.DataFrame()
+            history, history_audit = read_history_csv(history_path)
+            history_audit["run_id"] = run.name
+            history_audits.append(history_audit)
             expected = int(cfg["train"].get("epochs", 0)); current_epoch = int(history.epoch.max()) if not history.empty else 0
             rho_valid = True; requested_rho = actual_rho = np.nan
             if suite.startswith("decoder_interaction") and not history.empty and "train_interaction_actual_rho_mean" in history:
@@ -211,6 +264,7 @@ def main() -> None:
         gains_seed = gains_position.groupby(gain_keys, as_index=False)[gain_metrics].mean() if gain_keys and not gains_position.empty else pd.DataFrame()
         gains_summary = gain_summary(gains_position, gains_seed)
         completion_table.to_csv(out / "completion_matrix.csv", index=False, encoding="utf-8-sig")
+        pd.DataFrame(history_audits).to_csv(out / "history_parse_audit.csv", index=False, encoding="utf-8-sig")
         frame_table.to_csv(out / "metrics_by_frame.csv", index=False, encoding="utf-8-sig")
         position_table.to_csv(out / "metrics_by_position.csv", index=False, encoding="utf-8-sig")
         seed_table.to_csv(out / "metrics_by_seed.csv", index=False, encoding="utf-8-sig")

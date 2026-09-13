@@ -111,12 +111,45 @@ class CSVLogger:
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
     def log(self, row: Dict[str, Any]) -> None:
-        exists = self.path.exists()
-        with self.path.open("a", newline="", encoding="utf-8-sig") as handle:
-            writer = csv.DictWriter(handle, fieldnames=list(row.keys()))
-            if not exists:
+        if not self.path.exists() or self.path.stat().st_size == 0:
+            with self.path.open("w", newline="", encoding="utf-8-sig") as handle:
+                writer = csv.DictWriter(handle, fieldnames=list(row.keys()))
                 writer.writeheader()
-            writer.writerow(row)
+                writer.writerow(row)
+            return
+
+        with self.path.open("r", newline="", encoding="utf-8-sig") as handle:
+            reader = csv.reader(handle)
+            fieldnames = next(reader)
+        new_fields = [key for key in row if key not in fieldnames]
+        if new_fields:
+            with self.path.open("r", newline="", encoding="utf-8-sig") as handle:
+                reader = csv.reader(handle)
+                previous_header = next(reader)
+                previous_rows = list(reader)
+            ragged = [index for index, values in enumerate(previous_rows, start=2) if len(values) != len(previous_header)]
+            if ragged:
+                raise RuntimeError(
+                    f"Cannot safely evolve ragged CSV schema in {self.path}; "
+                    f"malformed lines include {ragged[:5]}"
+                )
+            union = [*fieldnames, *new_fields]
+            temporary = self.path.with_name(self.path.name + ".tmp")
+            try:
+                with temporary.open("w", newline="", encoding="utf-8-sig") as handle:
+                    writer = csv.DictWriter(handle, fieldnames=union)
+                    writer.writeheader()
+                    for values in previous_rows:
+                        writer.writerow(dict(zip(previous_header, values)))
+                    writer.writerow(row)
+                os.replace(temporary, self.path)
+            finally:
+                if temporary.exists():
+                    temporary.unlink()
+            return
+
+        with self.path.open("a", newline="", encoding="utf-8-sig") as handle:
+            csv.DictWriter(handle, fieldnames=fieldnames).writerow(row)
 
 
 def write_json(data: Any, path: str | Path) -> None:

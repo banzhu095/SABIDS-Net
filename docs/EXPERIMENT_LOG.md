@@ -811,6 +811,12 @@ Populate one row per independent fold after validation threshold selection.
   `d1_denoise_*` and current v3 `d1_d0_*`/`d1_structure_*` run names. Evaluation
   and reporting fail closed when a requested suite has no matching runs, rather
   than emitting `status: passed` with empty records or an empty report.
+- Corrected `CSVLogger` so changing metric dictionaries extend a rectangular
+  union schema atomically instead of appending rows under an obsolete header.
+  The next-stage reporter can audit-read already-created ragged histories,
+  retaining the raw source and recording every padded row and unlabelled
+  trailing value in `history_parse_audit.csv`; it does not fabricate metric
+  names for legacy values that were written without a header.
 
 # 2026-09-09 — PKU37 denoising benchmark v2 cloud-readiness refactor
 
