@@ -31,6 +31,24 @@ else
 fi
 conda activate myconda
 
+# Put this checkout ahead of any globally installed or stale project copy, and
+# prove that Python is importing the benchmark code from the recorded root.
+export PYTHONPATH="$root${PYTHONPATH:+:$PYTHONPATH}"
+python - "$root" <<'PY'
+import sys
+from pathlib import Path
+from tools.oct_denoise_benchmark import registry
+
+root = Path(sys.argv[1]).resolve()
+actual = Path(registry.__file__).resolve()
+expected = (root / "tools" / "oct_denoise_benchmark" / "registry.py").resolve()
+if actual != expected:
+    raise SystemExit(
+        f"Wrong benchmark module imported: {actual}\nExpected current checkout: {expected}"
+    )
+print(f"[runtime source] {actual}")
+PY
+
 commit="$(git rev-parse HEAD)"
 tracked_dirty="$(git status --porcelain --untracked-files=no)"
 if [[ -n "$tracked_dirty" ]]; then
@@ -135,6 +153,21 @@ merge() {
   [[ -f "$run/audit/data_split_audit.json" ]] || python -m tools.oct_denoise_benchmark.cli audit --project-root "$root" --run-dir "$run"
   python -m tools.oct_denoise_benchmark.merge_tracks --project-root "$root" --run-dir "$run" --classical-dir "$run/tracks/classical"
   python -m tools.oct_denoise_benchmark.finalize_registry --project-root "$root" --run-dir "$run" --main-seed 42
+  python - "$run/audit/config_lock.json" "$commit" <<'PY'
+import json
+import sys
+
+path, expected_commit = sys.argv[1:]
+lock = json.load(open(path, encoding="utf-8"))
+actual_commit = lock.get("git_commit")
+if lock.get("status") != "locked":
+    raise SystemExit(f"Config lock was not sealed: status={lock.get('status')!r}")
+if actual_commit != expected_commit:
+    raise SystemExit(
+        f"Stale config lock: git_commit={actual_commit!r}, checkout={expected_commit!r}"
+    )
+print(f"[config lock verified] git_commit={actual_commit}")
+PY
   python -m tools.oct_denoise_benchmark.model_complexity --output "$run/metrics/model_complexity.csv" --height 640 --width 640
 }
 
@@ -143,10 +176,15 @@ evaluate() {
     echo "evaluate requires a successful merge track; config_lock.json is missing" >&2
     exit 1
   fi
-  python - "$run/audit/config_lock.json" <<'PY'
+  python - "$run/audit/config_lock.json" "$commit" <<'PY'
 import json, sys
 lock = json.load(open(sys.argv[1], encoding="utf-8"))
 if lock.get("status") != "locked": raise SystemExit("sealed evaluation requires config_lock.status=locked")
+if lock.get("git_commit") != sys.argv[2]:
+    raise SystemExit(
+        f"sealed evaluation requires config_lock.git_commit={sys.argv[2]}, "
+        f"found {lock.get('git_commit')!r}; rerun the merge track with this checkout"
+    )
 PY
   python -m tools.oct_denoise_benchmark.evaluate --project-root "$root" --run-dir "$run" --methods all --splits test external_test --device cuda:0 --all-deep-seeds
   python -m tools.oct_denoise_benchmark.evaluate --project-root "$root" --run-dir "$run" --methods all --splits train val --device cuda:0 --all-deep-seeds

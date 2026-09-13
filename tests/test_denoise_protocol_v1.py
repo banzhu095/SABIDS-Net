@@ -153,6 +153,10 @@ def test_modelwhale_clean_gate_allows_runtime_untracked_files_but_not_source():
     script = (Path(__file__).parents[1] / "tools" / "oct_denoise_benchmark" / "scripts" / "run_modelwhale_protocol.sh").read_text(encoding="utf-8")
     assert "git status --porcelain --untracked-files=no" in script
     assert "git ls-files --others --exclude-standard -- configs docs sabids tests tools" in script
+    assert 'export PYTHONPATH="$root${PYTHONPATH:+:$PYTHONPATH}"' in script
+    assert "Wrong benchmark module imported" in script
+    assert "Stale config lock" in script
+    assert "sealed evaluation requires config_lock.git_commit" in script
 
 
 def test_rng_checkpoint_states_are_restored_as_cpu_byte_tensors():
