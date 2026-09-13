@@ -41,13 +41,20 @@ def yaml_plain_value(value: Any) -> Any:
 
 
 def save_yaml(path: Path, value: Mapping[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
     payload = yaml.safe_dump(yaml_plain_value(dict(value)), sort_keys=False, allow_unicode=True)
+    _atomic_write_text(path, payload)
+
+
+def _atomic_write_text(path: Path, payload: str) -> None:
+    """Replace a small registry artifact only after its full payload is durable."""
+    path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     temporary = Path(temporary_name)
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as stream:
             stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
         os.replace(temporary, path)
     finally:
         if temporary.exists():
@@ -102,6 +109,5 @@ def lock_run(project_root: Path, run_dir: Path, test_started: bool = False) -> d
             "locked_at_utc": previous.get("locked_at_utc"),
             "test_started_at_utc": previous.get("test_started_at_utc"),
         }
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(value, indent=2, ensure_ascii=False), encoding="utf-8")
+    _atomic_write_text(path, json.dumps(value, indent=2, ensure_ascii=False))
     return value

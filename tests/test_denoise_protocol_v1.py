@@ -199,6 +199,8 @@ def test_relock_preserves_prior_sealed_evaluation_timestamp(tmp_path: Path, monk
     result = lock_run(tmp_path, run, test_started=False)
     assert result["git_commit"] == "new" and result["test_started_at_utc"] == "attempted"
     assert result["previous_lock"]["git_commit"] == "old"
+    assert __import__("json").loads((run / "audit" / "config_lock.json").read_text(encoding="utf-8")) == result
+    assert not list((run / "audit").glob(".config_lock.json.*.tmp"))
 
 
 @pytest.mark.parametrize("config", [
