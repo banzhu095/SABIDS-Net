@@ -796,6 +796,18 @@ Populate one row per independent fold after validation threshold selection.
   blockers. A per-seed JSON resolution audit is written without opening test
   assets.
 
+# 2026-09-13 — Native-geometry evaluation mask dtype correction
+
+- Fixed validation evaluation when a float `label_valid_mask` or
+  `vessel_valid_mask` already has the requested original geometry. The
+  no-resize restoration branch previously returned the float array unchanged,
+  causing NumPy bitwise masking to fail; resized masks were already converted
+  to boolean.
+- Both geometry branches now threshold masks explicitly before applying valid,
+  padding or unknown-label intersections. A regression test verifies that
+  native-size float validity masks exclude unknown pixels and produce finite
+  layer/vessel evaluation without changing trained checkpoints.
+
 # 2026-09-09 — PKU37 denoising benchmark v2 cloud-readiness refactor
 
 - Created the dedicated `denoise-benchmark-v2` branch from clean

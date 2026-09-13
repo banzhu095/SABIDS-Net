@@ -148,7 +148,11 @@ def evaluate_model(
 
             def restored(array: np.ndarray, is_mask: bool = False) -> np.ndarray:
                 if not restore_original_geometry or array.shape == original_size[::-1]:
-                    return array
+                    # Dataset masks are float tensors even when their values are
+                    # binary.  Keep the mask contract identical in both the
+                    # resize and no-resize paths so logical operations never
+                    # depend on NumPy's unsafe float bitwise coercion.
+                    return array > 0.5 if is_mask else array
                 interpolation = cv2.INTER_NEAREST if is_mask else cv2.INTER_LINEAR
                 resized = cv2.resize(array.astype(np.float32), original_size, interpolation=interpolation)
                 return resized > 0.5 if is_mask else resized

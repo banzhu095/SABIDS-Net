@@ -1,7 +1,9 @@
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 from PIL import Image
+import pytest
 import torch
 from torch.utils.data import DataLoader, Dataset
 
@@ -122,3 +124,65 @@ def test_v0_evaluator_restores_geometry_and_reports_selected_tasks(tmp_path: Pat
     )
     assert denoise_summary["evaluated_tasks"] == ["denoise"]
     assert "vessel_stroma_cnr_denoised" in (denoise_dir / "frame_metrics.csv").read_text(encoding="utf-8-sig")
+
+
+def test_evaluator_converts_native_geometry_float_valid_masks_to_boolean(tmp_path: Path):
+    class NativeGeometrySample(Dataset):
+        def __len__(self):
+            return 1
+
+        def __getitem__(self, index):
+            image = torch.linspace(0, 1, 24).reshape(1, 4, 6)
+            layer = torch.zeros_like(image)
+            layer[:, 1:4, :] = 1
+            vessel = torch.zeros_like(image)
+            vessel[:, 2, 1:5] = 1
+            label_valid = torch.zeros_like(image)
+            label_valid[:, 1:4, :] = 1
+            return {
+                "image": image,
+                "clean": image,
+                "layer_mask": layer,
+                "vessel_mask": vessel,
+                "valid_mask": torch.ones_like(image),
+                "label_valid_mask": label_valid,
+                "vessel_valid_mask": label_valid.clone(),
+                "has_clean": True,
+                "has_layer": True,
+                "has_vessel": True,
+                "sample_id": "native",
+                "group_id": "g-native",
+                "patient_id": "p-native",
+                "dataset": "synthetic",
+                "scan_protocol": "repeat",
+                "original_path": "image.png",
+                "clean_path": "clean.png",
+                "layer_mask_path": "layer.png",
+                "vessel_mask_path": "vessel.png",
+                "label_valid_mask_path": "valid.png",
+                "original_height": 4,
+                "original_width": 6,
+                "manifest_group_frames": 1,
+            }
+
+    class ConstantModel(torch.nn.Module):
+        def forward(self, image, **kwargs):
+            return {
+                "denoised": image,
+                "layer_prob": torch.full_like(image, 0.8),
+                "vessel_prob": torch.full_like(image, 0.2),
+                "auxiliary": [],
+            }
+
+    output = tmp_path / "native_geometry"
+    evaluate_model(
+        ConstantModel(),
+        DataLoader(NativeGeometrySample(), batch_size=1),
+        torch.device("cpu"),
+        output_dir=output,
+        tasks=("layer", "vessel"),
+        postprocess_modes=("p0",),
+        restore_original_geometry=True,
+    )
+    frame = pd.read_csv(output / "frame_metrics.csv")
+    assert frame.loc[0, "layer_dice"] == pytest.approx(1.0)
