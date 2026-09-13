@@ -16,6 +16,7 @@ from .data import load_protocol_manifest
 from .io import read_image, save_image, sha256_file
 from .metrics import compute_metrics
 from .methods import AdapterContext, denoise
+from .methods.deep_common import cuda_device_index
 from .registry import load_yaml, stable_sha256
 from .statistics import aggregate, bootstrap_confidence_intervals, paired_differences
 from .table_store import atomic_write_csv, merge_records, normalize_hash_columns
@@ -65,6 +66,14 @@ def _selected(table: pd.DataFrame, requested: list[str]) -> pd.DataFrame:
 
 def evaluate(args: argparse.Namespace) -> None:
     root, run_dir = args.project_root.resolve(), args.run_dir.resolve()
+    cuda_index: int | None = None
+    if args.device.startswith("cuda"):
+        if not torch.cuda.is_available():
+            raise RuntimeError(f"CUDA device requested but unavailable: {args.device}")
+        cuda_index = cuda_device_index(args.device)
+        # Validate the runtime API before recording that sealed evaluation has
+        # started. Some vendor PyTorch builds reject torch.device here.
+        torch.cuda.reset_peak_memory_stats(cuda_index)
     table = _selected(load_protocol_manifest(root, args.manifest), args.splits)
     lock_data: dict[str, Any] | None = None
     if any(split in {"test", "external_test"} for split in args.splits):
@@ -108,8 +117,8 @@ def evaluate(args: argparse.Namespace) -> None:
             if checkpoint_hash not in allowed:
                 raise RuntimeError(f"checkpoint hash for {method} seed {seed} is not in config_lock.json")
         first_success = True
-        if args.device.startswith("cuda") and torch.cuda.is_available():
-            torch.cuda.reset_peak_memory_stats(torch.device(args.device))
+        if cuda_index is not None:
+            torch.cuda.reset_peak_memory_stats(cuda_index)
         context = AdapterContext(device=args.device, checkpoint=checkpoint_path, seed=seed, tile_size=args.tile_size, tile_overlap=args.tile_overlap)
         for index, row in enumerate(table.itertuples(), 1):
             key_ok = False
@@ -124,9 +133,9 @@ def evaluate(args: argparse.Namespace) -> None:
             destination = run_dir / "images" / row.dataset / split_name / method / seed_part / source.name
             try:
                 io_started = time.perf_counter(); noisy, metadata = read_image(source); reference, _ = read_image(Path(row.clean_path)); io_seconds = time.perf_counter() - io_started
-                if args.device.startswith("cuda") and torch.cuda.is_available(): torch.cuda.synchronize(torch.device(args.device))
+                if cuda_index is not None: torch.cuda.synchronize(cuda_index)
                 started = time.perf_counter(); output = denoise(noisy, config, context)
-                if args.device.startswith("cuda") and torch.cuda.is_available(): torch.cuda.synchronize(torch.device(args.device))
+                if cuda_index is not None: torch.cuda.synchronize(cuda_index)
                 algorithm_seconds = time.perf_counter() - started
                 save_started = time.perf_counter(); destination = save_image(destination, output, metadata, True); io_seconds += time.perf_counter() - save_started
                 output_hash = sha256_file(destination)
@@ -134,8 +143,8 @@ def evaluate(args: argparse.Namespace) -> None:
                 rows.append({"dataset": row.dataset, "split": split_name, "position_id": row.position_id, "frame_id": row.frame_id, "sample_id": row.sample_id, "method_id": method, "seed": seed, "noisy_path": str(source), "reference_path": row.clean_path, "denoised_path": str(destination), "config_sha256": config_hash, "checkpoint_sha256": checkpoint_hash, "output_sha256": output_hash, "width": metadata["width"], "height": metadata["height"], "bit_depth": metadata["bit_depth"], "status": "success", **values})
                 assets.append({"path": str(destination), "sha256": output_hash, "bytes": destination.stat().st_size, "kind": "denoised_image", "dataset": row.dataset, "split": split_name, "sample_id": row.sample_id, "method_id": method, "seed": seed,
                                "config_sha256": config_hash, "checkpoint_sha256": checkpoint_hash})
-                gpu_peak = torch.cuda.max_memory_allocated(torch.device(args.device)) / (1024**2) if args.device.startswith("cuda") and torch.cuda.is_available() else float("nan")
-                runtimes.append({"method_id": method, "seed": seed, "dataset": row.dataset, "sample_id": row.sample_id, "config_sha256": config_hash, "checkpoint_sha256": checkpoint_hash, "is_startup_image": first_success, "algorithm_seconds": algorithm_seconds, "io_seconds": io_seconds, "width": metadata["width"], "height": metadata["height"], "cpu_peak_memory_mb": _cpu_peak_memory_mb(), "gpu_peak_memory_mb": gpu_peak, "cpu_model": platform.processor(), "gpu_model": torch.cuda.get_device_name(torch.device(args.device)) if args.device.startswith("cuda") and torch.cuda.is_available() else ""})
+                gpu_peak = torch.cuda.max_memory_allocated(cuda_index) / (1024**2) if cuda_index is not None else float("nan")
+                runtimes.append({"method_id": method, "seed": seed, "dataset": row.dataset, "sample_id": row.sample_id, "config_sha256": config_hash, "checkpoint_sha256": checkpoint_hash, "is_startup_image": first_success, "algorithm_seconds": algorithm_seconds, "io_seconds": io_seconds, "width": metadata["width"], "height": metadata["height"], "cpu_peak_memory_mb": _cpu_peak_memory_mb(), "gpu_peak_memory_mb": gpu_peak, "cpu_model": platform.processor(), "gpu_model": torch.cuda.get_device_name(cuda_index) if cuda_index is not None else ""})
                 first_success = False
             except Exception as exc:
                 failures.append({"dataset": row.dataset, "split": split_name, "sample_id": row.sample_id, "method_id": method, "source": str(source), "error_type": type(exc).__name__, "error": str(exc), "traceback": traceback.format_exc(limit=4)})

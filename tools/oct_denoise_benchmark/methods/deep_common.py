@@ -10,6 +10,14 @@ from torch import nn
 from .base import AdapterContext
 
 
+def cuda_device_index(device: str | torch.device) -> int:
+    """Normalize a CUDA spec for runtime APIs that reject ``torch.device``."""
+    resolved = torch.device(device)
+    if resolved.type != "cuda":
+        raise ValueError(f"expected a CUDA device, got {resolved}")
+    return torch.cuda.current_device() if resolved.index is None else int(resolved.index)
+
+
 def _blend_weight(height: int, width: int, overlap: int, *, top: bool, bottom: bool, left: bool, right: bool,
                   device: torch.device, dtype: torch.dtype) -> torch.Tensor:
     """Cosine feathering with unit weight on image-boundary edges."""

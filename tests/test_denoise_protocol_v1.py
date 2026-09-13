@@ -21,9 +21,9 @@ from tools.oct_denoise_benchmark.package_light import _ascii_stage_paths, materi
 from tools.oct_denoise_benchmark.statistics import bootstrap_confidence_intervals
 from tools.oct_denoise_benchmark.table_store import merge_records
 from tools.oct_denoise_benchmark.train_paired import PositionBalancedPairDataset, checkpoint_selection_reason, cpu_rng_state, validation_can_select_checkpoint
-from tools.oct_denoise_benchmark.methods.deep_common import tiled_forward
+from tools.oct_denoise_benchmark.methods.deep_common import cuda_device_index, tiled_forward
 from tools.oct_denoise_benchmark.inference import run as run_inference
-from tools.oct_denoise_benchmark.registry import load_yaml, save_yaml
+from tools.oct_denoise_benchmark.registry import load_yaml, lock_run, save_yaml
 from tools.oct_denoise_benchmark.merge_tracks import merge_tracks
 
 
@@ -172,6 +172,27 @@ def test_save_yaml_normalizes_numpy_inventory_scalars_atomically(tmp_path: Path)
     assert restored == {"update": 100000, "score": 30.5, "passed": True,
                         "checkpoint": str(tmp_path / "best.pth"), "seeds": [42, 123, 2026]}
     assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_cuda_runtime_device_arguments_are_integer_indices(monkeypatch):
+    assert cuda_device_index("cuda:0") == 0
+    assert cuda_device_index(torch.device("cuda:3")) == 3
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 2)
+    assert cuda_device_index("cuda") == 2
+    with pytest.raises(ValueError, match="expected a CUDA device"):
+        cuda_device_index("cpu")
+
+
+def test_relock_preserves_prior_sealed_evaluation_timestamp(tmp_path: Path, monkeypatch):
+    run = tmp_path / "run"; (run / "audit").mkdir(parents=True); (run / "configs").mkdir()
+    (run / "configs" / "inference_registry.yaml").write_text("status: locked\nmethods: {}\n", encoding="utf-8")
+    prior = {"status": "locked", "git_commit": "old", "locked_at_utc": "before",
+             "test_started_at_utc": "attempted", "config_sha256": {}, "checkpoint_sha256": {}}
+    (run / "audit" / "config_lock.json").write_text(__import__("json").dumps(prior), encoding="utf-8")
+    monkeypatch.setattr("tools.oct_denoise_benchmark.registry.git_commit", lambda root: "new")
+    result = lock_run(tmp_path, run, test_started=False)
+    assert result["git_commit"] == "new" and result["test_started_at_utc"] == "attempted"
+    assert result["previous_lock"]["git_commit"] == "old"
 
 
 @pytest.mark.parametrize("config", [

@@ -21,6 +21,7 @@ from .io import read_image, sha256_file
 from .metrics import compute_metrics
 from .methods.dncnn import DnCNN
 from .methods.nafnet import NAFNet
+from .methods.deep_common import cuda_device_index
 
 
 class PositionBalancedPairs:
@@ -165,6 +166,7 @@ def train(args: argparse.Namespace) -> Path:
     if args.method == "nafnet_paired":
         config.update({"enc_blocks": args.enc_blocks, "dec_blocks": args.dec_blocks})
     device = torch.device(args.device)
+    cuda_index = cuda_device_index(device) if device.type == "cuda" else None
     model = build_model(args.method, config).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate, betas=(0.9, 0.9 if args.method == "nafnet_paired" else 0.999), weight_decay=args.weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.max_updates, eta_min=args.min_learning_rate)
@@ -215,8 +217,8 @@ def train(args: argparse.Namespace) -> Path:
     loader = DataLoader(dataset, **loader_kwargs)
     batches = iter(loader)
     session_started = time.perf_counter()
-    if device.type == "cuda":
-        torch.cuda.reset_peak_memory_stats(device)
+    if cuda_index is not None:
+        torch.cuda.reset_peak_memory_stats(cuda_index)
     optimizer.zero_grad(set_to_none=True)
     for update in range(start_update + 1, args.max_updates + 1):
         model.train(); total_loss = 0.0; sampled = defaultdict(int)
@@ -249,7 +251,7 @@ def train(args: argparse.Namespace) -> Path:
                            "checkpoint_eligible": bool(do_full), "val_position_macro_psnr": psnr, "val_position_macro_ssim": ssim,
                            "physical_batch_size": args.batch_size, "effective_batch_size": args.batch_size * args.accumulation_steps,
                            "session_patches_per_second": ((update - start_update) * samples_per_update) / session_seconds,
-                           "gpu_peak_memory_mb": torch.cuda.max_memory_allocated(device) / (1024 ** 2) if device.type == "cuda" else 0.0})
+                           "gpu_peak_memory_mb": torch.cuda.max_memory_allocated(cuda_index) / (1024 ** 2) if cuda_index is not None else 0.0})
             selection_reason = checkpoint_selection_reason(best_psnr, best_ssim, psnr, ssim, args.psnr_tolerance) if validation_can_select_checkpoint(validation_scope) else None
             improved = selection_reason is not None
             if improved:

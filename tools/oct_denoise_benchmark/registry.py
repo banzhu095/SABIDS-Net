@@ -60,6 +60,8 @@ def git_commit(project_root: Path) -> str:
 
 
 def lock_run(project_root: Path, run_dir: Path, test_started: bool = False) -> dict[str, Any]:
+    path = run_dir / "audit" / "config_lock.json"
+    previous = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
     config_dir = run_dir / "configs"
     configs = {}
     for path in sorted(config_dir.glob("*.yaml")):
@@ -90,11 +92,16 @@ def lock_run(project_root: Path, run_dir: Path, test_started: bool = False) -> d
         "status": "locked",
         "git_commit": git_commit(project_root),
         "locked_at_utc": now,
-        "test_started_at_utc": now if test_started else None,
+        "test_started_at_utc": now if test_started else previous.get("test_started_at_utc"),
         "config_sha256": configs,
         "checkpoint_sha256": checkpoints,
     }
-    path = run_dir / "audit" / "config_lock.json"
+    if previous:
+        value["previous_lock"] = {
+            "git_commit": previous.get("git_commit"),
+            "locked_at_utc": previous.get("locked_at_utc"),
+            "test_started_at_utc": previous.get("test_started_at_utc"),
+        }
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value, indent=2, ensure_ascii=False), encoding="utf-8")
     return value
