@@ -74,7 +74,7 @@ def run(args: argparse.Namespace) -> list[dict[str, Any]]:
             config_hash = stable_sha256(config)
             source_code_hash = adapter_source_sha256(method)
             checkpoint = args.checkpoint or entry.get("checkpoint")
-            if method in {"dncnn_paired", "nafnet_paired"} and not checkpoint:
+            if method in {"dncnn_paired", "nafnet_paired", "sabids_current", "tcfl_dncnn"} and not checkpoint:
                 raise ValueError(f"{method} has no locked checkpoint; random weights are forbidden")
             checkpoint_path = Path(checkpoint).resolve() if checkpoint else None
             checkpoint_hash = sha256_file(checkpoint_path) if checkpoint_path and checkpoint_path.is_file() else ""

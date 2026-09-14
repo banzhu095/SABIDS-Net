@@ -56,6 +56,36 @@ with a preregistered `--batch-size`/`--accumulation-steps` pair whose product is
 Workbook generation is optional. Missing Node or artifact-tool marks that step
 `skipped_optional`; CSV, JSON, images and checkpoints remain valid outputs.
 
+## SABIDS-current and TCFL extension
+
+The extension reads a completed seven-method `BASE_RUN` without modifying it
+and writes only to a new `EXT_RUN`. TCFL-OCT source is fetched at the audited
+commit into ignored `third_party_external/`; its complete source is not
+redistributed because the upstream repository has no explicit license.
+
+```bash
+cd /mnt/SABIDS-Net
+BASE_RUN=/mnt/SABIDS-Net/runs/denoise_benchmark_pku_protocol_20260909_225058
+EXT_RUN=/mnt/SABIDS-Net/runs/denoise_benchmark_plus_sabids_tcfl_$(date +%Y%m%d_%H%M%S)
+
+bash tools/oct_denoise_benchmark/scripts/run_plus_sabids_tcfl.sh --project-root /mnt/SABIDS-Net --base-run "$BASE_RUN" --ext-run "$EXT_RUN" --track init
+bash tools/oct_denoise_benchmark/scripts/run_plus_sabids_tcfl.sh --project-root /mnt/SABIDS-Net --base-run "$BASE_RUN" --ext-run "$EXT_RUN" --track smoke
+bash tools/oct_denoise_benchmark/scripts/run_plus_sabids_tcfl.sh --project-root /mnt/SABIDS-Net --base-run "$BASE_RUN" --ext-run "$EXT_RUN" --track train --resume
+bash tools/oct_denoise_benchmark/scripts/run_plus_sabids_tcfl.sh --project-root /mnt/SABIDS-Net --base-run "$BASE_RUN" --ext-run "$EXT_RUN" --track lock
+bash tools/oct_denoise_benchmark/scripts/run_plus_sabids_tcfl.sh --project-root /mnt/SABIDS-Net --base-run "$BASE_RUN" --ext-run "$EXT_RUN" --track evaluate --resume
+bash tools/oct_denoise_benchmark/scripts/run_plus_sabids_tcfl.sh --project-root /mnt/SABIDS-Net --base-run "$BASE_RUN" --ext-run "$EXT_RUN" --track merge
+bash tools/oct_denoise_benchmark/scripts/run_plus_sabids_tcfl.sh --project-root /mnt/SABIDS-Net --base-run "$BASE_RUN" --ext-run "$EXT_RUN" --track package
+```
+
+The `init` track inventories and hashes the entire BASE_RUN, audits the manifest,
+and resolves the current formal Stage-1 checkpoint. If resolution is not unique,
+the train track retrains the unchanged current Stage-1 architecture/loss for
+seeds 42, 123, and 2026. TCFL uses its official 640x640, batch-2, 100-epoch,
+Adam 2e-5 recipe and records every independently sampled A/B/C train triplet.
+The lock is created before test or Duke references can be read. Package creation
+requires an XLSX writer; it uses the research runtime's workbook builder when
+available and an `openpyxl` fallback otherwise.
+
 ## Protocol-locked file inference
 
 Windows PowerShell, single file:

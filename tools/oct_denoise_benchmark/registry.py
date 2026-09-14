@@ -62,7 +62,7 @@ def _atomic_write_text(path: Path, payload: str) -> None:
 
 
 def git_commit(project_root: Path) -> str:
-    result = subprocess.run(["git", "rev-parse", "HEAD"], cwd=project_root, capture_output=True, text=True)
+    result = subprocess.run(["git", "rev-parse", "HEAD"], cwd=project_root, capture_output=True, text=True, encoding="utf-8", errors="replace")
     return result.stdout.strip() if result.returncode == 0 else "unavailable"
 
 

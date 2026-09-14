@@ -28,7 +28,7 @@ from .statistics import aggregate, bootstrap_confidence_intervals, paired_differ
 from .table_store import atomic_write_csv, merge_records, normalize_hash_columns
 
 
-DEEP = {"dncnn_paired", "nafnet_paired"}
+DEEP = {"dncnn_paired", "nafnet_paired", "sabids_current", "tcfl_dncnn"}
 
 
 def mark_recovered_failures(failure_table: pd.DataFrame, success_rows: list[dict[str, Any]], resolved_at: str) -> pd.DataFrame:
@@ -83,7 +83,7 @@ def evaluate(args: argparse.Namespace) -> None:
     table = _selected(load_protocol_manifest(root, args.manifest), args.splits)
     lock_data: dict[str, Any] | None = None
     if any(split in {"test", "external_test"} for split in args.splits):
-        lock = run_dir / "audit" / "config_lock.json"
+        lock = run_dir / "audit" / args.lock_file
         if not lock.is_file():
             raise RuntimeError("sealed test requires audit/config_lock.json created before test launch")
         lock_data = json.loads(lock.read_text(encoding="utf-8"))
@@ -95,7 +95,9 @@ def evaluate(args: argparse.Namespace) -> None:
                 raise RuntimeError(f"locked configuration changed after lock: {name}")
         if lock_data.get("test_started_at_utc") is None:
             lock_data["test_started_at_utc"] = datetime.now(timezone.utc).isoformat()
-            lock.write_text(json.dumps(lock_data, indent=2, ensure_ascii=False), encoding="utf-8")
+        if "external_test" in args.splits and lock_data.get("duke_evaluation_started_at_utc") is None:
+            lock_data["duke_evaluation_started_at_utc"] = datetime.now(timezone.utc).isoformat()
+        lock.write_text(json.dumps(lock_data, indent=2, ensure_ascii=False), encoding="utf-8")
     registry = load_yaml(args.registry or run_dir / "configs" / "inference_registry.yaml")
     methods = list(registry["methods"]) if args.methods == ["all"] else args.methods
     metric_path, failure_path = run_dir / "metrics" / "per_image_metrics.csv", run_dir / "failures.csv"
@@ -206,7 +208,7 @@ def evaluate(args: argparse.Namespace) -> None:
 
 def parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(); p.add_argument("--project-root", type=Path, default=Path(".")); p.add_argument("--run-dir", type=Path, required=True); p.add_argument("--manifest", type=Path); p.add_argument("--registry", type=Path)
-    p.add_argument("--methods", nargs="+", default=["all"]); p.add_argument("--splits", nargs="+", required=True, choices=["train", "val", "test", "external_test"]); p.add_argument("--device", default="cpu"); p.add_argument("--tile-size", type=int); p.add_argument("--tile-overlap", type=int, default=32); p.add_argument("--bootstrap-iterations", type=int, default=10000); p.add_argument("--all-deep-seeds", action="store_true"); p.add_argument("--overwrite", action="store_true"); return p
+    p.add_argument("--methods", nargs="+", default=["all"]); p.add_argument("--splits", nargs="+", required=True, choices=["train", "val", "test", "external_test"]); p.add_argument("--device", default="cpu"); p.add_argument("--tile-size", type=int); p.add_argument("--tile-overlap", type=int, default=32); p.add_argument("--bootstrap-iterations", type=int, default=10000); p.add_argument("--all-deep-seeds", action="store_true"); p.add_argument("--overwrite", action="store_true"); p.add_argument("--lock-file", default="config_lock.json"); return p
 
 
 def main(argv: Sequence[str] | None = None) -> None: evaluate(parser().parse_args(argv))

@@ -858,3 +858,34 @@ Populate one row per independent fold after validation threshold selection.
   not be merged into the fresh formal cloud run.
 - Local CUDA remains unavailable. No formal deep checkpoint, PKU37 test metric,
   Duke metric, or downstream segmentation result was produced in this change.
+
+# 2026-09-14 — SABIDS-current and TCFL-DnCNN extension implementation
+
+- Added locked benchmark method IDs `sabids_current` and `tcfl_dncnn`. The
+  SABIDS adapter reconstructs the exact checkpoint model configuration, uses
+  only `forward_denoise_only`, pads arbitrary geometry to the network stride,
+  and crops back without resize. The TCFL inference adapter loads only the
+  official 10-layer generator and computes noisy minus predicted noise.
+- Audited `gengmufeng/TCFL-OCT` at commit
+  `7320fc84fec37280d9643b1010d8afc4381f5a48`. Upstream has no LICENSE, so the
+  clone remains under ignored `third_party_external/`; only the adapter,
+  download script, commit and audit are retained in Git.
+- Implemented true unpaired PKU37-train sampling with independently selected,
+  distinct A/B/C positions, the official six LSGAN and four cross-fusion L1
+  terms, batch 2, 640x640, Adam 2e-5 with betas 0.5/0.999, lambda 6 and 100
+  epochs. Three formal seeds are 42, 123 and 2026. Resume restores generator,
+  discriminator, both optimizers and all applicable random states; the official
+  recipe has no scheduler or AMP scaler.
+- Added a BASE_RUN-immutable extension runner, independent extension lock,
+  split-aware position bootstrap, complete image/path/ZIP packaging, fixed-atlas
+  reuse, downstream segmentation inputs, workbook and GPT-light package.
+- Local CPU verification passed the complete test suite. This workstation has
+  no formal cloud BASE_RUN, compatible formal SABIDS checkpoint, RTX 3090 or
+  completed TCFL weights, so no formal train/test/Duke metrics or package are
+  claimed here; those remain for the committed ModelWhale run.
+- Identity resolution also found that the generic current Stage-1 config leaves
+  dataset filters unset. Because the benchmark manifest contains Duke rows with
+  original split labels, an old checkpoint is compatible only if its resolved
+  configuration explicitly proves PKU37-only train/validation. Otherwise it is
+  recorded as a legacy diagnostic and the extension-generated retraining
+  configs force `train_datasets` and `val_datasets` to `[PKU37]`.

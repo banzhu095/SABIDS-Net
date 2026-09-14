@@ -46,6 +46,7 @@ dist/
 /wandb/
 /lightning_logs/
 /tmp/
+/third_party_external/
 
 # Model weights and exported graphs anywhere in the repository
 *.pth

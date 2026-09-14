@@ -30,6 +30,8 @@ def _registry() -> dict[str, Adapter]:
     from .nlm_adapter import nlm_adapter
     from .noisy import noisy_adapter
     from .tv_adapter import tv_adapter
+    from .sabids_adapter import sabids_adapter
+    from .tcfl_adapter import tcfl_adapter
 
     return {
         "noisy_identity": noisy_adapter,
@@ -40,6 +42,8 @@ def _registry() -> dict[str, Adapter]:
         "ksvd_self": ksvd_adapter,
         "dncnn_paired": dncnn_adapter,
         "nafnet_paired": nafnet_adapter,
+        "sabids_current": sabids_adapter,
+        "tcfl_dncnn": tcfl_adapter,
     }
 
 
