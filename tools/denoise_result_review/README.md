@@ -28,7 +28,7 @@ bash tools/denoise_result_review/scripts/package_pku37_test.sh
 
 Progress and outputs are in `runs/denoise_review_packages/PKU37_test_primary/`. Download the ZIP for each position, or the total ZIP after its CRC status is `passed` in `manifests/archive_inventory.csv`. Re-run with `--resume`; matching files and valid archives are retained. A hash conflict stops that asset. Use `--positions pku_0006,pku_0017`, `--samples pku_0006_f26`, or `--methods bm3d_standard,dncnn_paired`. Use `--include-all-seeds` only for a separate seed-sensitivity package.
 
-`auto` and normal explicit runs refuse incomplete result directories. `--allow-incomplete-run` is an explicit development-smoke escape hatch only; it does not relabel `val` as `test`, and its outputs are never confirmatory.
+`auto` selects the newest package-ready run: all eight required audit/config/metric files, real PKU37 `test` rows, and no duplicate logical keys. Missing methods remain `missing/not_completed` and produce `completed_with_missing_methods`; rerun with `--resume` after SABIDS/TCFL arrive. `--allow-incomplete-run` is an explicit development-smoke escape hatch for a structurally incomplete or non-test run; it does not relabel `val` as `test`, and its outputs are never confirmatory.
 
 When SABIDS/TCFL finishes later, rerun the same command against the newly discovered complete run. Already identical package files are not overwritten.
 

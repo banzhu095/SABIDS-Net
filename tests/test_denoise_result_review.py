@@ -30,7 +30,7 @@ def test_literature_covers_review_methods_and_separates_sources():
 def test_discovery_rejects_structured_but_result_incomplete_run(tmp_path: Path):
     run = tmp_path / "runs" / "candidate"
     for directory in ("metrics", "configs", "audit", "manifests"): (run / directory).mkdir(parents=True, exist_ok=True)
-    row = {"dataset": "PKU37", "split": "val", "position_id": "p1", "sample_id": "s1", "method_id": "noisy_identity", "seed": 0, "status": "success"}
+    row = {"dataset": "PKU37", "split": "test", "position_id": "p1", "sample_id": "s1", "method_id": "noisy_identity", "seed": 0, "status": "success"}
     pd.DataFrame([row]).to_csv(run / "metrics" / "per_image_metrics.csv", index=False)
     for name in ("per_position_metrics.csv", "per_dataset_metrics.csv", "asset_inventory.csv", "selected_parameters.csv"): pd.DataFrame([row]).to_csv(run / "metrics" / name, index=False)
     pd.DataFrame([row]).to_csv(run / "manifests" / "denoised_dataset_manifest.csv", index=False)
@@ -38,7 +38,7 @@ def test_discovery_rejects_structured_but_result_incomplete_run(tmp_path: Path):
     (run / "audit" / "config_lock.json").write_text(json.dumps({"status": "locked"}), encoding="utf-8")
     result = inspect_run(run)
     assert result.required_present == result.required_total
-    assert result.result_complete is False and result.pku_test_rows == 0
+    assert result.package_ready is True and result.result_complete is False and result.pku_test_rows == 1
     assert "tcfl_dncnn" in result.missing_methods
 
 

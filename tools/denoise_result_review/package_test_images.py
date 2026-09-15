@@ -96,6 +96,8 @@ def package_test_images(project_root: str | Path, run_dir: str | Path, output_di
     assets, failures = build_asset_manifest(run, dataset, split, primary_only, selected_methods)
     if positions: assets = assets[assets.position_id.astype(str).isin(positions)]
     if samples: assets = assets[assets.sample_id.astype(str).isin(samples)]
+    available_methods = set(assets.method_id.astype(str)) if not assets.empty else set()
+    missing_methods = sorted(set(selected_methods) - available_methods)
     sources = []
     for row in assets.itertuples(index=False):
         sources.append(Path(str(row.denoised_path)))
@@ -103,7 +105,7 @@ def package_test_images(project_root: str | Path, run_dir: str | Path, output_di
         if include_reference: sources.append(Path(str(row.reference_path)))
     unique_sources = list(dict.fromkeys(path.resolve() for path in sources if path.is_file()))
     estimate = {"source_files": len(unique_sources), "source_bytes": sum(path.stat().st_size for path in unique_sources), "estimated_zip_bytes": sum(path.stat().st_size for path in unique_sources), "free_bytes": shutil.disk_usage(output.parent if output.parent.exists() else root).free, "selected_metric_rows": len(assets), "failures": len(failures)}
-    if dry_run: return {"status": "dry_run", "run_dir": str(run), "output_root": str(output), **estimate}
+    if dry_run: return {"status": "dry_run", "run_dir": str(run), "output_root": str(output), "missing_methods": missing_methods, **estimate}
     package_root = output / f"{dataset}_{split}_{'primary' if primary_only else 'all_seeds'}"
     for child in ("positions", "manifests", "previews", "archives"): (package_root / child).mkdir(parents=True, exist_ok=True)
     records: list[dict[str, Any]] = []
@@ -150,4 +152,5 @@ def package_test_images(project_root: str | Path, run_dir: str | Path, output_di
     for item in archives:
         lines += [f"## {item['position_id']}", "", f"- Absolute path: `{item['archive_path']}`", f"- Samples: {item['sample_count']}; methods: {item['method_count']}; files: {item['file_count']}", f"- Bytes: {item['bytes']}; SHA256: `{item['sha256']}`; CRC: {item['crc_status']}", ""]
     (package_root / "download_paths.md").write_text("\n".join(lines), encoding="utf-8")
-    return {"status": "completed_with_failures" if package_failures else "completed", "run_dir": str(run), "package_root": str(package_root), "image_files": len(manifest), "samples": manifest.sample_id.nunique() if not manifest.empty else 0, "positions": manifest.position_id.nunique() if not manifest.empty else 0, "archives": archives, "failures": len(package_failures), **estimate}
+    status = "completed_with_failures" if package_failures else ("completed_with_missing_methods" if missing_methods else "completed")
+    return {"status": status, "run_dir": str(run), "package_root": str(package_root), "image_files": len(manifest), "samples": manifest.sample_id.nunique() if not manifest.empty else 0, "positions": manifest.position_id.nunique() if not manifest.empty else 0, "archives": archives, "failures": len(package_failures), "missing_methods": missing_methods, **estimate}

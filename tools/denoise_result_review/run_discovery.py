@@ -31,6 +31,7 @@ class RunCandidate:
     pku_test_samples: int
     pku_test_positions: int
     duplicate_keys: int
+    package_ready: bool
     result_complete: bool
     modified_ns: int
 
@@ -58,11 +59,12 @@ def inspect_run(path: str | Path) -> RunCandidate:
         keys = [column for column in ("dataset", "split", "position_id", "sample_id", "method_id", "seed", "checkpoint_sha256") if column in table]
         duplicates = int(table.duplicated(keys, keep=False).sum()) if keys else len(table)
     missing_methods = sorted(set(METHOD_ORDER) - set(successful))
-    complete = not missing and rows > 0 and not duplicates and not missing_methods
+    package_ready = not missing and rows > 0 and not duplicates
+    complete = package_ready and not missing_methods
     return RunCandidate(
         str(root), len(REQUIRED_FILES) - len(missing), len(REQUIRED_FILES), missing,
         methods, successful, missing_methods, rows, samples, positions, duplicates,
-        complete, root.stat().st_mtime_ns,
+        package_ready, complete, root.stat().st_mtime_ns,
     )
 
 
@@ -70,7 +72,7 @@ def discover_runs(project_root: str | Path) -> list[RunCandidate]:
     runs = Path(project_root).resolve() / "runs"
     return sorted(
         (inspect_run(path) for path in runs.iterdir() if path.is_dir()),
-        key=lambda item: (item.result_complete, item.required_present, item.pku_test_rows, item.modified_ns),
+        key=lambda item: (item.package_ready, item.required_present == item.required_total, item.modified_ns),
         reverse=True,
     ) if runs.is_dir() else []
 
@@ -78,16 +80,16 @@ def discover_runs(project_root: str | Path) -> list[RunCandidate]:
 def resolve_run(project_root: str | Path, run_dir: str | Path = "auto", require_complete: bool = False) -> Path:
     if str(run_dir).lower() != "auto":
         candidate = inspect_run(run_dir)
-        if require_complete and not candidate.result_complete:
-            raise RuntimeError(f"requested run is not complete: {asdict(candidate)}")
+        if require_complete and not candidate.package_ready:
+            raise RuntimeError(f"requested run is not package-ready: {asdict(candidate)}")
         return Path(candidate.path)
     candidates = discover_runs(project_root)
-    eligible = [item for item in candidates if item.result_complete]
+    eligible = [item for item in candidates if item.package_ready]
     if eligible:
         return Path(eligible[0].path)
     structured = [item for item in candidates if item.required_present == item.required_total]
     if require_complete:
-        raise FileNotFoundError("no complete denoising run found; candidates=" + json.dumps([asdict(x) for x in candidates], ensure_ascii=False))
+        raise FileNotFoundError("no package-ready denoising run found; candidates=" + json.dumps([asdict(x) for x in candidates], ensure_ascii=False))
     if not structured:
         raise FileNotFoundError("no structurally complete denoising run found")
     return Path(structured[0].path)
