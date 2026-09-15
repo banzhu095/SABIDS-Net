@@ -44,12 +44,17 @@ class ROIRegistry:
 
     def _version(self) -> int:
         maximum = pd.to_numeric(self.frame.get("registry_version", pd.Series([0])), errors="coerce").max()
-        return (0 if pd.isna(maximum) else int(maximum)) + 1
+        frame_maximum = 0 if pd.isna(maximum) else int(maximum)
+        saved_versions = []
+        for path in self.version_dir.glob("roi_registry_v*.csv"):
+            try: saved_versions.append(int(path.stem.rsplit("v", 1)[1]))
+            except ValueError: continue
+        return max([frame_maximum, *saved_versions], default=0) + 1
 
     def save(self) -> None:
         self.output_root.mkdir(parents=True, exist_ok=True)
-        maximum = pd.to_numeric(self.frame.get("registry_version", pd.Series([1])), errors="coerce").max()
-        version = 1 if pd.isna(maximum) else int(maximum)
+        maximum = pd.to_numeric(self.frame.get("registry_version", pd.Series(dtype=float)), errors="coerce").max()
+        version = self._version() if pd.isna(maximum) else int(maximum)
         for destination, writer in (
             (self.csv_path, lambda path: self.frame.to_csv(path, index=False)),
             (self.json_path, lambda path: Path(path).write_text(json.dumps(self.frame.where(pd.notna(self.frame), None).to_dict("records"), indent=2, ensure_ascii=False), encoding="utf-8")),
@@ -87,6 +92,17 @@ class ROIRegistry:
             shutil.copy2(self.csv_path, self.version_dir / f"roi_registry_locked_{stamp}.csv")
         version = self._version(); self.frame["locked"] = False; self.frame["locked_at"] = ""; self.frame["registry_version"] = version
         (self.version_dir / f"unlock_reason_v{version:04d}.txt").write_text(reason.strip() + "\n", encoding="utf-8")
+        self.save()
+
+    def reset(self, reason: str) -> None:
+        """Start a blank working registry while retaining an auditable prior version."""
+        if not reason.strip(): raise ValueError("reset reason is required")
+        if self.locked: self.unlock(reason)
+        version = self._version()
+        if self.csv_path.is_file():
+            shutil.copy2(self.csv_path, self.version_dir / f"roi_registry_before_reset_v{version:04d}.csv")
+        (self.version_dir / f"reset_reason_v{version:04d}.txt").write_text(reason.strip() + "\n", encoding="utf-8")
+        self.frame = pd.DataFrame(columns=ROI_COLUMNS)
         self.save()
 
 

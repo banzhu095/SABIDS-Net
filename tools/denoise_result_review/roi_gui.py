@@ -14,12 +14,15 @@ TISSUE_NAMES = {"vitreous": "玻璃体", "retina": "视网膜", "choroid_vessel"
 
 
 def select_rois(input_root: str | Path, selection_list: str | Path, output_root: str | Path,
-                roi_size: int = 48, unlock_rois: bool = False, unlock_reason: str = "") -> None:
+                roi_size: int = 48, unlock_rois: bool = False, unlock_reason: str = "",
+                reset_rois: bool = False) -> None:
     candidates = pd.read_csv(selection_list, dtype={"sample_id": str, "position_id": str})
     candidates = candidates[candidates.exists.astype(str).str.lower().isin({"true", "1"})].reset_index(drop=True)
     if candidates.empty: raise ValueError("selection list contains no existing exact-match candidates")
     registry = ROIRegistry(output_root)
-    if unlock_rois: registry.unlock(unlock_reason)
+    if reset_rois and not unlock_rois: raise ValueError("--reset-rois requires --unlock-rois and --unlock-reason")
+    if reset_rois: registry.reset(unlock_reason)
+    elif unlock_rois: registry.unlock(unlock_reason)
     if registry.locked: raise RuntimeError("ROI registry is locked; methods remain hidden unless explicitly unlocked")
     state = {"index": 0, "tissue": "custom", "last_roi": None}
     fig, axes = plt.subplots(1, 2, figsize=(12, 6))

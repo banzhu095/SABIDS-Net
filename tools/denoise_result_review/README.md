@@ -15,7 +15,7 @@ python -m tools.denoise_result_review.cli discover --project-root /mnt/SABIDS-Ne
 python -m tools.denoise_result_review.cli summarize --project-root /mnt/SABIDS-Net --run-dir auto
 ```
 
-`auto` scans `runs/` and accepts a formal result only when required tables, registry, lock, denoised manifest, PKU37 test rows, all nine method identities, and unique logical keys are present. Missing SABIDS-current or TCFL-DnCNN remains `missing/not_completed`.
+`auto` scans `runs/` and accepts a package-ready formal result only when required tables, registry, lock, denoised manifest, PKU37 test rows, and unique logical keys are present. Missing SABIDS-current or TCFL-DnCNN remains `missing/not_completed` and can be added later with `--resume`.
 
 ## Package PKU37 test on Juchiyun
 
@@ -61,7 +61,7 @@ python -m tools.denoise_result_review.cli select-roi `
 
 Before locking, the GUI shows only noisy and reference. Keys: `1` vitreous, `2` retina, `3` choroid vessel, `4` choroid stroma, `5` custom, `S` save, `D` delete last ROI, `N/P` navigate, `L` lock, `Q` save and quit. Clicking chooses the square center in original image coordinates. Edge-crossing ROIs are rejected rather than shifted.
 
-To revise locked coordinates, run `select-roi --unlock-rois --unlock-reason "reason"`; the prior registry and reason are versioned.
+To revise locked coordinates, run `select-roi --unlock-rois --unlock-reason "reason"`; the prior registry and reason are versioned. To discard the current working coordinates and restart blinded selection while preserving the archived registry, add `--reset-rois`.
 
 ## Evaluate, create panels, Excel, and report
 

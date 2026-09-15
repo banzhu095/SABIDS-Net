@@ -37,3 +37,15 @@ def test_unlocked_registry_cannot_be_formally_evaluated(tmp_path: Path):
     registry.save()
     with pytest.raises(RuntimeError, match="locked"):
         require_locked(registry.csv_path)
+
+
+def test_reset_preserves_locked_registry_and_starts_blank_version(tmp_path: Path):
+    registry = ROIRegistry(tmp_path)
+    registry.add(dataset="PKU37", split="test", position_id="p", sample_id="s", tissue="custom", roi_size=32, center_x=50, center_y=50, width=100, height=100, selection_image="x", selection_reason="x", reference_sha256="r", noisy_sha256="n")
+    registry.lock(); locked_version = int(registry.frame.registry_version.max())
+    registry.reset("replace accidental all-custom labels")
+    assert registry.frame.empty and registry.csv_path.is_file()
+    assert list(registry.version_dir.glob("roi_registry_before_reset_*.csv"))
+    assert list(registry.version_dir.glob("reset_reason_*.txt"))
+    registry.add(dataset="PKU37", split="test", position_id="p", sample_id="s", tissue="retina", roi_size=32, center_x=50, center_y=50, width=100, height=100, selection_image="x", selection_reason="corrected", reference_sha256="r", noisy_sha256="n")
+    assert int(registry.frame.iloc[0].registry_version) > locked_version
