@@ -13,7 +13,7 @@ from tools.denoise_result_review.package_test_images import package_test_images
 from tools.denoise_result_review.roi_evaluation import evaluate_rois
 from tools.denoise_result_review.roi_registry import ROIRegistry
 from tools.denoise_result_review.roi_visualization import build_panels
-from tools.denoise_result_review.validation import audit_local
+from tools.denoise_result_review.validation import audit_local, find_image_manifest
 
 
 def _write(path: Path, image: np.ndarray) -> None:
@@ -60,6 +60,12 @@ def test_package_dry_run_does_not_create_output(tmp_path: Path):
     run = _run(tmp_path); output = tmp_path / "not-created"
     result = package_test_images(tmp_path, run, output, methods=["bm3d_standard", "tv_chambolle", "nlm"], dry_run=True)
     assert result["status"] == "dry_run" and not output.exists()
+
+
+def test_extracted_archive_uppercase_manifest_is_discovered(tmp_path: Path):
+    manifest = tmp_path / "IMAGE_MANIFEST.csv"
+    manifest.write_text("sample_id\nexample\n", encoding="utf-8")
+    assert find_image_manifest(tmp_path) == manifest.resolve()
 
 
 def test_realistic_package_audit_locked_roi_common_crop_and_missing_panel(tmp_path: Path):

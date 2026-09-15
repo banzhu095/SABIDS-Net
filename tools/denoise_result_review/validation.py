@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import zipfile
 from pathlib import Path
 from typing import Any
@@ -16,8 +17,18 @@ HISTORICAL_CANDIDATES = ("pku_0006_f26", "pku_0017_f26", "pku_0025_f26", "pku_00
 
 def find_image_manifest(input_root: str | Path) -> Path:
     root = Path(input_root).resolve()
-    candidates = [root / "manifests" / "image_manifest.csv", root / "image_manifest.csv"]
-    hits = [path for path in candidates if path.is_file()]
+    candidates = [
+        root / "manifests" / "image_manifest.csv",
+        root / "image_manifest.csv",
+        root / "IMAGE_MANIFEST.csv",
+    ]
+    hits = []
+    seen = set()
+    for path in candidates:
+        identity = os.path.normcase(str(path.resolve()))
+        if path.is_file() and identity not in seen:
+            hits.append(path)
+            seen.add(identity)
     if len(hits) != 1: raise FileNotFoundError(f"expected exactly one package image manifest, found {hits}")
     return hits[0]
 
