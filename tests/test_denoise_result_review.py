@@ -13,7 +13,7 @@ from openpyxl import load_workbook
 from tools.denoise_result_review import METHOD_ORDER
 from tools.denoise_result_review.image_io import decode_lossless, read_float01, to_float01
 from tools.denoise_result_review.manifest_builder import primary_seeds
-from tools.denoise_result_review.method_literature import load_literature
+from tools.denoise_result_review.method_literature import implementation_summary, load_literature
 from tools.denoise_result_review.run_discovery import inspect_run
 from tools.denoise_result_review.workbook import write_workbook
 
@@ -71,3 +71,13 @@ def test_primary_deep_seed_comes_from_registry_not_metrics(tmp_path: Path):
     (run / "configs" / "inference_registry.yaml").write_text("methods:\n  dncnn_paired: {seed: 123}\n  bm3d_standard: {seed: 0}\n", encoding="utf-8")
     seeds = primary_seeds(run)
     assert seeds["dncnn_paired"] == 123 and seeds["bm3d_standard"] == 0
+
+
+def test_implementation_status_accepts_successful_per_image_evidence(tmp_path: Path):
+    run = tmp_path / "run"; (run / "configs").mkdir(parents=True); (run / "metrics").mkdir()
+    (run / "configs" / "inference_registry.yaml").write_text("methods: {}\n", encoding="utf-8")
+    pd.DataFrame([{"method_id": "noisy_identity", "status": "success"}]).to_csv(run / "metrics" / "per_image_metrics.csv", index=False)
+    summary = implementation_summary(tmp_path, run).set_index("method_id")
+    assert summary.loc["noisy_identity", "status"] == "completed"
+    assert summary.loc["noisy_identity", "completion_evidence"] == "successful_per_image"
+    assert summary.loc["sabids_current", "status"] == "missing/not_completed"

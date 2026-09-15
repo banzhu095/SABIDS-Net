@@ -51,12 +51,18 @@ def implementation_summary(project_root: str | Path, run_dir: str | Path) -> pd.
     complexity = pd.read_csv(complexity_path) if complexity_path.is_file() else pd.DataFrame()
     checkpoints_path = run / "metrics" / "checkpoint_inventory.csv"
     checkpoints = pd.read_csv(checkpoints_path) if checkpoints_path.is_file() else pd.DataFrame()
+    per_image_path = run / "metrics" / "per_image_metrics.csv"
+    per_image = pd.read_csv(per_image_path, low_memory=False) if per_image_path.is_file() else pd.DataFrame()
+    if not per_image.empty and "status" in per_image:
+        per_image = per_image[per_image.status.astype(str).str.lower().isin({"success", "completed", "ok"})]
+    successful_methods = set(per_image.method_id.dropna().astype(str)) if not per_image.empty and "method_id" in per_image else set()
     seeds = primary_seeds(run)
     rows = []
     for method in METHOD_ORDER:
         entry = registry.get("methods", {}).get(method)
         row: dict[str, Any] = {
-            "method_id": method, "status": "completed" if entry is not None else "missing/not_completed",
+            "method_id": method, "status": "completed" if entry is not None or method in successful_methods else "missing/not_completed",
+            "completion_evidence": ";".join(filter(None, ("locked_registry" if entry is not None else "", "successful_per_image" if method in successful_methods else ""))),
             "primary_seed": seeds.get(method, 0), "registry_entry": json.dumps(entry, ensure_ascii=False, sort_keys=True) if entry is not None else "",
             "model_class": "", "stage_identity": "", "uses_segmentation_labels": "", "training_supervision": "",
             "network_structure": "", "loss_configuration": "", "runtime_source": "",
