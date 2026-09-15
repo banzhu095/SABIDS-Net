@@ -1,0 +1,12 @@
+roi_sizes: [32, 48, 64]
+default_roi_size: 48
+bright_outlier_threshold: 0.10
+display_window: [0.0, 1.0]
+bootstrap_iterations: 10000
+bootstrap_seed: 42
+tissues:
+  vitreous: 玻璃体
+  retina: 视网膜
+  choroid_vessel: 脉络膜血管
+  choroid_stroma: 脉络膜基质
+  custom: 自定义

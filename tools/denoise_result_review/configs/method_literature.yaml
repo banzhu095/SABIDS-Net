@@ -1,0 +1,172 @@
+methods:
+  - method_id: noisy_identity
+    display_name: Noisy input
+    category: control
+    supervision: none
+    original_paper_title: null
+    authors: null
+    venue: null
+    year: null
+    volume: null
+    pages: null
+    doi: null
+    paper_url: null
+    official_code_url: null
+    core_principle: Identity mapping used as the preregistered no-denoising reference.
+    main_components: [identity copy]
+    strengths: [exact input reference, no learned or tuned parameters]
+    limitations: [does not denoise]
+    oct_specific: false
+    current_implementation_notes: Copies the benchmark noisy input without re-encoding for review packages.
+  - method_id: bm3d_standard
+    display_name: BM3D
+    category: classical nonlocal collaborative filtering
+    supervision: none
+    original_paper_title: Image Denoising by Sparse 3-D Transform-Domain Collaborative Filtering
+    authors: K. Dabov; A. Foi; V. Katkovnik; K. Egiazarian
+    venue: IEEE Transactions on Image Processing
+    year: 2007
+    volume: 16(8)
+    pages: 2080-2095
+    doi: 10.1109/TIP.2007.901238
+    paper_url: https://pubmed.ncbi.nlm.nih.gov/17688213/
+    official_code_url: https://webpages.tuni.fi/foi/GCF-BM3D/
+    core_principle: Searches similar 2-D patches, stacks them into 3-D groups, applies a separable 3-D transform, performs hard-thresholding and Wiener filtering, then aggregates overlapping estimates.
+    main_components: [similar-patch search, 3-D grouping, 3-D transform, hard threshold, Wiener filtering, aggregation]
+    strengths: [strong stationary-noise baseline, no training data]
+    limitations: [noise-level sensitivity, expensive block matching, may attenuate fine structures]
+    oct_specific: false
+    current_implementation_notes: Uses the standard two-stage BM3D profile; it is distinct from a low-complexity profile.
+  - method_id: tv_chambolle
+    display_name: TV-Chambolle
+    category: variational regularization
+    supervision: none
+    original_paper_title: Nonlinear Total Variation Based Noise Removal Algorithms
+    authors: L. I. Rudin; S. Osher; E. Fatemi
+    venue: Physica D
+    year: 1992
+    volume: 60
+    pages: 259-268
+    doi: 10.1016/0167-2789(92)90242-F
+    paper_url: https://doi.org/10.1016/0167-2789(92)90242-F
+    official_code_url: null
+    core_principle: Minimizes a data-fidelity term plus total variation; the current implementation uses Chambolle's numerical projection algorithm.
+    main_components: [ROF objective, total-variation prior, Chambolle projection iterations]
+    strengths: [convex baseline, edge-aware smoothing, few parameters]
+    limitations: [staircasing, loss of texture, parameter sensitivity]
+    oct_specific: false
+    current_implementation_notes: Numerical solver follows A. Chambolle, An Algorithm for Total Variation Minimization and Applications, JMIV 2004, DOI 10.1023/B:JMIV.0000011325.36760.1e.
+  - method_id: nlm
+    display_name: Non-local means
+    category: classical nonlocal filtering
+    supervision: none
+    original_paper_title: A Non-Local Algorithm for Image Denoising
+    authors: A. Buades; B. Coll; J.-M. Morel
+    venue: CVPR
+    year: 2005
+    volume: 2
+    pages: 60-65
+    doi: 10.1109/CVPR.2005.38
+    paper_url: https://ieeexplore.ieee.org/document/1467423/
+    official_code_url: null
+    core_principle: Averages pixels using weights derived from similarity between surrounding patches over a nonlocal search window.
+    main_components: [patch comparison, nonlocal search, similarity weights, weighted averaging]
+    strengths: [uses repeated texture, interpretable, no training]
+    limitations: [computational cost, smoothing at mismatched bandwidth, assumes useful patch recurrence]
+    oct_specific: false
+    current_implementation_notes: Parameters are taken only from the locked benchmark registry or selected-parameter table.
+  - method_id: ksvd_self
+    display_name: K-SVD-self
+    category: learned sparse representation
+    supervision: self/dictionary learning on allowed development data
+    original_paper_title: "K-SVD: An Algorithm for Designing Overcomplete Dictionaries for Sparse Representation"
+    authors: M. Aharon; M. Elad; A. Bruckstein
+    venue: IEEE Transactions on Signal Processing
+    year: 2006
+    volume: 54(11)
+    pages: 4311-4322
+    doi: 10.1109/TSP.2006.881199
+    paper_url: https://doi.org/10.1109/TSP.2006.881199
+    official_code_url: null
+    core_principle: Alternates sparse coding of patches with atom-wise SVD dictionary updates, then aggregates reconstructed overlapping patches.
+    main_components: [overcomplete dictionary, sparse coding, atom-wise SVD update, patch aggregation]
+    strengths: [data-adaptive sparse prior, interpretable patch model]
+    limitations: [slow optimization, local solutions, sensitive finite search boundaries]
+    oct_specific: false
+    current_implementation_notes: "Project K-SVD-style implementation named ksvd_self. It is not claimed to be exactly equivalent to the authors' original software. Related denoising paper: Elad and Aharon, Image Denoising via Sparse and Redundant Representations over Learned Dictionaries, IEEE TIP 2006, DOI 10.1109/TIP.2006.881969."
+  - method_id: dncnn_paired
+    display_name: DnCNN-paired
+    category: convolutional neural network
+    supervision: paired
+    original_paper_title: "Beyond a Gaussian Denoiser: Residual Learning of Deep CNN for Image Denoising"
+    authors: K. Zhang; W. Zuo; Y. Chen; D. Meng; L. Zhang
+    venue: IEEE Transactions on Image Processing
+    year: 2017
+    volume: 26(7)
+    pages: 3142-3155
+    doi: 10.1109/TIP.2017.2662206
+    paper_url: https://ieeexplore.ieee.org/document/7839189
+    official_code_url: https://github.com/cszn/DnCNN
+    core_principle: A deep convolutional network learns a residual/noise mapping and subtracts it from the noisy input.
+    main_components: [convolutions, residual learning, batch normalization in the original architecture]
+    strengths: [fast inference, effective learned residual prior]
+    limitations: [training-domain dependence, paired supervision in this benchmark]
+    oct_specific: false
+    current_implementation_notes: Paired PKU37 implementation and checkpoint identity come from the locked registry.
+  - method_id: nafnet_paired
+    display_name: NAFNet-paired
+    category: convolutional image restoration network
+    supervision: paired
+    original_paper_title: Simple Baselines for Image Restoration
+    authors: L. Chen; X. Chu; X. Zhang; J. Sun
+    venue: ECCV
+    year: 2022
+    volume: null
+    pages: 17-33
+    doi: 10.1007/978-3-031-20071-7_2
+    paper_url: https://arxiv.org/abs/2204.04676
+    official_code_url: https://github.com/megvii-research/NAFNet
+    core_principle: Uses a nonlinear-activation-free encoder-decoder with simple gates, channel attention, and residual blocks for image restoration.
+    main_components: [NAF blocks, simple gate, simplified channel attention, encoder-decoder, residual paths]
+    strengths: [efficient restoration architecture, strong receptive-field hierarchy]
+    limitations: [paired-data and domain dependence, implementation scale may differ from the paper]
+    oct_specific: false
+    current_implementation_notes: Paired PKU37 configuration and exact depth/width must be read from the run registry.
+  - method_id: sabids_current
+    display_name: SABIDS-current
+    category: current research denoising branch
+    supervision: resolved from formal checkpoint
+    original_paper_title: null
+    authors: current SABIDS-Net study
+    venue: unpublished research method
+    year: null
+    volume: null
+    pages: null
+    doi: null
+    paper_url: null
+    official_code_url: null
+    core_principle: Parsed from the formal registry, resolved configuration, checkpoint, and current source; no external original-paper claim is made.
+    main_components: [resolved at runtime]
+    strengths: [study-specific method identity is traceable to source and checkpoint]
+    limitations: [no external original publication; conclusions require the locked benchmark]
+    oct_specific: true
+    current_implementation_notes: Runtime summary must report model class, D0/D1 identity, losses, supervision, label use, monitor, parameter count, ranges, checkpoint path and SHA256.
+  - method_id: tcfl_dncnn
+    display_name: TCFL-DnCNN
+    category: adversarial cross-fusion denoising
+    supervision: unpaired
+    original_paper_title: Triplet Cross-Fusion Learning for Unpaired Image Denoising in Optical Coherence Tomography
+    authors: M. Geng et al.
+    venue: IEEE Transactions on Medical Imaging
+    year: 2022
+    volume: 41(12)
+    pages: 3735-3747
+    doi: 10.1109/TMI.2022.3184529
+    paper_url: https://pubmed.ncbi.nlm.nih.gov/35724282/
+    official_code_url: https://github.com/gengmufeng/TCFL-OCT
+    core_principle: Learns OCT denoising without paired noisy-clean acquisitions through triplet cross-fusion adversarial and pixel-consistency objectives.
+    main_components: [DnCNN-like generator, discriminator, triplet cross-fusion, adversarial losses, cross-fusion L1 terms]
+    strengths: [OCT-specific unpaired training, avoids exact paired acquisition requirement]
+    limitations: [adversarial training complexity, source implementation and deviations must be audited]
+    oct_specific: true
+    current_implementation_notes: Inference uses only the generator; official-source commit and deviations are read from extension audit/config files.
