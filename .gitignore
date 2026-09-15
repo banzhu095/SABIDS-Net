@@ -47,6 +47,8 @@ dist/
 /lightning_logs/
 /tmp/
 /third_party_external/
+/Downloaded_Denoise_Review/
+/ROI_Denoise_Analysis/
 
 # Model weights and exported graphs anywhere in the repository
 *.pth
