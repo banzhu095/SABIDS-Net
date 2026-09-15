@@ -542,8 +542,12 @@ class Trainer:
             for key, value in table["split"].value_counts().items()
         }
         label_assets = []
-        asset_table = table
-        if str(self.config.get("train", {}).get("stage", "")) in {"interaction", "input_segment"}:
+        load_segmentation_labels = _load_segmentation_labels(self.config)
+        runtime["load_segmentation_labels"] = load_segmentation_labels
+        asset_table = table if load_segmentation_labels else table.iloc[0:0]
+        if not load_segmentation_labels:
+            runtime["label_inventory_splits"] = []
+        elif str(self.config.get("train", {}).get("stage", "")) in {"interaction", "input_segment"}:
             allowed_splits = {
                 str(self.config.get("data", {}).get("train_split", "train")),
                 str(self.config.get("data", {}).get("val_split", "val")),

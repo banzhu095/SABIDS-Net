@@ -908,4 +908,5 @@ Populate one row per independent fold after validation threshold selection.
   default, and the SABIDS/TCFL extension configs record this explicitly. The
   noisy/repeat/clean inputs and all denoising losses are unchanged. This avoids
   introducing a segmentation-label dependency into the denoising-only method
-  when a manifest still contains legacy `Label/layer_binary` paths.
+  when a manifest still contains legacy `Label/layer_binary` paths. Run
+  metadata records the disabled label I/O and an empty label-asset inventory.

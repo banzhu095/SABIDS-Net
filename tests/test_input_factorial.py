@@ -15,7 +15,7 @@ from sabids.data.io import read_gray, write_gray
 from sabids.data.transforms import JointOCTTransform
 from sabids.losses import SABIDSLoss
 from sabids.models import SABIDSNet
-from sabids.engine.trainer import build_loaders
+from sabids.engine.trainer import _load_segmentation_labels, build_loaders
 from tools.prepare_input_factorial import atomic_save_npy, audit_d0
 
 
@@ -130,6 +130,9 @@ def test_denoise_loaders_do_not_open_segmentation_labels(tmp_path: Path):
         assert torch.count_nonzero(batch["layer_mask"]) == 0
         assert torch.count_nonzero(batch["vessel_mask"]) == 0
         assert batch["has_clean"].all()
+    assert _load_segmentation_labels(config) is False
+    config["data"]["load_segmentation_labels"] = True
+    assert _load_segmentation_labels(config) is True
 
 
 def test_input_segment_parameter_boundary_is_identical_and_excludes_denoising():
