@@ -121,7 +121,7 @@ make_sabids_config() {
   python - "$root/configs/current/stage1_denoise_current.yaml" "$ext/configs/sabids_seed_${seed}.yaml" "$seed" "$output" "$smoke_epochs" <<'PY'
 import sys, yaml
 source, target, seed, output, epochs = sys.argv[1:]
-value = {"_base_": source, "seed": int(seed), "deterministic": True, "data": {"train_datasets": ["PKU37"], "val_datasets": ["PKU37"], "test_datasets": ["PKU37"]}, "train": {"output_dir": output}}
+value = {"_base_": source, "seed": int(seed), "deterministic": True, "data": {"train_datasets": ["PKU37"], "val_datasets": ["PKU37"], "test_datasets": ["PKU37"], "load_segmentation_labels": False}, "train": {"output_dir": output}}
 if epochs: value["train"]["epochs"] = int(epochs)
 with open(target, "w", encoding="utf-8") as stream: yaml.safe_dump(value, stream, sort_keys=False)
 PY

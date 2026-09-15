@@ -904,3 +904,8 @@ Populate one row per independent fold after validation threshold selection.
   import. This lets the full preflight suite reject an invalid LC profile with
   the intended protocol error even on a smoke host that has not installed the
   classical BM3D runtime.
+- Stage-1 denoising loaders now skip layer, vessel, and label-validity assets by
+  default, and the SABIDS/TCFL extension configs record this explicitly. The
+  noisy/repeat/clean inputs and all denoising losses are unchanged. This avoids
+  introducing a segmentation-label dependency into the denoising-only method
+  when a manifest still contains legacy `Label/layer_binary` paths.

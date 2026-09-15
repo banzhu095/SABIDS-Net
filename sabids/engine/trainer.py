@@ -101,8 +101,18 @@ def _make_transform(config: Dict, training: bool) -> JointOCTTransform:
     )
 
 
+def _load_segmentation_labels(config: Dict) -> bool:
+    """Resolve label I/O without changing non-denoising training behavior."""
+    data_cfg = config["data"]
+    configured = data_cfg.get("load_segmentation_labels")
+    if configured is not None:
+        return bool(configured)
+    return str(config.get("train", {}).get("stage", "joint")).lower() != "denoise"
+
+
 def build_loaders(config: Dict) -> tuple[DataLoader, DataLoader, object]:
     data_cfg = config["data"]
+    load_segmentation_labels = _load_segmentation_labels(config)
     train_dataset = OCTManifestDataset(
         data_cfg["manifest"],
         split=data_cfg.get("train_split", "train"),
@@ -113,6 +123,7 @@ def build_loaders(config: Dict) -> tuple[DataLoader, DataLoader, object]:
         groups=data_cfg.get("train_groups"),
         image_column=data_cfg.get("input_column", "image_path"),
         guidance_mapping=data_cfg.get("guidance_mapping"),
+        load_segmentation_labels=load_segmentation_labels,
     )
     val_dataset = OCTManifestDataset(
         data_cfg["manifest"],
@@ -124,6 +135,7 @@ def build_loaders(config: Dict) -> tuple[DataLoader, DataLoader, object]:
         groups=data_cfg.get("val_groups"),
         image_column=data_cfg.get("input_column", "image_path"),
         guidance_mapping=data_cfg.get("guidance_mapping"),
+        load_segmentation_labels=load_segmentation_labels,
     )
     max_val_samples = data_cfg.get("max_val_samples")
     if max_val_samples is not None:
@@ -197,6 +209,7 @@ def build_diagnostic_loader(
         ),
         image_column=data_cfg.get("input_column", "image_path"),
         guidance_mapping=data_cfg.get("guidance_mapping"),
+        load_segmentation_labels=_load_segmentation_labels(config),
     )
     frames_per_group = config["data"].get("train_eval_frames_per_group")
     if split == data_cfg.get("train_split", "train") and frames_per_group is not None:

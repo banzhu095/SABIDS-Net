@@ -42,12 +42,14 @@ class OCTManifestDataset(Dataset):
         groups: Optional[List[str]] = None,
         image_column: str = "image_path",
         guidance_mapping: Optional[str | Path] = None,
+        load_segmentation_labels: bool = True,
     ) -> None:
         self.manifest = Path(manifest).expanduser().resolve()
         self.root = Path(root).expanduser().resolve() if root else self.manifest.parent
         self.transform = transform
         self.sample_repeat = sample_repeat
         self.image_column = str(image_column)
+        self.load_segmentation_labels = bool(load_segmentation_labels)
         table = pd.read_csv(self.manifest, dtype=str).fillna("")
         missing = REQUIRED_COLUMNS - set(table.columns)
         if missing:
@@ -126,13 +128,23 @@ class OCTManifestDataset(Dataset):
         original_height, original_width = image.shape[-2:]
 
         clean = self._load_optional(row.get("clean_path", ""))
-        layer = self._load_optional(row.get("layer_mask_path", ""), mask=True)
-        vessel = self._load_optional(row.get("vessel_mask_path", ""), mask=True)
+        layer = (
+            self._load_optional(row.get("layer_mask_path", ""), mask=True)
+            if self.load_segmentation_labels
+            else None
+        )
+        vessel = (
+            self._load_optional(row.get("vessel_mask_path", ""), mask=True)
+            if self.load_segmentation_labels
+            else None
+        )
         has_clean = clean is not None
         has_layer = layer is not None
         has_vessel = vessel is not None
-        label_valid = self._load_optional(
-            row.get("label_valid_mask_path", ""), mask=True
+        label_valid = (
+            self._load_optional(row.get("label_valid_mask_path", ""), mask=True)
+            if self.load_segmentation_labels
+            else None
         )
         if label_valid is None:
             label_valid = (
@@ -140,8 +152,10 @@ class OCTManifestDataset(Dataset):
                 if has_layer
                 else np.zeros_like(image, dtype=np.float32)
             )
-        vessel_valid = self._load_optional(
-            row.get("vessel_valid_mask_path", ""), mask=True
+        vessel_valid = (
+            self._load_optional(row.get("vessel_valid_mask_path", ""), mask=True)
+            if self.load_segmentation_labels
+            else None
         )
         if vessel_valid is None:
             vessel_valid = label_valid.copy() if has_vessel and has_layer else (

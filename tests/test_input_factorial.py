@@ -15,6 +15,7 @@ from sabids.data.io import read_gray, write_gray
 from sabids.data.transforms import JointOCTTransform
 from sabids.losses import SABIDSLoss
 from sabids.models import SABIDSNet
+from sabids.engine.trainer import build_loaders
 from tools.prepare_input_factorial import atomic_save_npy, audit_d0
 
 
@@ -81,6 +82,54 @@ def test_dataset_uses_selected_cache_column_with_same_spatial_transform(tmp_path
     np.testing.assert_allclose(noisy_item["image"][0].numpy(), np.fliplr(noisy), atol=2e-8)
     np.testing.assert_allclose(denoised_item["image"][0].numpy(), np.fliplr(denoised), atol=2e-8)
     torch.testing.assert_close(noisy_item["layer_mask"], denoised_item["layer_mask"])
+
+
+def test_denoise_loaders_do_not_open_segmentation_labels(tmp_path: Path):
+    image = np.linspace(0.0, 1.0, 24, dtype=np.float32).reshape(4, 6)
+    write_gray(tmp_path / "noisy.png", image)
+    write_gray(tmp_path / "clean.png", image)
+    manifest = tmp_path / "manifest.csv"
+    pd.DataFrame([
+        {
+            "sample_id": "train", "group_id": "train-group", "dataset": "PKU37",
+            "split": "train", "image_path": "noisy.png", "clean_path": "clean.png",
+            "layer_mask_path": "Label/layer_binary/missing.png",
+            "vessel_mask_path": "Label/vessel_binary/missing.png",
+            "label_valid_mask_path": "Label/valid/missing.png",
+            "vessel_valid_mask_path": "Label/vessel_valid/missing.png",
+        },
+        {
+            "sample_id": "val", "group_id": "val-group", "dataset": "PKU37",
+            "split": "val", "image_path": "noisy.png", "clean_path": "clean.png",
+            "layer_mask_path": "Label/layer_binary/missing.png",
+            "vessel_mask_path": "Label/vessel_binary/missing.png",
+            "label_valid_mask_path": "Label/valid/missing.png",
+            "vessel_valid_mask_path": "Label/vessel_valid/missing.png",
+        },
+    ]).to_csv(manifest, index=False)
+    config = {
+        "seed": 42,
+        "data": {
+            "manifest": str(manifest), "root": str(tmp_path),
+            "train_datasets": ["PKU37"], "val_datasets": ["PKU37"],
+            "target_size": [4, 6], "normalization": "fixed",
+            "samples_per_epoch": 1,
+            "augmentation": {
+                "horizontal_flip": 0.0, "gamma_range": [1.0, 1.0],
+                "contrast_range": [1.0, 1.0], "speckle_std": 0.0,
+                "blur_probability": 0.0,
+            },
+        },
+        "train": {"stage": "denoise", "batch_size": 1, "num_workers": 0},
+    }
+
+    train_loader, val_loader, _ = build_loaders(config)
+    for batch in (next(iter(train_loader)), next(iter(val_loader))):
+        assert not batch["has_layer"].any()
+        assert not batch["has_vessel"].any()
+        assert torch.count_nonzero(batch["layer_mask"]) == 0
+        assert torch.count_nonzero(batch["vessel_mask"]) == 0
+        assert batch["has_clean"].all()
 
 
 def test_input_segment_parameter_boundary_is_identical_and_excludes_denoising():
