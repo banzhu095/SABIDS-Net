@@ -889,3 +889,18 @@ Populate one row per independent fold after validation threshold selection.
   configuration explicitly proves PKU37-only train/validation. Otherwise it is
   recorded as a legacy diagnostic and the extension-generated retraining
   configs force `train_datasets` and `val_datasets` to `[PKU37]`.
+
+# 2026-09-15 — PyWavelets runtime dependency correction
+
+- The extension protocol command initially imported the package-level legacy
+  adapter registry, which imports `pywt`, before parsing the `init` action.
+  PyPI publishes that import as `PyWavelets`, not `pywt`.
+- Declared `PyWavelets>=1.4,<2` in the project and denoising requirement sets,
+  and made the legacy package exports lazy so audit/initialization entry points
+  no longer import the unused wavelet adapter eagerly. Full tests still install
+  the declared dependency because the historical wavelet adapter remains
+  covered.
+- Moved `bm3d_standard` protocol validation ahead of the optional `bm3d`
+  import. This lets the full preflight suite reject an invalid LC profile with
+  the intended protocol error even on a smoke host that has not installed the
+  classical BM3D runtime.

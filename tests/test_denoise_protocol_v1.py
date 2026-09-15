@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import argparse
+import sys
 
 import numpy as np
 import pandas as pd
@@ -233,7 +234,9 @@ def test_standard_adapter_contract(config):
     np.testing.assert_array_equal(first, second)
 
 
-def test_bm3d_standard_rejects_lc_profile():
+def test_bm3d_standard_rejects_lc_profile(monkeypatch):
+    # Configuration validation must not depend on the optional BM3D runtime.
+    monkeypatch.setitem(sys.modules, "bm3d", None)
     image = np.zeros((8, 8), np.float32)
     with pytest.raises(ValueError, match="standard"):
         denoise(image, {"method_id": "bm3d_standard", "sigma_psd": 0.05, "profile": "lc"}, AdapterContext())

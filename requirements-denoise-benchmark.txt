@@ -2,6 +2,7 @@
 numpy>=1.24,<3
 pandas>=2.0,<3
 scipy>=1.10,<2
+PyWavelets>=1.4,<2
 scikit-image>=0.21,<1
 Pillow>=10,<12
 PyYAML>=6,<7
