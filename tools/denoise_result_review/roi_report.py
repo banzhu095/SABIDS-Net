@@ -44,6 +44,10 @@ def build_roi_report(project_root: str | Path, run_dir: str | Path, output_root:
     )
     complete_formal_positions = formal_registry and package_positions == expected_test_positions and selected_positions == package_positions
     scope = "fixed_roi_confirmatory_full_test_positions" if complete_formal_positions else "exploratory_descriptive"
+    full_image_scope = "none"
+    if not global_metrics.empty and {"dataset", "split"}.issubset(global_metrics.columns):
+        full_image_scope = "; ".join(sorted(global_metrics[["dataset", "split"]].drop_duplicates().astype(str).agg("/".join, axis=1)))
+    full_image_note = f"Available full-image metric scopes: {full_image_scope}. These are not replaced by ROI statistics."
     workbook_path = output / "roi_summary.xlsx"
     sheets = {
         "Method Literature": literature, "Method Configuration": configuration,
@@ -53,8 +57,8 @@ def build_roi_report(project_root: str | Path, run_dir: str | Path, output_root:
         "Choroid Stroma": _tissue(position, "choroid_stroma"), "Vessel-Stroma CNR": cnr,
         "Method Differences": differences, "Bootstrap CI": bootstrap, "Failures": failures, "Image Inventory": inventory,
     }
-    write_workbook(workbook_path, sheets, readme=[["ROI denoising summary", ""], ["Source run", str(run)], ["ROI scope", scope], ["Independent unit", "Anatomical position; repeated ROIs, frames, and model seeds are not independent cases."], ["Image scaling", "uint8/255, uint16/65535, float/manifest data_range; no per-image normalization."], ["CNR interpretation", "Low-reflectance choroidal vessels are normally darker than surrounding stroma."], ["Published results", "Bibliographic metadata are separate from harmonized local metrics."]])
+    write_workbook(workbook_path, sheets, readme=[["ROI denoising summary", ""], ["Source run", str(run)], ["Full-image metric scope", full_image_note], ["ROI scope", scope], ["Independent unit", "Anatomical position; repeated ROIs, frames, and model seeds are not independent cases."], ["Image scaling", "uint8/255, uint16/65535, float/manifest data_range; no per-image normalization."], ["CNR interpretation", "Low-reflectance choroidal vessels are normally darker than surrounding stroma."], ["Published results", "Bibliographic metadata are separate from harmonized local metrics."]])
     highlight_group_best(workbook_path, ["Per ROI Metrics", "Vitreous Summary", "Retina Summary", "Choroid Vessel", "Choroid Stroma"])
     report = output / "roi_analysis_report.md"
-    report.write_text(f"# ROI denoising analysis\n\n## Scope\n\n- Full-image statistics: locked source run `{run}`.\n- ROI statistics: `{scope}` across {selected_positions} selected of {package_positions} packaged positions.\n- Qualitative panels: generated only after ROI locking.\n- No p-values are reported. Position-level bootstrap is emitted only when every packaged test position is covered.\n\n## Interpretation\n\nROI findings do not replace the complete test result. Multiple ROIs, repeated frames, and three model seeds are not counted as independent cases. Choroidal vessel regions are normally darker than stroma; CNR polarity is recorded explicitly.\n\n## Missing assets\n\n{failures.to_markdown(index=False) if not failures.empty else 'No ROI evaluation failures were recorded.'}\n", encoding="utf-8")
+    report.write_text(f"# ROI denoising analysis\n\n## Scope\n\n- {full_image_note}\n- ROI statistics: `{scope}` across {selected_positions} selected of {package_positions} packaged positions.\n- Qualitative panels: generated only after ROI locking.\n- No p-values are reported. Position-level bootstrap is emitted only when every packaged test position is covered.\n\n## Interpretation\n\nROI findings do not replace the complete test result. Multiple ROIs, repeated frames, and three model seeds are not counted as independent cases. Choroidal vessel regions are normally darker than stroma; CNR polarity is recorded explicitly.\n\n## Missing assets\n\n{failures.to_markdown(index=False) if not failures.empty else 'No ROI evaluation failures were recorded.'}\n", encoding="utf-8")
     return {"workbook": str(workbook_path), "report": str(report), "scope": scope}
