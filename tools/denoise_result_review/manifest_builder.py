@@ -32,6 +32,41 @@ def primary_seeds(run_dir: str | Path) -> dict[str, int]:
     return seeds
 
 
+def _recover_sample_id(frame: pd.DataFrame, metrics: pd.DataFrame, source: str) -> pd.DataFrame:
+    """Recover legacy manifest sample IDs by an exact, validated record join."""
+    if "sample_id" in frame:
+        return frame
+    if "sample_id" not in metrics:
+        raise ValueError(f"{source} has no sample_id and per_image_metrics.csv cannot supply it")
+    base = ["dataset", "split", "position_id", "method_id", "seed"]
+    if any(column not in frame or column not in metrics for column in base):
+        raise ValueError(f"{source} missing sample_id and exact recovery key columns")
+    discriminators = [
+        column for column in ("frame_id", "denoised_path", "noisy_path", "output_sha256", "config_sha256", "checkpoint_sha256")
+        if column in frame and column in metrics
+    ]
+    if not discriminators:
+        raise ValueError(f"{source} missing sample_id and has no exact frame/path/hash discriminator")
+    keys = base + discriminators
+    left, right = frame.copy(), metrics[keys + ["sample_id"]].copy()
+    temporary_keys = []
+    for index, column in enumerate(keys):
+        temporary = f"__sample_recovery_key_{index}"
+        temporary_keys.append(temporary)
+        left[temporary] = left[column].fillna("").astype(str)
+        right[temporary] = right[column].fillna("").astype(str)
+    right["sample_id"] = right["sample_id"].fillna("").astype(str)
+    ambiguity = right.groupby(temporary_keys, dropna=False).sample_id.nunique()
+    if (ambiguity > 1).any():
+        raise ValueError(f"{source} sample_id recovery is ambiguous for {int((ambiguity > 1).sum())} exact keys")
+    mapping = right[temporary_keys + ["sample_id"]].drop_duplicates(temporary_keys)
+    recovered = left.merge(mapping, on=temporary_keys, how="left", validate="many_to_one").drop(columns=temporary_keys)
+    missing = recovered.sample_id.eq("") | recovered.sample_id.isna()
+    if missing.any():
+        raise ValueError(f"{source} sample_id recovery failed for {int(missing.sum())} rows")
+    return recovered
+
+
 def build_asset_manifest(run_dir: str | Path, dataset: str | None = None, split: str | None = None,
                          primary_only: bool = True, methods: list[str] | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
     run = Path(run_dir).resolve()
@@ -46,6 +81,7 @@ def build_asset_manifest(run_dir: str | Path, dataset: str | None = None, split:
         denoised = denoised.rename(columns={old: new for old, new in aliases.items() if old in denoised and new not in denoised})
         if "seed" not in denoised: denoised["seed"] = 0
         if "checkpoint_sha256" not in denoised: denoised["checkpoint_sha256"] = ""
+        denoised = _recover_sample_id(denoised, metrics, "denoised_dataset_manifest.csv")
     sources = [(metrics, "per_image_metrics.csv")]
     if not denoised.empty:
         sources.append((denoised, "denoised_dataset_manifest.csv"))

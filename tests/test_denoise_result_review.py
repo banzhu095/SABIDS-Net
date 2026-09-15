@@ -12,7 +12,7 @@ from openpyxl import load_workbook
 
 from tools.denoise_result_review import METHOD_ORDER
 from tools.denoise_result_review.image_io import decode_lossless, read_float01, to_float01
-from tools.denoise_result_review.manifest_builder import primary_seeds
+from tools.denoise_result_review.manifest_builder import build_asset_manifest, primary_seeds
 from tools.denoise_result_review.method_literature import implementation_summary, load_literature
 from tools.denoise_result_review.run_discovery import inspect_run
 from tools.denoise_result_review.workbook import write_workbook
@@ -81,3 +81,24 @@ def test_implementation_status_accepts_successful_per_image_evidence(tmp_path: P
     assert summary.loc["noisy_identity", "status"] == "completed"
     assert summary.loc["noisy_identity", "completion_evidence"] == "successful_per_image"
     assert summary.loc["sabids_current", "status"] == "missing/not_completed"
+
+
+def test_legacy_denoised_manifest_recovers_sample_id_by_exact_path_join(tmp_path: Path):
+    run = tmp_path / "run"; (run / "configs").mkdir(parents=True); (run / "metrics").mkdir(); (run / "manifests").mkdir()
+    output = tmp_path / "output.tif"; output.write_bytes(b"lossless-placeholder")
+    row = {"dataset": "PKU37", "split": "test", "position_id": "pku_0006", "frame_id": 26, "sample_id": "pku_0006_f26", "method_id": "bm3d_standard", "seed": 0, "checkpoint_sha256": "", "denoised_path": str(output), "status": "success"}
+    pd.DataFrame([row]).to_csv(run / "metrics" / "per_image_metrics.csv", index=False)
+    pd.DataFrame([{key: value for key, value in row.items() if key != "sample_id"}]).to_csv(run / "manifests" / "denoised_dataset_manifest.csv", index=False)
+    (run / "configs" / "inference_registry.yaml").write_text("methods:\n  bm3d_standard: {seed: 0}\n", encoding="utf-8")
+    assets, failures = build_asset_manifest(run, "PKU37", "test", True, ["bm3d_standard"])
+    assert failures.empty and assets.iloc[0].sample_id == "pku_0006_f26"
+
+
+def test_legacy_sample_id_recovery_rejects_ambiguous_exact_keys(tmp_path: Path):
+    run = tmp_path / "run"; (run / "configs").mkdir(parents=True); (run / "metrics").mkdir(); (run / "manifests").mkdir()
+    base = {"dataset": "PKU37", "split": "test", "position_id": "pku_0006", "frame_id": 26, "method_id": "bm3d_standard", "seed": 0, "checkpoint_sha256": "", "denoised_path": str(tmp_path / "same.tif"), "status": "success"}
+    pd.DataFrame([{**base, "sample_id": "a"}, {**base, "sample_id": "b"}]).to_csv(run / "metrics" / "per_image_metrics.csv", index=False)
+    pd.DataFrame([base]).to_csv(run / "manifests" / "denoised_dataset_manifest.csv", index=False)
+    (run / "configs" / "inference_registry.yaml").write_text("methods:\n  bm3d_standard: {seed: 0}\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="ambiguous"):
+        build_asset_manifest(run, "PKU37", "test", True, ["bm3d_standard"])
