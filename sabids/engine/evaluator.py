@@ -56,8 +56,15 @@ def evaluate_model(
     p1_minimum_main_fraction: float = 0.5,
     p2_smoothness: float = 2.0,
     p2_max_displacement: int = 8,
+    model_grid_contract: bool = False,
+    dose_metadata: Optional[Dict[str, object]] = None,
 ) -> Dict[str, object]:
     model.eval()
+    dose_metadata = dose_metadata or {}
+    if model_grid_contract and (restore_original_geometry or tuple(postprocess_modes) != ("p0",)
+                                or set(tasks or ()) != {"layer", "vessel"}
+                                or any(x not in (None, .5) for x in (threshold, layer_threshold, vessel_threshold))):
+        raise ValueError("Dose model-grid contract requires P0 0.5, segmentation-only, no original restoration")
     layer_threshold = threshold if layer_threshold is None else layer_threshold
     vessel_threshold = threshold if vessel_threshold is None else vessel_threshold
     requested = set(tasks) if tasks is not None else None
@@ -169,6 +176,15 @@ def evaluate_model(
             layer_pred = (layer_prob_eval >= layer_threshold) & valid_eval
             vessel_pred = (vessel_prob_eval >= vessel_threshold) & valid_eval
             row["evaluation_height"], row["evaluation_width"] = layer_pred.shape
+            if model_grid_contract:
+                row["metric_coordinate_system"] = "cropped_model_grid_px"
+                row["original_resolution_boundary_metrics"] = "NOT IMPLEMENTED"
+                row["scientific_evaluation"] = bool(dose_metadata.get("scientific_evaluation", False))
+                row["notice"] = dose_metadata.get("notice") or (
+                    "" if row["scientific_evaluation"] else "NOT FOR SCIENTIFIC EVALUATION")
+                layer_pred &= layer_valid_eval
+                vessel_valid_source = restored(batch["vessel_valid_mask"][index, 0].numpy()[crop], True)
+                vessel_pred &= vessel_valid_source & layer_valid_eval & valid_eval
             vessel_tp = None
             vessel_fp = None
             vessel_fn = None
@@ -176,9 +192,10 @@ def evaluate_model(
             vessel_roi_fp = None
             vessel_roi_fn = None
             if evaluate_segmentation:
+                comparison_layer = layer_pred & vessel_valid_source if model_grid_contract else layer_pred
                 predicted_vessel_pixels = float(vessel_pred.sum())
-                predicted_layer_pixels = float(layer_pred.sum())
-                intersection = float(np.logical_and(vessel_pred, layer_pred).sum())
+                predicted_layer_pixels = float(comparison_layer.sum())
+                intersection = float(np.logical_and(vessel_pred, comparison_layer).sum())
                 row["pred_layer_vessel_dice"] = (
                     2.0 * intersection + 1e-6
                 ) / (predicted_vessel_pixels + predicted_layer_pixels + 1e-6)
@@ -257,20 +274,25 @@ def evaluate_model(
                     layer_pred_metric = layer_pred & layer_valid_eval
                     for key, value in binary_metrics(layer_pred[layer_valid_eval], layer_true[layer_valid_eval]).items():
                         row[f"layer_{key}"] = value
-                    hd95, assd = surface_distances(layer_pred_metric, layer_true, (axial_spacing, lateral_spacing))
-                    upper, lower, thickness = layer_boundary_mae(layer_pred_metric, layer_true, axial_spacing)
+                    complete = not model_grid_contract or bool(layer_valid_eval.all())
+                    hd95, assd = surface_distances(layer_pred_metric, layer_true, (axial_spacing, lateral_spacing)) if complete else (float("nan"), float("nan"))
+                    upper, lower, thickness = layer_boundary_mae(layer_pred_metric, layer_true, axial_spacing) if complete else (float("nan"),) * 3
                     row.update({"layer_hd95": hd95, "layer_assd": assd,
                                 "upper_boundary_mae": upper, "lower_boundary_mae": lower,
                                 "thickness_mae": thickness})
-                    row.update(layer_shape_metrics(
-                        layer_pred_metric, layer_true, axial_spacing, layer_surface_tolerance,
-                        (axial_spacing, lateral_spacing),
-                    ))
+                    if complete:
+                        row.update(layer_shape_metrics(
+                            layer_pred_metric, layer_true, axial_spacing, layer_surface_tolerance,
+                            (axial_spacing, lateral_spacing),
+                        ))
             else:
                 layer_true = layer_pred
             if bool(batch["has_vessel"][index]):
                 vessel_true = restored(batch["vessel_mask"][index, 0].numpy()[crop], True)
                 vessel_valid = restored(batch["vessel_valid_mask"][index, 0].numpy()[crop], True) & valid_eval
+                if model_grid_contract:
+                    vessel_valid &= layer_valid_eval
+                    vessel_true &= vessel_valid
                 if evaluate_denoising and bool(batch["has_clean"][index]) and bool(batch["has_layer"][index]):
                     stroma = layer_true & ~vessel_true & vessel_valid
                     vessel_roi = vessel_true & vessel_valid
@@ -332,20 +354,24 @@ def evaluate_model(
                     hd95, assd = float("nan"), float("nan")
                 row["vessel_hd95"] = hd95
                 row["vessel_assd"] = assd
-                predicted_fraction = vessel_area_fraction(vessel_pred, layer_true)
-                true_fraction = vessel_area_fraction(vessel_true, layer_true)
+                area_roi = layer_true & vessel_valid if model_grid_contract else layer_true
+                predicted_fraction = vessel_area_fraction(vessel_pred, area_roi)
+                true_fraction = vessel_area_fraction(vessel_true, area_roi)
                 row["vessel_area_fraction_pred"] = predicted_fraction
                 row["vessel_area_fraction_true"] = true_fraction
                 row["vessel_area_fraction_mae"] = abs(predicted_fraction - true_fraction)
 
             # P0 is always the immutable raw threshold result. P1/P2 affect only
             # the layer; P3 strictly clips the raw vessel prediction to P2/P1.
-            layer_p1, p1_stats = clean_layer_mask(
-                layer_pred, layer_valid_eval, p1_minimum_main_fraction
-            )
-            layer_p2, p2_stats = regularize_lower_boundary(
-                layer_p1, layer_valid_eval, p2_smoothness, p2_max_displacement
-            )
+            if model_grid_contract:
+                layer_p1, layer_p2, p1_stats, p2_stats = layer_pred, layer_pred, {}, {}
+            else:
+                layer_p1, p1_stats = clean_layer_mask(
+                    layer_pred, layer_valid_eval, p1_minimum_main_fraction
+                )
+                layer_p2, p2_stats = regularize_lower_boundary(
+                    layer_p1, layer_valid_eval, p2_smoothness, p2_max_displacement
+                )
             row.update({key: value for key, value in p1_stats.items() if "p1" in modes})
             row.update({key: value for key, value in p2_stats.items() if "p2" in modes})
             if evaluate_layer and bool(batch["has_layer"][index]):
@@ -354,16 +380,17 @@ def evaluate_model(
                         continue
                     for key, value in binary_metrics(prediction[layer_valid_eval], layer_true[layer_valid_eval]).items():
                         row[f"{mode}_layer_{key}"] = value
-                    upper, lower, thickness = layer_boundary_mae(prediction, layer_true, axial_spacing)
+                    upper, lower, thickness = layer_boundary_mae(prediction, layer_true, axial_spacing) if not model_grid_contract or layer_valid_eval.all() else (float("nan"),) * 3
                     row[f"{mode}_upper_boundary_mae"] = upper
                     row[f"{mode}_lower_boundary_mae"] = lower
                     row[f"{mode}_thickness_mae"] = thickness
             vessel_p3 = None
             if evaluate_vessel and bool(batch["has_vessel"][index]):
                 final_layer = layer_p2
-                vessel_p3, p3_stats = hard_contain_vessel(
-                    vessel_pred, final_layer, vessel_valid, vessel_true
-                )
+                if not model_grid_contract:
+                    vessel_p3, p3_stats = hard_contain_vessel(
+                        vessel_pred, final_layer, vessel_valid, vessel_true
+                    )
                 if "p0" in modes:
                     for key, value in binary_metrics(vessel_pred[vessel_valid], vessel_true[vessel_valid]).items():
                         row[f"p0_vessel_{key}"] = value
@@ -376,10 +403,11 @@ def evaluate_model(
                 {
                     "group_id": str(batch["group_id"][index]),
                     "dataset": str(batch["dataset"][index]),
-                    "denoised": denoised_eval.astype(np.float32),
+                    "denoised": (noisy_eval if model_grid_contract else denoised_eval).astype(np.float32),
                     "layer": layer_pred.astype(bool),
                     "vessel": vessel_pred.astype(bool),
-                    "valid": valid_eval.astype(bool),
+                    "valid": (valid_eval & layer_valid_eval & vessel_valid_source
+                              if model_grid_contract else valid_eval).astype(bool),
                 }
             )
 
@@ -390,10 +418,11 @@ def evaluate_model(
                     sample_dir / f"{sample_id}_noisy.png",
                     noisy_eval,
                 )
-                write_gray(
-                    sample_dir / f"{sample_id}_denoised.png",
-                    denoised_eval,
-                )
+                if not model_grid_contract:
+                    write_gray(
+                        sample_dir / f"{sample_id}_denoised.png",
+                        denoised_eval,
+                    )
                 if evaluate_segmentation:
                     write_gray(
                         sample_dir / f"{sample_id}_layer_prob.png",
@@ -544,13 +573,18 @@ def evaluate_model(
         repeat_rows.append({
             "group_id": group_id, "dataset": dataset,
             "repeat_pair_count": len(denoise_mae),
-            "repeat_denoised_mae": float(np.mean(denoise_mae)) if denoise_mae else float("nan"),
+            ("repeat_dose_input_mae" if model_grid_contract else "repeat_denoised_mae"):
+                float(np.mean(denoise_mae)) if denoise_mae else float("nan"),
             "repeat_layer_dice": float(np.mean(layer_dice)) if layer_dice else float("nan"),
             "repeat_vessel_dice": float(np.mean(vessel_dice)) if vessel_dice else float("nan"),
         })
     if repeat_rows:
         group_table = group_table.merge(pd.DataFrame(repeat_rows), on=group_columns, how="left")
         numeric_columns = group_table.select_dtypes(include=[np.number]).columns.tolist()
+    if model_grid_contract:
+        group_table["scientific_evaluation"] = bool(dose_metadata.get("scientific_evaluation", False))
+        group_table["notice"] = dose_metadata.get("notice") or (
+            "" if dose_metadata.get("scientific_evaluation", False) else "NOT FOR SCIENTIFIC EVALUATION")
     summary = mean_dict(group_table[numeric_columns].to_dict("records"))
     summary["n_frames"] = int(len(frame_table))
     summary["n_groups"] = int(frame_table["group_id"].nunique())
@@ -595,7 +629,18 @@ def evaluate_model(
             pd.DataFrame(qualitative_crops).drop_duplicates().to_csv(
                 output_path / "qualitative_crops.csv", index=False, encoding="utf-8-sig"
             )
-        write_json(summary, output_path / "summary.json")
+        if model_grid_contract:
+            from sabids.experiments.dose_response import write_strict_json
+            summary["metric_coordinate_system"] = "cropped_model_grid_px"
+            summary["original_resolution_boundary_metrics"] = "NOT IMPLEMENTED"
+            summary["invalid_boundary_policy"] = "NA when annotation validity is incomplete; do not synthesize unknown-region edges"
+            summary["dose_response"] = dose_metadata
+            summary["scientific_evaluation"] = bool(dose_metadata.get("scientific_evaluation", False))
+            summary["notice"] = dose_metadata.get("notice") or (
+                "" if summary["scientific_evaluation"] else "NOT FOR SCIENTIFIC EVALUATION")
+            write_strict_json(output_path / "summary.json", summary)
+        else:
+            write_json(summary, output_path / "summary.json")
         write_json(
             {
                 "vessel_outside_gt_layer_fraction": (

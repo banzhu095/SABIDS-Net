@@ -59,10 +59,13 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _inspect_label_asset(path: Path) -> Dict[str, object]:
+def _inspect_label_asset(path: Path, allow_float_cache: bool = False) -> Dict[str, object]:
     raw_sha256 = _sha256_file(path)
-    buffer = np.fromfile(str(path), dtype=np.uint8)
-    decoded = cv2.imdecode(buffer, cv2.IMREAD_UNCHANGED)
+    if allow_float_cache and path.suffix.lower() == ".npy":
+        decoded = np.load(path, allow_pickle=False)
+    else:
+        buffer = np.fromfile(str(path), dtype=np.uint8)
+        decoded = cv2.imdecode(buffer, cv2.IMREAD_UNCHANGED)
     if decoded is None:
         raise RuntimeError(f"OpenCV failed to decode label asset: {path}")
     decoded = np.ascontiguousarray(decoded)
@@ -117,13 +120,16 @@ def build_loaders(config: Dict) -> tuple[DataLoader, DataLoader, object]:
         data_cfg["manifest"],
         split=data_cfg.get("train_split", "train"),
         transform=_make_transform(config, True),
-        sample_repeat=True,
+        sample_repeat=not config.get("dose_response", {}).get("enabled", False),
         root=data_cfg.get("root"),
         datasets=data_cfg.get("train_datasets"),
         groups=data_cfg.get("train_groups"),
         image_column=data_cfg.get("input_column", "image_path"),
         guidance_mapping=data_cfg.get("guidance_mapping"),
         load_segmentation_labels=load_segmentation_labels,
+        pretransformed_model_grid=bool(data_cfg.get("pretransformed_model_grid", False)),
+        deterministic_augmentation_seed=(int(config.get("seed", 42))
+            if data_cfg.get("deterministic_augmentation", False) else None),
     )
     val_dataset = OCTManifestDataset(
         data_cfg["manifest"],
@@ -136,6 +142,7 @@ def build_loaders(config: Dict) -> tuple[DataLoader, DataLoader, object]:
         image_column=data_cfg.get("input_column", "image_path"),
         guidance_mapping=data_cfg.get("guidance_mapping"),
         load_segmentation_labels=load_segmentation_labels,
+        pretransformed_model_grid=bool(data_cfg.get("pretransformed_model_grid", False)),
     )
     max_val_samples = data_cfg.get("max_val_samples")
     if max_val_samples is not None:
@@ -259,6 +266,9 @@ def build_model(config: Dict) -> SABIDSNet:
 
 class Trainer:
     def __init__(self, config: Dict):
+        if config.get("dose_response", {}).get("enabled", False):
+            from sabids.experiments.dose_response import validate_dose_config
+            validate_dose_config(config)
         self.config = config
         self.device = get_device(config.get("device", "auto"))
         seed_everything(
@@ -527,6 +537,30 @@ class Trainer:
             },
             self.output_dir / "initialization_audit.json",
         )
+        if self.config.get("dose_response", {}).get("enabled", False):
+            from sabids.experiments.dose_response import augmentation_plan_sha, stable_sha, write_strict_json
+            audit_path = self.output_dir / "initialization_audit.json"
+            audit = json.loads(audit_path.read_text(encoding="utf-8"))
+            dataset = self.train_loader.dataset
+            ids = dataset.table.sample_id.astype(str).tolist()
+            audit["actual_augmentation_plan_sha256"] = augmentation_plan_sha(
+                int(self.config["seed"]), int(self.config["train"]["epochs"]), ids,
+                float(self.config["data"]["augmentation"]["horizontal_flip"]))
+            audit["augmentation_algorithm"] = "sha256(seed,epoch,sample_id); horizontal flip only"
+            audit["trainable_parameter_names_sha256"] = stable_sha(
+                [n for n, p in self.model.named_parameters() if p.requires_grad])
+            audit["paired_cohort_sha256"] = stable_sha({
+                "train": dataset.table[["sample_id", "group_id", "split"]].to_dict("records"),
+                "val": self.val_loader.dataset.dataset.table[["sample_id", "group_id", "split"]].to_dict("records")
+                    if isinstance(self.val_loader.dataset, Subset) else
+                    self.val_loader.dataset.table[["sample_id", "group_id", "split"]].to_dict("records")})
+            write_strict_json(audit_path, audit)
+            write_strict_json(self.output_dir / "data_plan.json", {
+                "paired_cohort_sha256": audit["paired_cohort_sha256"],
+                "sampler_plan_sha256": audit["sampler_plan_sha256"],
+                "actual_augmentation_plan_sha256": audit["actual_augmentation_plan_sha256"],
+                "train_sample_ids": ids, "sampler_indices_by_epoch": sampler_plan,
+                "dose_response": self.config["dose_response"], "test_assets_opened": 0})
 
     def _record_run_inputs(self) -> None:
         runtime = self.config.setdefault("runtime", {})
@@ -579,7 +613,8 @@ class Trainer:
                 asset = Path(value).expanduser()
                 if not asset.is_absolute():
                     asset = (root / asset).resolve()
-                inspection = _inspect_label_asset(asset) if asset.is_file() else {}
+                inspection = _inspect_label_asset(asset, allow_float_cache=bool(
+                    self.config.get("dose_response", {}).get("enabled", False))) if asset.is_file() else {}
                 label_assets.append(
                     {
                         "asset_id": f"{group_id}|{column}|{ordinal}",
@@ -896,6 +931,8 @@ class Trainer:
         if self.device.type == "cuda":
             torch.cuda.reset_peak_memory_stats(self.device)
         self.train_sampler.set_epoch(epoch)
+        if self.config.get("dose_response", {}).get("enabled", False):
+            self.train_loader.dataset.set_epoch(epoch)
         totals = defaultdict(float)
         steps = 0
         optimizer_steps = 0
@@ -987,6 +1024,8 @@ class Trainer:
                         batch["image"],
                         detach_cross=detach_cross,
                         interaction_guidance_image=batch.get("interaction_guidance"),
+                        **({"return_auxiliary": False, "return_features": False}
+                           if self.config.get("dose_response", {}).get("enabled", False) else {}),
                     )
                 )
                 losses = self.loss_fn(
@@ -1489,6 +1528,8 @@ class Trainer:
                     str(batch["sample_id"][index])
                 )
                 valid = batch["valid_mask"][index, 0].numpy() > 0.5
+                if self.config.get("dose_response", {}).get("enabled", False):
+                    valid &= batch["label_valid_mask"][index, 0].numpy() > 0.5
                 if d2s_disabled_vessel_probability is not None:
                     group_values[group_id][
                         "d2s_vessel_probability_mean_abs_change"
@@ -1565,7 +1606,7 @@ class Trainer:
                                 vessel_valid,
                             )
                         )
-                if bool(batch["has_clean"][index]):
+                if bool(batch["has_clean"][index]) and not self.config.get("dose_response", {}).get("enabled", False):
                     prediction = output["denoised"][index, 0].cpu().numpy()
                     target = batch["clean"][index, 0].numpy()
                     mse = float(np.mean((prediction[valid] - target[valid]) ** 2))
@@ -1623,6 +1664,14 @@ class Trainer:
         return metrics
 
     def fit(self) -> None:
+        if self.config.get("dose_response", {}).get("enabled", False):
+            from sabids.experiments.dose_response import dose_deterministic_algorithms
+            with dose_deterministic_algorithms():
+                self._fit_impl()
+        else:
+            self._fit_impl()
+
+    def _fit_impl(self) -> None:
         epochs = int(self.config["train"].get("epochs", 100))
         patience = int(self.config["train"].get("early_stopping_patience", 30))
         monitor = self.config["train"].get("monitor", "vessel_dice")
@@ -1801,4 +1850,30 @@ class Trainer:
             if self.bad_epochs >= patience:
                 print("Early stopping triggered.")
                 break
+        if self.config.get("dose_response", {}).get("enabled", False):
+            from sabids.experiments.dose_response import tensor_sha, write_strict_json
+            dose_history = pd.read_csv(self.output_dir / "history.csv")
+            initial = json.loads((self.output_dir / "initialization_audit.json").read_text(encoding="utf-8"))
+            changed = {name: tensor_sha(parameter) != initial["tensor_sha256"][name]
+                       for name, parameter in self.model.named_parameters()}
+            changed_trainable = [n for n, p in self.model.named_parameters() if p.requires_grad and changed[n]]
+            changed_frozen = [n for n, p in self.model.named_parameters() if not p.requires_grad and changed[n]]
+            write_strict_json(self.output_dir / "dose_training_metadata.json", {
+                "dose_response": self.config["dose_response"],
+                "completed_epochs": epoch + 1,
+                "completed_optimizer_steps": int(dose_history["train_optimizer_steps"].sum()),
+                "expected_optimizer_steps": int(self.config["train"]["epochs"]) * math.ceil(
+                    len(self.train_loader) / int(self.config["train"]["gradient_accumulation_steps"])),
+                "training_validation_seconds": float(dose_history["seconds"].sum()),
+                "changed_trainable_parameter_names": changed_trainable,
+                "changed_frozen_parameter_names": changed_frozen,
+                "primary_checkpoint": str(self.output_dir / "last.pth"),
+                "primary_checkpoint_sha256": _sha256_file(self.output_dir / "last.pth"),
+                "secondary_checkpoint": str(self.output_dir / "best.pth"),
+                "coordinate_system": "model_grid_px", "original_resolution_boundary_metrics": "NOT IMPLEMENTED",
+                "test_assets_opened": 0,
+                "scientific_evaluation": self.config["dose_response"]["scientific_evaluation"],
+                "notice": self.config["dose_response"].get("notice", "")})
+            if changed_frozen or not changed_trainable:
+                raise RuntimeError("Dose path update check failed; see dose_training_metadata.json")
         self.writer.close()

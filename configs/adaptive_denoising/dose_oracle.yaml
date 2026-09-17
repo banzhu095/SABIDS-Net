@@ -1,0 +1,4 @@
+_base_: dose_response_common.yaml
+dose_response:
+  curve_type: oracle
+  oracle_notice: Uses clean references; not deployable inference

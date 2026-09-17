@@ -56,9 +56,46 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     config = load_config(args.config)
+    dose = config.get("dose_response", {}).get("enabled", False)
+    if dose:
+        from sabids.experiments.dose_response import validate_dose_config
+        validate_dose_config(config, require_fresh=False)
+        if (args.split != "val" or args.one_frame_per_group or args.use_ema
+                or not args.no_restore_original_geometry or tuple(args.postprocess_modes) != ("p0",)
+                or args.tasks != ["layer", "vessel"]
+                or args.layer_threshold not in (None, 0.5) or args.vessel_threshold not in (None, 0.5)):
+            raise ValueError("Dose evaluation requires complete val, tasks layer vessel, P0 0.5, --no-restore-original-geometry; no test/EMA")
+        evaluation_output = Path(args.output).resolve()
+        if Path(config["train"]["output_dir"]).resolve() not in evaluation_output.parents:
+            raise ValueError("Dose evaluation output must be a new child of this dose run")
+        if evaluation_output.exists():
+            raise FileExistsError("Dose evaluation output must be fresh")
     device = get_device(config.get("device", "auto"))
     model = build_model(config).to(device)
-    checkpoint = torch.load(args.checkpoint, map_location=device)
+    checkpoint = torch.load(args.checkpoint, map_location=device, **({"weights_only": False} if dose else {}))
+    if dose:
+        import json
+        from sabids.experiments.dose_response import sha256_file
+        expected = {k: v for k, v in config.items() if k != "runtime"}
+        embedded = {k: v for k, v in checkpoint["config"].items() if k != "runtime"}
+        if expected != embedded:
+            raise ValueError("Dose evaluation checkpoint is not from this registered arm")
+        if Path(args.checkpoint).name not in {"last.pth", "best.pth"}:
+            raise ValueError("Dose evaluation expects registered final or secondary best")
+        run = Path(config["train"]["output_dir"])
+        completion = json.loads((run / "dose_training_metadata.json").read_text(encoding="utf-8"))
+        if (completion["completed_epochs"] != config["train"]["epochs"]
+                or completion["completed_optimizer_steps"] != completion["expected_optimizer_steps"]
+                or completion["changed_frozen_parameter_names"] or not completion["changed_trainable_parameter_names"]):
+            raise ValueError("Dose evaluation requires completed, budget-matched training with valid parameter updates")
+        if Path(args.checkpoint).name == "last.pth":
+            expected_sha = completion["primary_checkpoint_sha256"]
+            if checkpoint["epoch"] + 1 != config["train"]["epochs"]:
+                raise ValueError("Incomplete fixed-final checkpoint")
+        else:
+            expected_sha = json.loads((run / "run_metadata.json").read_text(encoding="utf-8"))["best_checkpoint_sha256"]
+        if sha256_file(args.checkpoint) != expected_sha:
+            raise ValueError("Dose checkpoint completion/selection SHA mismatch")
     state = checkpoint.get("ema") if args.use_ema and checkpoint.get("ema") else checkpoint["model"]
     model.load_state_dict(state, strict=True)
     dataset = OCTManifestDataset(
@@ -69,6 +106,7 @@ def main() -> None:
         root=config["data"].get("root"),
         datasets=config["data"].get(f"{args.split}_datasets"),
         groups=config["data"].get(f"{args.split}_groups"),
+        **({"image_column": config["data"]["input_column"], "pretransformed_model_grid": True} if dose else {}),
     )
     if args.one_frame_per_group:
         indices = [dataset.groups[group_id][0] for group_id in sorted(dataset.groups)]
@@ -129,6 +167,11 @@ def main() -> None:
         p1_minimum_main_fraction=args.p1_minimum_main_fraction,
         p2_smoothness=args.p2_smoothness,
         p2_max_displacement=args.p2_max_displacement,
+        model_grid_contract=dose,
+        dose_metadata=({**config["dose_response"], "seed": config["seed"],
+                        "checkpoint_sha256": sha256_file(args.checkpoint),
+                        "checkpoint_epoch": checkpoint["epoch"] + 1,
+                        "evaluation_checkpoint_kind": Path(args.checkpoint).name} if dose else None),
     )
     print(summary)
 

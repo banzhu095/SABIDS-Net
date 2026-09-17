@@ -196,6 +196,7 @@ class SegmentationLoss(nn.Module):
         target: torch.Tensor,
         boundary_logits: torch.Tensor | None = None,
         valid_mask: torch.Tensor | None = None,
+        boundary_valid_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         logits = logits.float()
         target = target.float()
@@ -229,6 +230,8 @@ class SegmentationLoss(nn.Module):
             if boundary_logits is not None:
                 boundary_target, valid = layer_boundary_targets(target)
                 valid = valid * mask
+                if boundary_valid_mask is not None:
+                    valid = valid * boundary_valid_mask.float()
                 raw = F.binary_cross_entropy_with_logits(
                     boundary_logits, boundary_target, reduction="none"
                 )

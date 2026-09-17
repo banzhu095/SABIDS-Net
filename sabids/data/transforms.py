@@ -87,8 +87,11 @@ class JointOCTTransform:
         arrays: Dict[str, Optional[np.ndarray]],
         masks: Dict[str, Optional[np.ndarray]],
         allow_strong: bool,
+        flip_override: Optional[bool] = None,
     ) -> Dict[str, torch.Tensor]:
-        flip = self.training and np.random.rand() < self.horizontal_flip
+        flip = self.training and (
+            np.random.rand() < self.horizontal_flip if flip_override is None else flip_override
+        )
         output: Dict[str, torch.Tensor] = {}
 
         for key, array in arrays.items():
@@ -111,4 +114,3 @@ class JointOCTTransform:
                 value = np.flip(value, axis=1)
             output[key] = self._tensor((value > 0.5).astype(np.float32))
         return output
-

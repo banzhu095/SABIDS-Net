@@ -323,3 +323,33 @@ with matching controls and without changing the held-out test set.
 For every substantive experiment, record the exact Git commit returned by
 `git rev-parse --short HEAD`; a version name such as v0.2 is not precise enough
 for reproducibility.
+
+## 10. Opt-in denoising dose-response engineering closure (2026-09-17)
+
+The first-stage dose-response implementation is an engineering experiment,
+not evidence that moderate denoising helps or extrapolation harms vessels.
+It reuses `input_segment` with Oracle/reference and frozen D1 residual inputs,
+six fixed doses, independently initialized paired segmentation arms, and a
+new cache/run namespace. Formal preparation requires an explicitly selected
+traceable D1 and a unique active protocol; absent evidence fails closed.
+The historical 13/3-position cohort and local 8/2/3-position manifest remain
+distinct and neither is substituted for the other.
+
+New dose configs explicitly disable both interaction directions, auxiliary
+heads, restoration losses, RMAC, pseudo-labels and additional stroma/area
+regularization. Final E3b ROI/outside/containment supervision remains common
+to all arms. Opt-in loss flags exclude annotation-invalid boundary columns
+and containment pixels; a final-segmentation zero reference avoids attaching
+zero losses to unused restoration outputs. Legacy loss defaults and model
+forward are unchanged. Validity and geometry use one recorded model grid;
+original-resolution boundary metrics are NOT IMPLEMENTED.
+
+Dose preparation and training scope the deterministic-algorithm global flag
+and restore its previous enabled/warn-only state, including on failure; it
+must not leak into a later legacy experiment in the same process.
+
+The local CPU closure and all 255 tests passed; formal assets and CUDA remain
+unverified. No formal training, test inference, alpha selection or cloud
+operation was authorized or executed. See
+`ADAPTIVE_DENOISING_MINIMAL_IMPLEMENTATION.md` for actual artifacts, gates,
+evidence requirements and conditional commands.

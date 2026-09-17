@@ -1,0 +1,69 @@
+_base_: ../base.yaml
+deterministic: true
+model:
+  d2s_enabled: false
+  s2d_enabled: false
+  enable_denoise_to_seg: false
+  enable_seg_to_denoise: false
+  causal_interaction_experiment: false
+  freeze_shared_encoder: false
+  dropout: 0.0
+data:
+  input_column: dose_path
+  pretransformed_model_grid: true
+  deterministic_augmentation: true
+  load_segmentation_labels: true
+  vessel_oversample_fraction: 0.0
+  normalization: fixed
+  augmentation:
+    horizontal_flip: 0.5
+    strong_private_only: true
+train:
+  stage: input_segment
+  pretrained: null
+  resume: null
+  use_ema: false
+  epochs: 20
+  early_stopping_patience: 21
+  batch_size: 1
+  gradient_accumulation_steps: 2
+  num_workers: 0
+  amp: false
+  learning_rate: 0.00005
+  minimum_learning_rate: 0.000001
+  monitor: vessel_soft_dice
+  train_eval_every: 0
+  monitor_denoise_drift: false
+  evaluate_epoch0: true
+loss:
+  definition_version: dose-e3b-valid-v1
+  auxiliary_weight: 0.0
+  zero_source: final_segmentation
+  exclude_annotation_invalid_containment: true
+  exclude_annotation_invalid_boundary: true
+  vessel_supervision_mode: roi_bce_dice_outside
+  weights:
+    reconstruction: 0.0
+    residual: 0.0
+    identity: 0.0
+    rmac: 0.0
+    pseudo: 0.0
+    vessel_stroma: 0.0
+    vessel_area: 0.0
+    layer: 1.0
+    vessel: 1.0
+    vessel_outside: 0.5
+    containment: 0.1
+evaluation:
+  batch_size: 1
+  num_workers: 0
+  threshold: 0.5
+  layer_threshold: 0.5
+  vessel_threshold: 0.5
+  restore_original_geometry: false
+  coordinate_system: model_grid_px
+dose_response:
+  enabled: true
+  primary_checkpoint: fixed_final_last
+  secondary_checkpoint: best_validation_vessel_soft_dice_first_tie
+  original_resolution_boundary_metrics: NOT IMPLEMENTED

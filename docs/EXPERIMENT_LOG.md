@@ -910,3 +910,73 @@ Populate one row per independent fold after validation threshold selection.
   introducing a segmentation-label dependency into the denoising-only method
   when a manifest still contains legacy `Label/layer_binary` paths. Run
   metadata records the disabled label I/O and an empty label-asset inventory.
+
+# 2026-09-17 — Dose-response first-stage minimal engineering closure
+
+- Base Git commit: `b4cb77abf6128ba87f3b994b5757fc7a1138a41a` plus
+  uncommitted changes. Preparation records a source-content fingerprint, so
+  the commit alone does not identify this implementation. No commit/push.
+- Added fail-closed explicit-D1/protocol/split/manifest/data/label/history
+  preflight and deterministic Oracle/D1-residual input caches; reused the
+  existing `input_segment` Trainer and `evaluate.py`. No network forward
+  modification, new trainer, new split or historical-output replacement.
+- All new arms use the same final E3b supervision, with auxiliary/interaction/
+  restoration/RMAC/pseudo/stroma/area terms disabled. Opt-in validity flags
+  exclude unknown boundary columns and containment pixels. Final-segmentation
+  zero references isolate disabled loss paths; legacy defaults are preserved.
+- Hardware/runtime: local Windows CPU, Python 3.9.13,
+  PyTorch 2.8.0+cpu, no local CUDA. The recommended cloud Python 3.10+ and
+  CUDA execution were not verified. `compileall -q .` passed;
+  focused tests: 67 passed/12 warnings; full suite: 245 passed/59 warnings.
+- Final CPU smoke protocol: `synthetic_smoke_minimal_release_v1`, **not**
+  PKU37 or a formal fold. Four synthetic frames (2 train/2 val, one distinct
+  position per split), raw 24x40, model 32x48, valid cropped metric grid 29x48.
+  Oracle/D1 x alpha 0/.5, segmentation seed 42, four independent one-epoch
+  runs and two optimizer updates each. Five paired initialization/data-plan
+  checks passed; 114 trainable parameter tensors changed in each arm and
+  zero frozen tensors changed. No test assets exist in this fixture.
+- Resolved configs/checkpoints/curves are under
+  `runs/adaptive_denoising/synthetic_smoke_minimal_release_v1/dose_v1/smoke_s42_minimal_release_v1/`.
+  The Oracle alpha-0 `last.pth` SHA256 is
+  `667f47cfbe57265adde00937b2934270b03b5d0a9ca9fd686de0f639a3b790f7`.
+  This is a **smoke segmentation checkpoint**, not a formal D1 baseline.
+- The actual `evaluate.py` CLI completed all two validation frames for that
+  checkpoint at P0/0.5, outputs in `oracle_a000_seed42/validation_cli_smoke_v1/`.
+  Scientific-evaluation=false and NOT FOR SCIENTIFIC EVALUATION are saved;
+  internal frozen restoration outputs are not reported as dose denoising.
+- Formal local audit: `reports/adaptive_denoising/preflight_local_release_v1/`,
+  status=blocked, native CLI exit=2. No explicit formal D1 is available, zero
+  active locks, all 98 current checkpoint candidates have smoke/pilot paths.
+  The local legacy cohort is 8/2/3 positions and 368/100/149 frames, not the
+  historical 13/3 and 588/141 cohort. Neither was selected; test assets opened=0.
+- Outcome: IMPLEMENTATION READY, FORMAL PILOT BLOCKED. No 20/60-epoch runs,
+  seed 43/44 training, CUDA overfit, cloud operations, formal statistics or
+  scientific performance claims. Conditional commands and the 18-item gate
+  are in `ADAPTIVE_DENOISING_MINIMAL_IMPLEMENTATION.md`.
+
+## Authorized feature-branch pre-commit review (2026-09-17)
+
+- User authorized a local commit only on
+  `feature/adaptive-denoising-dose-v1`, with message
+  `feat: add gated denoising dose-response experiments`. No push, merge,
+  cloud operation or standalone training launch is authorized in this review.
+- Found and corrected an in-process compatibility issue: dose preparation
+  and Trainer initialization previously left deterministic algorithms enabled
+  globally. Preparation and dose `fit()` now use a scoped context restoring
+  the enabled and warn-only flags, including on exceptions. Constructor and
+  legacy `fit()` do not enable the dose-only setting. Added ten regression cases.
+- After the correction: `compileall -q .` passed; focused tests **77 passed,
+  12 warnings**; full suite **255 passed, 59 warnings**. CPU synthetic training
+  occurred only inside the requested unit-test fixtures; no separate training
+  command was launched. The preceding standalone smoke outputs remain an
+  immutable historical snapshot; changed source fingerprints require fresh
+  tags for later cache preparation.
+- Seven read-only comparisons against base HEAD checked legacy transform
+  outputs/RNG, complete dataset items/repeat RNG, default loaders/sampler,
+  default common loss, composite/E3b total losses and gradients, all-task
+  P0--P3 evaluator metrics with/without original-geometry restoration, and
+  evaluation CLI defaults. All comparisons passed without training or file writes.
+- Submission scope is exactly the expected 20 source/config/test/documentation
+  files. No runtime assets are included. Added-content Windows-path scan
+  passed; pre-existing documented Windows root examples remain unchanged.
+  Expected sources are not ignored; runtime cache/report/run paths are ignored.

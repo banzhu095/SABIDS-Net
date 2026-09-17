@@ -23,7 +23,7 @@ from .rmac import rmac_loss
 
 
 def _zero(output: Dict[str, torch.Tensor]) -> torch.Tensor:
-    return output["denoised_raw"].sum() * 0.0
+    return output.get("loss_zero_reference", output["denoised_raw"]).sum() * 0.0
 
 
 class SABIDSLoss(nn.Module):
@@ -142,11 +142,19 @@ class SABIDSLoss(nn.Module):
         vessel_annotation_valid = batch.get("vessel_valid_mask", spatial_valid).float()
         vessel_annotation_valid = vessel_annotation_valid * spatial_valid
         if bool(layer_valid.any()):
+            boundary_valid = None
+            if self.config.get("exclude_annotation_invalid_boundary", False):
+                # Unknown pixels cannot establish a boundary in their column.
+                # BCE/Dice retain every known pixel; only boundary supervision
+                # excludes incomplete columns (not fabricated unknown edges).
+                known = (layer_annotation_valid > 0.5) | (spatial_valid <= 0.5)
+                boundary_valid = known.all(dim=-2, keepdim=True).float() * spatial_valid
             layer = self.layer_loss(
                 output["layer_logits"][layer_valid],
                 batch["layer_mask"][layer_valid],
                 output["boundary_logits"][layer_valid],
                 layer_annotation_valid[layer_valid],
+                **({"boundary_valid_mask": boundary_valid[layer_valid]} if boundary_valid is not None else {}),
             )
         if bool(vessel_valid.any()):
             if self.vessel_supervision_mode in {
@@ -279,6 +287,12 @@ class SABIDSLoss(nn.Module):
         teacher_output: Optional[Dict[str, torch.Tensor]] = None,
         ramp: float = 1.0,
     ) -> Dict[str, torch.Tensor | float]:
+        if self.config.get("zero_source") == "final_segmentation":
+            if stage != "input_segment":
+                raise ValueError("final_segmentation zero source is only valid for input_segment")
+            # Do not attach inactive losses to the frozen restoration graph;
+            # even 0 * NaN from an unused restoration output is not safe.
+            output = {**output, "loss_zero_reference": output["layer_logits"]}
         losses: Dict[str, torch.Tensor | float] = {}
         zero = _zero(output)
         if stage in {"denoise", "warmup", "joint", "private", "interaction"}:
@@ -324,6 +338,8 @@ class SABIDSLoss(nn.Module):
                 torch.sigmoid(output["layer_logits"].float()).detach(),
             ).float()
             valid_mask = batch["valid_mask"].float()
+            if self.config.get("exclude_annotation_invalid_containment", False):
+                valid_mask = valid_mask * batch["label_valid_mask"].float() * batch["vessel_valid_mask"].float()
             vessel_probability = torch.sigmoid(output["vessel_logits"].float())
             containment = (
                 vessel_probability * (1.0 - layer_reference) * valid_mask

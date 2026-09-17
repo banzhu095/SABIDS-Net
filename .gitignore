@@ -46,6 +46,8 @@ dist/
 /wandb/
 /lightning_logs/
 /tmp/
+/cache/adaptive_denoising/
+/reports/adaptive_denoising/
 /third_party_external/
 /Downloaded_Denoise_Review/
 /ROI_Denoise_Analysis/

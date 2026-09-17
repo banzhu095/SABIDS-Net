@@ -43,6 +43,8 @@ class OCTManifestDataset(Dataset):
         image_column: str = "image_path",
         guidance_mapping: Optional[str | Path] = None,
         load_segmentation_labels: bool = True,
+        pretransformed_model_grid: bool = False,
+        deterministic_augmentation_seed: Optional[int] = None,
     ) -> None:
         self.manifest = Path(manifest).expanduser().resolve()
         self.root = Path(root).expanduser().resolve() if root else self.manifest.parent
@@ -50,6 +52,9 @@ class OCTManifestDataset(Dataset):
         self.sample_repeat = sample_repeat
         self.image_column = str(image_column)
         self.load_segmentation_labels = bool(load_segmentation_labels)
+        self.pretransformed_model_grid = bool(pretransformed_model_grid)
+        self.deterministic_augmentation_seed = deterministic_augmentation_seed
+        self.epoch = 0
         table = pd.read_csv(self.manifest, dtype=str).fillna("")
         missing = REQUIRED_COLUMNS - set(table.columns)
         if missing:
@@ -90,6 +95,9 @@ class OCTManifestDataset(Dataset):
     def __len__(self) -> int:
         return len(self.table)
 
+    def set_epoch(self, epoch: int) -> None:
+        self.epoch = int(epoch)
+
     @property
     def groups(self) -> Dict[str, List[int]]:
         return self.group_to_indices
@@ -126,6 +134,11 @@ class OCTManifestDataset(Dataset):
         if image is None or repeat is None:
             raise RuntimeError(f"Missing required image for sample {row['sample_id']}")
         original_height, original_width = image.shape[-2:]
+        if self.pretransformed_model_grid:
+            if tuple(image.shape) != tuple(self.transform.target_size):
+                raise ValueError("Prepared dose image does not match model grid")
+            original = self._load_optional(row["image_path"])
+            original_height, original_width = original.shape[-2:]
 
         clean = self._load_optional(row.get("clean_path", ""))
         layer = (
@@ -168,6 +181,23 @@ class OCTManifestDataset(Dataset):
         allow_strong = self.transform.training and (
             not self.transform.strong_private_only or not has_clean
         )
+        spatial_valid = np.ones_like(image, dtype=np.float32)
+        flip_override = None
+        if self.pretransformed_model_grid:
+            spatial_valid = self._load_optional(row.get("spatial_valid_mask_path", ""), mask=True)
+            if spatial_valid is None:
+                raise ValueError("Prepared model grid requires explicit spatial validity mask")
+            for value in (clean, layer, vessel, label_valid, vessel_valid, spatial_valid):
+                if value is None or value.shape != image.shape:
+                    raise ValueError("Prepared image/GT/validity shapes must match without resampling")
+            if allow_strong:
+                raise ValueError("Prepared paired dose data forbids stochastic strong augmentation")
+        if self.deterministic_augmentation_seed is not None:
+            from sabids.experiments.dose_response import deterministic_flip
+            if allow_strong:
+                raise ValueError("Deterministic dose augmentation supports horizontal flip only")
+            flip_override = deterministic_flip(self.deterministic_augmentation_seed, self.epoch,
+                                               str(row["sample_id"]), self.transform.horizontal_flip)
         transformed = self.transform(
             arrays={"image": image, "repeat": repeat, "clean": clean, "interaction_guidance": interaction_guidance},
             masks={
@@ -175,9 +205,10 @@ class OCTManifestDataset(Dataset):
                 "vessel_mask": vessel,
                 "label_valid_mask": label_valid,
                 "vessel_valid_mask": vessel_valid,
-                "valid_mask": np.ones_like(image, dtype=np.float32),
+                "valid_mask": spatial_valid,
             },
             allow_strong=allow_strong,
+            flip_override=flip_override,
         )
 
         shape = transformed["image"].shape
@@ -222,4 +253,7 @@ class OCTManifestDataset(Dataset):
             "original_width": int(original_width),
             "manifest_group_frames": int(len(self.group_to_indices[group_id])),
         }
+        if self.pretransformed_model_grid:
+            output["metric_coordinate_system"] = "model_grid_px"
+            output["augmentation_flip"] = bool(self.transform.training and flip_override)
         return output
