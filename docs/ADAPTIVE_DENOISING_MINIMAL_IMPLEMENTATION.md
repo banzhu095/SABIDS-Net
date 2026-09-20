@@ -40,10 +40,21 @@ D1 只调用 checkpoint 的 `forward_denoise_only(noisy)`；clean/GT 不进入 D
    无法按这一布局证明的其他协议当前记 BLOCKED，不能替换成 v3。
 7. `train_segment.csv` 必须是锁定 data plan 的同一 train/val 行，所有帧均有
    clean/layer/vessel；不为某条曲线悄悄筛除缺失帧。当前标签 hash 必须匹配锁定 inventory。
-8. `best.pth` 必须是完整 history 中 val_psnr 最大值首次出现的 epoch，monitor=psnr，
-   `run_metadata.json.best_checkpoint_sha256` 必须匹配。`last.pth` 必须达到配置最终轮次。
-   正式 D1 的 history 必须逐轮完整覆盖固定预算；只有计划 60 轮、实际跑了 2 轮的 best
-   不能因为名字不含 smoke/pilot 就变为正式模型。其他早停协议需单独审计适配，当前不替代。
+8. selection history 使用独立的逐行 CSV 审计，不通过 pandas 强制矩形化、不使用
+   `on_bad_lines="skip"`，也不修改历史文件。两种预先冻结的选择规则含义不同：
+   - `fixed_final` 只信任 `epoch`：行数和整数 epoch 必须严格等于完整的
+     `1...configured_epochs`，checkpoint 必须是达到最终轮次的 `last.pth`。
+     它**不读取、不要求、也不使用 `val_psnr` 选模**。即使旧 history 从 287 列
+     漂移到 295 列，只要完整 epoch 证据成立，也可继续；报告必须记录行宽分布、
+     `history_schema_drift_detected=true` 和 `val_psnr_trusted=false`。
+   - `best_validation_psnr` 要求 schema 一致的矩形 history、完整 epoch 和逐行有限的
+     `val_psnr`。`best.pth` 必须是 val PSNR 首次最大值的 epoch，monitor=psnr，且
+     `run_metadata.json.best_checkpoint_sha256` 匹配。行宽漂移而文件自身没有对应新表头时
+     无法恢复指标含义，必须 fail closed，不能把错位后的约 0.13 当成 PSNR。
+
+   两种规则都拒绝缺失/重复/非整数或非有限 epoch 以及未完成预算。只有计划 60 轮、
+   实际跑了 2 轮的 checkpoint 不能因为名字不含 smoke/pilot 就变为正式模型。
+   其他早停协议需单独审计适配，当前不替代。
 9. 必须有训练时留下的 noisy/clean 像素指纹。协议中的 dataset inventory SHA
    只是表指纹，不证明历史像素没变。缺失历史像素证据也阻塞，不追认、不自动重训。
 

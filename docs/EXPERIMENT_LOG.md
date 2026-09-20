@@ -980,3 +980,27 @@ Populate one row per independent fold after validation threshold selection.
   files. No runtime assets are included. Added-content Windows-path scan
   passed; pre-existing documented Windows root examples remain unchanged.
   Expected sources are not ignored; runtime cache/report/run paths are ignored.
+
+# 2026-09-20 — Formal D1 dynamic-history preflight correction
+
+- Branch `feature/adaptive-denoising-dose-v1`, parent commit
+  `d070af0fb3f8f29d1db17d9460dc69b770cf0b8e`. This was a code/test audit;
+  no training, cloud operation, test-data access, or formal asset mutation.
+- Replaced pandas selection-history parsing inside the dose formal preflight
+  with an independent strict CSV row audit. It records header width, row-count
+  and every data-row width without dropping, padding, truncating, or rewriting
+  a row. Complete integer epochs must be exactly `1...configured_epochs`.
+- `fixed_final` now binds only complete epochs plus final `last.pth` epoch. It
+  never reads or uses `val_psnr`; a 287-to-295 legacy width drift is reported
+  with `history_schema_drift_detected=true` and `val_psnr_trusted=false` but is
+  not by itself a failure. `best_validation_psnr` accepts only a rectangular,
+  finite, self-described PSNR column and fails closed on unrecoverable drift.
+- The confirmed cloud history was not present locally. A regression fixture
+  reproduced 34 rows of width 287 and 26 rows of width 295, with the stale
+  `val_psnr` index reading 0.13005 after epoch 34. Fixed-final passed; the same
+  file was rejected for best-PSNR. Missing, duplicate, noninteger/nonfinite and
+  short epoch histories were rejected; rectangular best selection still passed.
+- Verification: `compileall -q .` and `git diff --check` passed; the three dose
+  test files reported **86 passed, 12 warnings**; the full repository reported
+  **264 passed, 59 warnings**. Warnings are the previously recorded optional
+  TensorBoard/CPU pin-memory and dependency deprecations, not test failures.

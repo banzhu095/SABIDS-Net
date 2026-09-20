@@ -348,7 +348,7 @@ Dose preparation and training scope the deterministic-algorithm global flag
 and restore its previous enabled/warn-only state, including on failure; it
 must not leak into a later legacy experiment in the same process.
 
-The local CPU closure and all 255 tests passed; formal assets and CUDA remain
+The local CPU closure and all 264 tests passed; formal assets and CUDA remain
 unverified. No formal training, test inference, alpha selection or cloud
 operation was authorized or executed. See
 `ADAPTIVE_DENOISING_MINIMAL_IMPLEMENTATION.md` for actual artifacts, gates,

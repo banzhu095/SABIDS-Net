@@ -1,4 +1,5 @@
 """Fabricated provenance fixtures test gates, never scientific checkpoints."""
+import csv
 import copy
 import hashlib
 import json
@@ -90,6 +91,35 @@ def rewrite_checkpoint(e, cfg):
     save_config(cfg, e["checkpoint"].parent / "resolved_config.yaml")
 
 
+def write_dynamic_history(path):
+    """Legacy 287 -> 295 rows: the old val_psnr slot becomes 0.13005."""
+    header = ["epoch", "legacy_metric", "val_psnr"] + [f"legacy_{i}" for i in range(284)]
+    assert len(header) == 287
+    rows = []
+    for epoch in range(1, 61):
+        if epoch <= 34:
+            row = [str(epoch), "0.2", str(30.0 + epoch / 100)] + [""] * 284
+        else:
+            # Eight new, unlabelled values precede the actual PSNR. The stale
+            # header therefore maps index 2 to 0.13005, not to the true PSNR.
+            row = [str(epoch), "0.2", "0.13005"] + ["new"] * 7
+            row += [str(35.0 + epoch / 100)] + [""] * (295 - 11)
+        rows.append(row)
+    assert [len(row) for row in rows[:34]] == [287] * 34
+    assert [len(row) for row in rows[34:]] == [295] * 26
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        csv.writer(handle).writerows([header, *rows])
+
+
+def write_epoch_history(path, epochs, val_psnr=None):
+    header = ["epoch"] + (["val_psnr"] if val_psnr is not None else [])
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(header)
+        for index, epoch in enumerate(epochs):
+            writer.writerow([epoch] + ([val_psnr[index]] if val_psnr is not None else []))
+
+
 def test_formal_pass_never_opens_sealed_assets(evidence, monkeypatch):
     original = dose.sha256_file
     def guarded(path):
@@ -100,6 +130,77 @@ def test_formal_pass_never_opens_sealed_assets(evidence, monkeypatch):
     assert result["status"] == "passed", result
     assert result["test_assets_opened"] == 0
     assert result["d1_epoch"] == 60
+
+
+def test_dynamic_history_fixed_final_passes_but_best_psnr_fails_closed(evidence):
+    history = evidence["checkpoint"].parent / "history.csv"
+    write_dynamic_history(history)
+    with history.open("r", newline="", encoding="utf-8") as handle:
+        raw_rows = list(csv.reader(handle))
+    assert len(raw_rows) == 61
+    assert len(raw_rows[1]) == 287 and len(raw_rows[34]) == 287
+    assert len(raw_rows[35]) == 295 and len(raw_rows[-1]) == 295
+    assert float(raw_rows[35][2]) == pytest.approx(0.13005)
+
+    fixed = audit(evidence)
+    assert fixed["status"] == "passed", fixed
+    assert fixed["history_schema_drift_detected"] is True
+    assert fixed["history_row_width_distribution"] == {"287": 34, "295": 26}
+    assert fixed["val_psnr_trusted"] is False
+    assert fixed["selection_history_audit"]["history_row_count"] == 60
+    assert fixed["selection_history_audit"]["last_epoch"] == 60
+
+    best = evidence["checkpoint"].with_name("best.pth")
+    payload = torch.load(evidence["checkpoint"], map_location="cpu", weights_only=False)
+    torch.save(payload, best)
+    dose.write_strict_json(
+        best.parent / "run_metadata.json", {"best_checkpoint_sha256": dose.sha256_file(best)}
+    )
+    blocked = dose.formal_preflight(
+        evidence["root"], str(best), str(evidence["lock_path"]),
+        str(evidence["contract"]), "best_validation_psnr"
+    )
+    assert blocked["status"] == "blocked"
+    assert blocked["history_schema_drift_detected"] is True
+    assert blocked["val_psnr_trusted"] is False
+    assert "schema drift prevents trustworthy val_psnr" in blocked["issues"][0]
+
+
+@pytest.mark.parametrize("epochs,match", [
+    ([*range(1, 30), *range(31, 62)], "strictly equal"),
+    ([*range(1, 60), 59], "duplicate epoch"),
+    (list(range(1, 60)), "row count"),
+    (["NaN", *range(2, 61)], "not an integer"),
+])
+def test_selection_history_rejects_missing_duplicate_short_or_nonfinite_epoch(tmp_path, epochs, match):
+    path = tmp_path / "history.csv"
+    write_epoch_history(path, epochs)
+    with pytest.raises(dose.SelectionHistoryError, match=match):
+        dose.audit_selection_history(path, 60, "fixed_final")
+
+
+def test_rectangular_best_history_is_trusted_and_nonfinite_psnr_is_rejected(tmp_path):
+    path = tmp_path / "history.csv"
+    values = [32.0 if epoch == 3 else 30.0 for epoch in range(1, 61)]
+    write_epoch_history(path, list(range(1, 61)), values)
+    result = dose.audit_selection_history(path, 60, "best_validation_psnr")
+    assert result["history_schema_drift_detected"] is False
+    assert result["history_row_width_distribution"] == {"2": 60}
+    assert result["val_psnr_trusted"] is True
+    assert result["best_epoch"] == 3
+    values[9] = float("nan")
+    write_epoch_history(path, list(range(1, 61)), values)
+    with pytest.raises(dose.SelectionHistoryError, match="nonfinite"):
+        dose.audit_selection_history(path, 60, "best_validation_psnr")
+
+
+def test_fixed_final_requires_only_complete_integer_epoch_column(tmp_path):
+    path = tmp_path / "history.csv"
+    write_epoch_history(path, list(range(1, 61)))
+    result = dose.audit_selection_history(path, 60, "fixed_final")
+    assert result["history_schema_drift_detected"] is False
+    assert result["val_psnr_trusted"] is False
+    assert "val_psnr_column_index" not in result and "best_epoch" not in result
 
 
 @pytest.mark.parametrize("kind,match", [
@@ -114,6 +215,8 @@ def test_formal_pass_never_opens_sealed_assets(evidence, monkeypatch):
     ("resolved_missing", "resolved_config"), ("contract_sha", "contract SHA"),
     ("wrong_source_asset", "D1 manifest row differs"),
     ("incomplete_history", "complete fixed budget"),
+    ("fixed_wrong_checkpoint_name", "Incomplete fixed-final"),
+    ("fixed_wrong_checkpoint_epoch", "Incomplete fixed-final"),
 ])
 def test_formal_refuses_invalid_evidence(evidence, kind, match):
     e = evidence
@@ -172,6 +275,14 @@ def test_formal_refuses_invalid_evidence(evidence, kind, match):
         rewrite_checkpoint(e, cfg)
     elif kind == "incomplete_history":
         pd.DataFrame([{"epoch": 60, "val_psnr": 30.}]).to_csv(e["checkpoint"].parent / "history.csv", index=False)
+    elif kind == "fixed_wrong_checkpoint_name":
+        wrong = e["checkpoint"].with_name("best.pth")
+        wrong.write_bytes(e["checkpoint"].read_bytes())
+        cp = str(wrong)
+    elif kind == "fixed_wrong_checkpoint_epoch":
+        raw = torch.load(e["checkpoint"], map_location="cpu", weights_only=False)
+        raw["epoch"] = 58
+        torch.save(raw, e["checkpoint"])
     result = dose.formal_preflight(e["root"], cp, lp, str(e["contract"]), rule)
     assert result["status"] == "blocked"
     assert any(match in issue for issue in result["issues"]), result
@@ -197,6 +308,10 @@ def test_best_selection_is_frozen_and_sha_bound(evidence):
     dose.write_strict_json(cp.parent / "run_metadata.json", {"best_checkpoint_sha256": dose.sha256_file(cp)})
     result = dose.formal_preflight(e["root"], str(cp), str(e["lock_path"]), str(e["contract"]), "best_validation_psnr")
     assert result["status"] == "passed", result
+    assert result["history_schema_drift_detected"] is False
+    assert result["history_row_width_distribution"] == {"2": 60}
+    assert result["val_psnr_trusted"] is True
+    assert result["selection_history_audit"]["best_epoch"] == 3
     dose.write_strict_json(cp.parent / "run_metadata.json", {"best_checkpoint_sha256": "incorrect"})
     result = dose.formal_preflight(e["root"], str(cp), str(e["lock_path"]), str(e["contract"]), "best_validation_psnr")
     assert result["status"] == "blocked" and "provenance SHA" in result["issues"][0]

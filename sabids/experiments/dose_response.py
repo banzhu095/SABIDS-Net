@@ -11,7 +11,10 @@ import json
 import math
 import re
 import subprocess
+import csv
+from collections import Counter
 from contextlib import contextmanager
+from decimal import Decimal, InvalidOperation
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -249,6 +252,134 @@ def _require(condition: bool, reason: str) -> None:
         raise ValueError(reason)
 
 
+class SelectionHistoryError(ValueError):
+    """Strict history failure carrying the audit produced before rejection."""
+
+    def __init__(self, message: str, audit: dict[str, Any]):
+        super().__init__(message)
+        self.audit = audit
+
+
+def _selection_history_epoch(value: str, audit: dict[str, Any], row_number: int) -> int:
+    text = str(value).strip()
+    try:
+        parsed = Decimal(text)
+    except (InvalidOperation, ValueError):
+        raise SelectionHistoryError(
+            f"Selection history epoch is not an integer at CSV row {row_number}", audit
+        )
+    if not parsed.is_finite() or parsed != parsed.to_integral_value():
+        raise SelectionHistoryError(
+            f"Selection history epoch is not an integer at CSV row {row_number}", audit
+        )
+    return int(parsed)
+
+
+def audit_selection_history(
+    path: str | Path, configured_epochs: int, selection_rule: str
+) -> dict[str, Any]:
+    """Audit selection history without normalizing, dropping, or rewriting rows.
+
+    Fixed-final selection trusts only the epoch column. A best-PSNR selection
+    additionally requires a rectangular schema because an old header cannot
+    identify the meaning of extra values in wider legacy rows.
+    """
+    history_path = Path(path)
+    audit: dict[str, Any] = {
+        "history_path": str(history_path),
+        "configured_epochs": int(configured_epochs),
+        "selection_rule": selection_rule,
+        "history_schema_drift_detected": False,
+        "val_psnr_trusted": False,
+        "history_header_width": 0,
+        "history_row_count": 0,
+        "history_row_width_distribution": {},
+    }
+    if selection_rule not in {"fixed_final", "best_validation_psnr"}:
+        raise SelectionHistoryError("Unknown selection history rule", audit)
+    if not history_path.is_file():
+        raise SelectionHistoryError("Missing selection history", audit)
+    audit["history_sha256"] = sha256_file(history_path)
+    try:
+        with history_path.open("r", newline="", encoding="utf-8-sig") as handle:
+            rows = list(csv.reader(handle, strict=True))
+    except (OSError, csv.Error, UnicodeError) as exc:
+        raise SelectionHistoryError(f"Selection history CSV is unreadable: {exc}", audit)
+    if not rows:
+        raise SelectionHistoryError("Selection history is empty", audit)
+    header, data_rows = rows[0], rows[1:]
+    widths = Counter(len(row) for row in data_rows)
+    audit.update(
+        history_header_width=len(header),
+        history_row_count=len(data_rows),
+        history_row_width_distribution={str(width): count for width, count in sorted(widths.items())},
+    )
+    drift = len(widths) > 1 or any(width != len(header) for width in widths)
+    audit["history_schema_drift_detected"] = drift
+    epoch_indices = [index for index, name in enumerate(header) if name.strip() == "epoch"]
+    if len(epoch_indices) != 1:
+        raise SelectionHistoryError("Selection history requires exactly one epoch header", audit)
+    epoch_index = epoch_indices[0]
+    audit["epoch_column_index"] = epoch_index
+    epochs = []
+    for row_number, row in enumerate(data_rows, start=2):
+        if len(row) <= epoch_index or not str(row[epoch_index]).strip():
+            raise SelectionHistoryError(
+                f"Selection history epoch is missing at CSV row {row_number}", audit
+            )
+        epochs.append(_selection_history_epoch(row[epoch_index], audit, row_number))
+    expected = list(range(1, int(configured_epochs) + 1))
+    if len(data_rows) != int(configured_epochs):
+        raise SelectionHistoryError(
+            "Formal D1 history row count does not equal configured epochs; incomplete fixed budget",
+            audit,
+        )
+    if len(set(epochs)) != len(epochs):
+        raise SelectionHistoryError("Selection history contains duplicate epoch", audit)
+    if epochs != expected:
+        raise SelectionHistoryError(
+            "Formal D1 history epochs must be complete and strictly equal 1...configured_epochs",
+            audit,
+        )
+    audit.update(first_epoch=epochs[0], last_epoch=epochs[-1])
+    if selection_rule == "fixed_final":
+        # Deliberately do not locate, parse, or validate val_psnr. Legacy rows
+        # can grow without a corresponding recoverable header; fixed-final did
+        # not use validation PSNR to select its checkpoint.
+        return audit
+    if drift:
+        raise SelectionHistoryError(
+            "Selection history schema drift prevents trustworthy val_psnr best-epoch selection",
+            audit,
+        )
+    value_indices = [index for index, name in enumerate(header) if name.strip() == "val_psnr"]
+    if len(value_indices) != 1:
+        raise SelectionHistoryError(
+            "Best-validation selection requires exactly one val_psnr header", audit
+        )
+    value_index = value_indices[0]
+    values = []
+    for row_number, row in enumerate(data_rows, start=2):
+        try:
+            value = float(row[value_index])
+        except (IndexError, TypeError, ValueError):
+            raise SelectionHistoryError(
+                f"Selection history val_psnr is invalid at CSV row {row_number}", audit
+            )
+        if not math.isfinite(value):
+            raise SelectionHistoryError(
+                f"Selection history val_psnr is nonfinite at CSV row {row_number}", audit
+            )
+        values.append(value)
+    audit.update(
+        val_psnr_trusted=True,
+        val_psnr_column_index=value_index,
+        best_epoch=epochs[max(range(len(values)), key=values.__getitem__)],
+        best_val_psnr=max(values),
+    )
+    return audit
+
+
 def split_audit(table: pd.DataFrame) -> dict:
     _require({"sample_id", "group_id", "split", "image_path"}.issubset(table), "Invalid manifest schema")
     _require(not table.sample_id.duplicated().any(), "Duplicate sample_id")
@@ -397,26 +528,47 @@ def formal_preflight(root: Path, checkpoint_path: str | None, lock_path: str | N
                      "Segmentation row differs from locked data plan")
             _require(all(row.get(c) for c in ("clean_path", "layer_mask_path", "vessel_mask_path")),
                      "Common paired/labelled cohort incomplete; do not silently discard frames")
+        checkpoint_epoch = raw.get("epoch")
+        try:
+            checkpoint_epoch_value = Decimal(str(checkpoint_epoch))
+        except (InvalidOperation, ValueError):
+            checkpoint_epoch_value = Decimal("NaN")
+        _require(checkpoint_epoch_value.is_finite()
+                 and checkpoint_epoch_value == checkpoint_epoch_value.to_integral_value()
+                 and checkpoint_epoch_value >= 0, "Checkpoint epoch is not a valid integer index")
         report.update(segmentation_manifest=str(seg_path), segmentation_manifest_sha256=sha256_file(seg_path),
                       d1_resolved_config=str(rp), resolved_config_sha256=sha256_file(rp),
                       restoration_mode="structure_d1", normalization="fixed", input_resolution=cfg["data"]["target_size"],
-                      d1_epoch=int(raw["epoch"]) + 1, provenance_commit=provenance_commit)
+                      d1_epoch=int(checkpoint_epoch_value) + 1, provenance_commit=provenance_commit)
         history_path = cp.parent / "history.csv"
-        _require(history_path.is_file(), "Missing selection history")
-        history = pd.read_csv(history_path)
-        _require({"epoch", "val_psnr"}.issubset(history), "Selection history lacks epoch/val_psnr")
-        _require(np.isfinite(history.val_psnr.to_numpy(float)).all(), "Nonfinite selection history")
-        _require(history.epoch.astype(int).tolist() == list(range(1, int(cfg["train"]["epochs"]) + 1)),
-                 "Formal D1 history does not prove complete fixed budget; partial best is not formal")
+        try:
+            history_audit = audit_selection_history(
+                history_path, int(cfg["train"]["epochs"]), selection_rule
+            )
+        except SelectionHistoryError as exc:
+            history_audit = exc.audit
+            report.update(
+                selection_history_audit=history_audit,
+                history_schema_drift_detected=history_audit["history_schema_drift_detected"],
+                history_row_width_distribution=history_audit["history_row_width_distribution"],
+                val_psnr_trusted=history_audit["val_psnr_trusted"],
+            )
+            raise ValueError(str(exc))
+        report.update(
+            selection_history_audit=history_audit,
+            history_schema_drift_detected=history_audit["history_schema_drift_detected"],
+            history_row_width_distribution=history_audit["history_row_width_distribution"],
+            val_psnr_trusted=history_audit["val_psnr_trusted"],
+        )
         if selection_rule == "best_validation_psnr":
             _require(cp.name == "best.pth" and cfg["train"].get("monitor") == "psnr", "Not predeclared best PSNR checkpoint")
-            best_epoch = int(history.loc[history.val_psnr.idxmax(), "epoch"])
+            best_epoch = int(history_audit["best_epoch"])
             _require(report["d1_epoch"] == best_epoch, "Checkpoint epoch is not validation PSNR best (first tie)")
             metadata = json.loads((cp.parent / "run_metadata.json").read_text(encoding="utf-8-sig"))
             _require(metadata.get("best_checkpoint_sha256") == report["checkpoint_sha256"], "Best checkpoint provenance SHA missing/mismatch")
         else:
             _require(cp.name == "last.pth" and report["d1_epoch"] == int(cfg["train"]["epochs"])
-                     and int(history.epoch.max()) == report["d1_epoch"], "Incomplete fixed-final checkpoint")
+                     and int(history_audit["last_epoch"]) == report["d1_epoch"], "Incomplete fixed-final checkpoint")
         # The protocol inventory hashes are table hashes, not historical noisy
         # pixel hashes. Do not retroactively invent the latter from today's data.
         pixel_records = asset_inventory(root_data, filtered, include_labels=False)
