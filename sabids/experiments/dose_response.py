@@ -73,6 +73,16 @@ def write_strict_json(path: Path, value: Any) -> None:
                                sort_keys=True, allow_nan=False) + "\n", encoding="utf-8")
 
 
+def write_strict_json_exclusive(path: Path, value: Any) -> None:
+    """Create provenance once; never replace an earlier training-time record."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(
+        json_safe(value), ensure_ascii=False, indent=2, sort_keys=True, allow_nan=False
+    ) + "\n"
+    with path.open("x", encoding="utf-8") as handle:
+        handle.write(payload)
+
+
 def stable_sha(value: Any) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"),
                                     ensure_ascii=False, allow_nan=False).encode()).hexdigest()
@@ -408,6 +418,210 @@ def asset_inventory(root: Path, table: pd.DataFrame, include_labels: bool) -> li
     return sorted(result, key=lambda r: (r["sample_id"], r["column"]))
 
 
+def effective_split_sha(table: pd.DataFrame) -> str:
+    """Hash the effective train/validation group contract used by Trainer."""
+    payload = "\n".join(
+        f"{role}:{group_id}"
+        for role in ("train", "val")
+        for group_id in sorted(
+            table.loc[table["split"].astype(str).eq(role), "group_id"]
+            .astype(str)
+            .unique()
+            .tolist()
+        )
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _normalise_reproduction_config(value: dict, root: Path) -> dict:
+    """Remove runtime-only state and canonicalise reusable path spellings."""
+    normalised = json.loads(json.dumps(json_safe(value)))
+    normalised.pop("runtime", None)
+    data = normalised.get("data", {})
+    for key in ("manifest", "root"):
+        if data.get(key):
+            data[key] = str(resolve(root, data[key]))
+    train = normalised.get("train", {})
+    if train.get("output_dir"):
+        train["output_dir"] = str(resolve(root, train["output_dir"]))
+    return normalised
+
+
+def _config_differences(reference: Any, candidate: Any, prefix: str = "") -> list[dict]:
+    if isinstance(reference, dict) and isinstance(candidate, dict):
+        differences = []
+        for key in sorted(set(reference) | set(candidate)):
+            path = f"{prefix}.{key}" if prefix else str(key)
+            if key not in reference or key not in candidate:
+                differences.append({
+                    "path": path,
+                    "reference": reference.get(key),
+                    "candidate": candidate.get(key),
+                })
+            else:
+                differences.extend(_config_differences(reference[key], candidate[key], path))
+        return differences
+    if reference != candidate:
+        return [{"path": prefix, "reference": reference, "candidate": candidate}]
+    return []
+
+
+def audit_d1_reproduction_config(root: Path, cfg: dict) -> dict:
+    """Fail closed unless only output and opt-in evidence differ from old D1."""
+    evidence_cfg = cfg.get("training_asset_evidence", {})
+    reference_value = evidence_cfg.get("reference_resolved_config")
+    _require(bool(reference_value), "D1 reproduction requires reference_resolved_config")
+    reference_path = resolve(root, reference_value)
+    _require(reference_path.is_file(), f"Missing reference D1 resolved config: {reference_path}")
+    reference = _normalise_reproduction_config(load_config(reference_path), root)
+    candidate = _normalise_reproduction_config(cfg, root)
+    differences = _config_differences(reference, candidate)
+    allowed = set(evidence_cfg.get("allowed_semantic_differences", []))
+    actual = {item["path"] for item in differences}
+    _require(
+        actual == allowed,
+        f"D1 reproduction semantic differences are {sorted(actual)}, expected exactly {sorted(allowed)}",
+    )
+    return {
+        "status": "passed",
+        "reference_resolved_config": str(reference_path),
+        "reference_resolved_config_sha256": sha256_file(reference_path),
+        "allowed_semantic_differences": sorted(allowed),
+        "semantic_differences": differences,
+        "test_assets_opened": 0,
+    }
+
+
+def create_training_asset_evidence(
+    root: Path,
+    cfg: dict,
+    filtered: pd.DataFrame,
+    output_path: Path,
+) -> dict:
+    """Record effective train/val noisy+clean pixels before optimisation."""
+    evidence_cfg = cfg.get("training_asset_evidence", {})
+    _require(evidence_cfg.get("enabled") is True, "Training asset evidence is not enabled")
+    _require(cfg.get("train", {}).get("stage") == "denoise", "Asset evidence is denoise-only")
+    _require(filtered["split"].astype(str).isin(["train", "val"]).all(),
+             "Filtered training evidence contains a non-development split")
+    _require(set(filtered["split"].astype(str)) == {"train", "val"},
+             "Training evidence requires both train and validation rows")
+    manifest = resolve(root, cfg["data"]["manifest"])
+    records = asset_inventory(resolve(root, cfg["data"].get("root") or root), filtered, False)
+    records_sha = stable_sha(records)
+    payload = {
+        "schema_version": "denoiser-training-assets-v1",
+        "recorded_at_training": True,
+        "recorded_before_optimizer_step": True,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "git_commit": git_commit(root),
+        "protocol_id": cfg.get("protocol_id"),
+        "manifest_path": str(manifest),
+        "manifest_sha256": sha256_file(manifest),
+        "effective_split_sha256": effective_split_sha(filtered),
+        "records": records,
+        "records_sha256": records_sha,
+        "train_val_noisy_clean_asset_sha256": records_sha,
+        "test_assets_opened": 0,
+    }
+    write_strict_json_exclusive(output_path, payload)
+    return payload
+
+
+def bind_training_asset_evidence(
+    initial_path: Path,
+    output_path: Path,
+    checkpoint_path: Path,
+    manifest_path: Path,
+    current_records: list[dict],
+    completed_epochs: int,
+    configured_epochs: int,
+    selection_rule: str = "fixed_final",
+) -> dict:
+    """Bind a completed checkpoint to the immutable pre-optimisation record."""
+    _require(initial_path.is_file(), "Missing training-start asset evidence; retroactive binding forbidden")
+    initial = json.loads(initial_path.read_text(encoding="utf-8-sig"))
+    _require(initial.get("recorded_at_training") is True
+             and initial.get("recorded_before_optimizer_step") is True,
+             "Initial evidence was not recorded before optimisation")
+    _require(selection_rule == "fixed_final", "This binding supports fixed_final only")
+    _require(checkpoint_path.name == "last.pth" and checkpoint_path.is_file(),
+             "fixed_final evidence must bind an existing last.pth")
+    _require(int(completed_epochs) == int(configured_epochs),
+             "Cannot bind an incomplete fixed-final training run")
+    raw = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    _require(int(raw.get("epoch", -1)) + 1 == int(configured_epochs),
+             "last.pth epoch differs from configured fixed budget")
+    manifest_sha = sha256_file(manifest_path)
+    _require(initial.get("manifest_sha256") == manifest_sha,
+             "Manifest changed after training-start evidence")
+    records_sha = stable_sha(current_records)
+    _require(initial.get("records") == current_records
+             and initial.get("records_sha256") == records_sha
+             and initial.get("train_val_noisy_clean_asset_sha256") == records_sha,
+             "Train/validation noisy-clean assets changed after training-start evidence")
+    source_sha = sha256_file(initial_path)
+    payload = {
+        **initial,
+        "checkpoint_path": str(checkpoint_path.resolve()),
+        "checkpoint_sha256": sha256_file(checkpoint_path),
+        "manifest_sha256": manifest_sha,
+        "records": current_records,
+        "records_sha256": records_sha,
+        "train_val_noisy_clean_asset_sha256": records_sha,
+        "source_initial_evidence_file": initial_path.name,
+        "source_initial_evidence_path": str(initial_path.resolve()),
+        "source_initial_evidence_sha256": source_sha,
+        "completed_epochs": int(completed_epochs),
+        "selection_rule": selection_rule,
+        "test_assets_opened": 0,
+    }
+    write_strict_json_exclusive(output_path, payload)
+    return payload
+
+
+def audit_bound_training_asset_evidence(
+    evidence_path: Path,
+    checkpoint_sha256: str,
+    manifest_sha256: str,
+    current_records: list[dict],
+    selection_rule: str,
+    completed_epochs: int,
+) -> dict:
+    """Verify the bound file and its immutable training-start evidence chain."""
+    evidence = json.loads(evidence_path.read_text(encoding="utf-8-sig"))
+    _require(evidence.get("recorded_at_training") is True,
+             "Training asset inventory is not marked recorded_at_training")
+    _require(evidence.get("checkpoint_sha256") == checkpoint_sha256,
+             "Training asset inventory checkpoint SHA mismatch")
+    _require(evidence.get("manifest_sha256") == manifest_sha256,
+             "Training asset inventory manifest SHA mismatch")
+    _require(evidence.get("selection_rule") == selection_rule
+             and int(evidence.get("completed_epochs", -1)) == int(completed_epochs),
+             "Training asset inventory selection/budget mismatch")
+    source_name = evidence.get("source_initial_evidence_file")
+    _require(bool(source_name), "Training asset inventory lacks initial evidence chain")
+    source = evidence_path.parent / str(source_name)
+    _require(source.is_file(), "Training asset inventory initial evidence is missing")
+    _require(sha256_file(source) == evidence.get("source_initial_evidence_sha256"),
+             "Training-start evidence SHA mismatch")
+    initial = json.loads(source.read_text(encoding="utf-8-sig"))
+    _require(initial.get("recorded_at_training") is True
+             and initial.get("recorded_before_optimizer_step") is True,
+             "Initial evidence lacks pre-optimisation provenance")
+    records_sha = stable_sha(current_records)
+    for document, label in ((initial, "initial"), (evidence, "bound")):
+        _require(document.get("records") == current_records
+                 and document.get("records_sha256") == records_sha
+                 and document.get("train_val_noisy_clean_asset_sha256") == records_sha,
+                 f"{label} training asset records differ from current pixels")
+        _require(document.get("manifest_sha256") == manifest_sha256,
+                 f"{label} training asset manifest SHA mismatch")
+        _require(document.get("test_assets_opened") == 0,
+                 f"{label} training evidence does not prove sealed-test exclusion")
+    return evidence
+
+
 def formal_preflight(root: Path, checkpoint_path: str | None, lock_path: str | None,
                      split_contract: str | None, selection_rule: str | None,
                      training_asset_inventory: str | None = None) -> dict:
@@ -575,11 +789,16 @@ def formal_preflight(root: Path, checkpoint_path: str | None, lock_path: str | N
         pixel_sha = stable_sha(pixel_records)
         expected_pixel_sha = runtime.get("train_val_noisy_clean_asset_sha256")
         if training_asset_inventory:
-            evidence = json.loads(resolve(root, training_asset_inventory).read_text(encoding="utf-8-sig"))
-            _require(evidence.get("checkpoint_sha256") == report["checkpoint_sha256"]
-                     and evidence.get("manifest_sha256") == sha256_file(manifest)
-                     and evidence.get("recorded_at_training") is True, "Unbound/unhistorical pixel inventory")
-            _require(evidence.get("records") == pixel_records, "Training pixel inventory differs from current pixels")
+            evidence = audit_bound_training_asset_evidence(
+                resolve(root, training_asset_inventory),
+                checkpoint_sha256=report["checkpoint_sha256"],
+                manifest_sha256=sha256_file(manifest),
+                current_records=pixel_records,
+                selection_rule=str(selection_rule),
+                completed_epochs=report["d1_epoch"],
+            )
+            _require(resolve(root, evidence.get("checkpoint_path", "")) == cp,
+                     "Training asset inventory checkpoint path mismatch")
             expected_pixel_sha = evidence.get("train_val_noisy_clean_asset_sha256")
         _require(expected_pixel_sha == pixel_sha, "Historical D1 noisy/clean pixel fingerprint missing/mismatch; require immutable training evidence")
         labels = pd.read_csv(protocol_root / "label_inventory.csv", dtype=str).fillna("")

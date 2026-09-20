@@ -58,16 +58,33 @@ D1 只调用 checkpoint 的 `forward_denoise_only(noisy)`；clean/GT 不进入 D
 9. 必须有训练时留下的 noisy/clean 像素指纹。协议中的 dataset inventory SHA
    只是表指纹，不证明历史像素没变。缺失历史像素证据也阻塞，不追认、不自动重训。
 
-历史像素证据优先取 embedded config 的
-`runtime.train_val_noisy_clean_asset_sha256`。另一种输入是明确的
-`--training-asset-inventory`：**必须来自训练时保留的不可变记录**，JSON schema：
+历史像素证据优先取确实由旧训练流程嵌入 checkpoint 的
+`runtime.train_val_noisy_clean_asset_sha256`。不能在训练后补写该字段。另一种输入是明确的
+`--training-asset-inventory`：**必须来自训练开始时保留的不可变记录，并与训练结束的
+checkpoint 绑定**。只有单个 `recorded_at_training=true` 文件不构成证据链。
+
+新 D1 复现实验由 `training_asset_evidence.enabled: true` 显式启用；旧配置没有此键，
+行为不变。Trainer 在 DataLoader 完成 split/dataset/group/Subset 实际筛选后、优化器创建及
+首个 step 之前，以独占创建方式写 `training_asset_inventory_initial.json`。它只散列
+train/val 的 `image_path`、`clean_path`，不读取 test。固定 60 轮正常完成并保存
+`last.pth` 后，才独占创建 `training_asset_inventory_last.json`。绑定阶段要求初始文件存在、
+内容与当前像素及 manifest 一致、checkpoint epoch 等于完整预算；resume 或已有
+checkpoint/history 的目录不能启用该功能，因而不能给旧 checkpoint 事后补证。
+
+正式绑定文件的核心 schema 为：
 
 ```json
 {
   "recorded_at_training": true,
+  "recorded_before_optimizer_step": true,
   "checkpoint_sha256": "所选checkpoint的真实SHA",
   "manifest_sha256": "该run训练manifest的真实SHA",
+  "records_sha256": "records的stable_sha",
   "train_val_noisy_clean_asset_sha256": "records的stable_sha",
+  "source_initial_evidence_file": "training_asset_inventory_initial.json",
+  "source_initial_evidence_sha256": "初始证据文件SHA",
+  "completed_epochs": 60,
+  "selection_rule": "fixed_final",
   "records": [
     {"sample_id": "...", "split": "train", "column": "image_path", "sha256": "..."},
     {"sample_id": "...", "split": "train", "column": "clean_path", "sha256": "..."}
@@ -79,6 +96,13 @@ records 覆盖 D1 **实际筛选**的全部 train/val noisy/clean，按 `(sample
 排序；stable_sha 是 UTF-8、sort_keys=True、separators=(",",":"), ensure_ascii=False
 的标准 JSON SHA256。不能现在从当前像素生成这个文件并声称是历史证据。
 历史证据只有另一种字段/格式时，先审计真实性再做显式适配，不降低门禁。
+
+`configs/adaptive_denoising/d1_repro_pku37_v3_seed42.yaml` 继承旧 D1 模板，并在训练前
+读取旧正式 run 的 `resolved_config.yaml` 做逐项语义比较。忽略运行时派生字段后，必须且
+只能出现 `train.output_dir` 与整个显式 `training_asset_evidence` 配置两项差异；报告保存为
+`d1_reproduction_semantic_audit.json`。其余模型、loss、manifest、30/3 split、512×512、
+fixed normalization、AdamW/cosine、batch/accumulation、增强、seed 和 60 轮预算有任何差异
+都会在开始训练前阻塞。fixed-final 主分析不依赖 val PSNR 选模。
 
 pth 使用 trusted-local `torch.load(weights_only=False)`，不要对来源不明的文件使用。
 本轮没有修改历史 D1 Trainer 默认行为或给旧 checkpoint 回填指纹。
@@ -146,9 +170,38 @@ geometry SHA、源码内容指纹（包括未提交更改），并记录生成�
 
 ## 矩池云后续命令（本轮未执行）
 
-先同步本轮新增/修改的代码。本轮没有 commit/push，单纯 git pull 不会获得这些未提交文件。
+先同步包含本功能的 `feature/adaptive-denoising-dose-v1` 分支。
 下面所有变量必须由用户填写明确的实际路径，不是自动发现。建议 Python 3.10+，
 使用已验证的项目环境；CUDA 环境本地未验证。
+
+### 0. 复现带训练时资产证据的新 D1
+
+历史 D1 缺少训练时 noisy/clean pixel inventory，禁止补写。先确认旧正式
+`resolved_config.yaml`、active protocol lock 和当前 manifest 均存在；新配置会在创建模型和
+optimizer 前审计新旧配置，并要求实际 DataLoader 的 train/validation 位置严格等于 lock。
+
+```bash
+cd /mnt/SABIDS-Net
+set -euo pipefail
+test -f runs/current/d1_structure_pku37_v3_fold0_seed42/resolved_config.yaml
+test -f Manifests/pku37_binary_v3/active_protocol_lock.json
+test -f Manifests/pku37_binary_v3/train_denoise.csv
+test ! -e runs/adaptive_denoising/pku37_binary_v3/d1_repro_fold0_seed42
+python train.py \
+  --config configs/adaptive_denoising/d1_repro_pku37_v3_seed42.yaml
+```
+
+成功标准包括完整 60 轮、`last.pth` epoch=59，以及同一新 run 下同时存在：
+
+```text
+d1_reproduction_semantic_audit.json
+training_asset_inventory_initial.json
+training_asset_inventory_last.json
+```
+
+其中语义审计只能列出 `train.output_dir` 和 `training_asset_evidence` 两项差异；绑定文件
+的 checkpoint SHA 必须等于 `last.pth`。缺少初始证据、提前终止、manifest/像素变化或
+旧目录非空均为失败，不应通过 resume 或手工编辑 JSON 继续。
 
 ### 1. Formal audit
 
@@ -156,14 +209,12 @@ geometry SHA、源码内容指纹（包括未提交更改），并记录生成�
 cd /mnt/SABIDS-Net
 set -euo pipefail
 export CUBLAS_WORKSPACE_CONFIG=:4096:8
-export D1_CKPT='/替换为明确D1目录/best.pth'
+export D1_CKPT='runs/adaptive_denoising/pku37_binary_v3/d1_repro_fold0_seed42/last.pth'
 export SABIDS_PROTOCOL_LOCK='/替换为明确协议目录/active_protocol_lock.json'
 export SABIDS_SPLIT_CONTRACT='/替换为锁定的split_contract.yaml'
-export D1_SELECTION_RULE='best_validation_psnr'
-# 如果明确选择的是完整 last.pth，上面的规则同步改为 fixed_final；不可自动换权重。
-EVIDENCE_ARGS=()
-# 只有确实保存了训练时像素证据时才取消下一行注释；不要临时伪造历史记录。
-# EVIDENCE_ARGS=(--training-asset-inventory '/明确的历史training_asset_inventory.json')
+export D1_SELECTION_RULE='fixed_final'
+EVIDENCE_ARGS=(--training-asset-inventory \
+  'runs/adaptive_denoising/pku37_binary_v3/d1_repro_fold0_seed42/training_asset_inventory_last.json')
 PREFLIGHT_OUT="reports/adaptive_denoising/formal_$(date +%Y%m%d_%H%M%S)"
 python -B tools/audit_adaptive_denoising_baseline.py \
   --project-root . --mode formal \

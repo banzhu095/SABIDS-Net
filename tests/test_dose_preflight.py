@@ -132,6 +132,53 @@ def test_formal_pass_never_opens_sealed_assets(evidence, monkeypatch):
     assert result["d1_epoch"] == 60
 
 
+def test_formal_passes_new_bound_training_inventory(evidence):
+    e = evidence
+    cfg = copy.deepcopy(e["cfg"])
+    cfg["runtime"].pop("train_val_noisy_clean_asset_sha256")
+    rewrite_checkpoint(e, cfg)
+    filtered = e["joint"][e["joint"].split.isin(["train", "val"])]
+    initial = e["checkpoint"].parent / "training_asset_inventory_initial.json"
+    cfg["training_asset_evidence"] = {"enabled": True, "project_root": str(e["root"])}
+    dose.create_training_asset_evidence(e["root"], cfg, filtered, initial)
+    records = dose.asset_inventory(e["root"], filtered, False)
+    bound = e["checkpoint"].parent / "training_asset_inventory_last.json"
+    dose.bind_training_asset_evidence(
+        initial, bound, e["checkpoint"], Path(cfg["data"]["manifest"]),
+        records, completed_epochs=60, configured_epochs=60,
+    )
+    result = dose.formal_preflight(
+        e["root"], str(e["checkpoint"]), str(e["lock_path"]),
+        str(e["contract"]), "fixed_final", str(bound),
+    )
+    assert result["status"] == "passed", result
+
+
+def test_formal_rejects_forged_marker_without_initial_chain(evidence):
+    e = evidence
+    cfg = copy.deepcopy(e["cfg"])
+    cfg["runtime"].pop("train_val_noisy_clean_asset_sha256")
+    rewrite_checkpoint(e, cfg)
+    records = dose.asset_inventory(e["root"], e["joint"], False)
+    forged = e["checkpoint"].parent / "forged_inventory.json"
+    dose.write_strict_json(forged, {
+        "recorded_at_training": True,
+        "checkpoint_sha256": dose.sha256_file(e["checkpoint"]),
+        "manifest_sha256": dose.sha256_file(cfg["data"]["manifest"]),
+        "records": records,
+        "records_sha256": dose.stable_sha(records),
+        "train_val_noisy_clean_asset_sha256": dose.stable_sha(records),
+        "completed_epochs": 60,
+        "selection_rule": "fixed_final",
+    })
+    result = dose.formal_preflight(
+        e["root"], str(e["checkpoint"]), str(e["lock_path"]),
+        str(e["contract"]), "fixed_final", str(forged),
+    )
+    assert result["status"] == "blocked"
+    assert "initial evidence chain" in result["issues"][0]
+
+
 def test_dynamic_history_fixed_final_passes_but_best_psnr_fails_closed(evidence):
     history = evidence["checkpoint"].parent / "history.csv"
     write_dynamic_history(history)

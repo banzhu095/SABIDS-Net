@@ -48,7 +48,11 @@ from ..utils import (
     seed_everything,
     write_json,
 )
-from ..experiments.protocol_lock import validate_checkpoint_config
+from ..experiments.protocol_lock import (
+    CONSISTENCY_KEYS,
+    load_protocol_lock,
+    validate_checkpoint_config,
+)
 
 
 def _sha256_file(path: Path) -> str:
@@ -264,6 +268,18 @@ def build_model(config: Dict) -> SABIDSNet:
     )
 
 
+def _effective_dataset_table(dataset: object) -> pd.DataFrame:
+    """Return exactly the rows exposed by a dataset, including Subset filters."""
+    if isinstance(dataset, Subset):
+        base = _effective_dataset_table(dataset.dataset)
+        indices = [int(index) for index in dataset.indices]
+        return base.iloc[indices].reset_index(drop=True)
+    table = getattr(dataset, "table", None)
+    if not isinstance(table, pd.DataFrame):
+        raise TypeError("Training asset evidence requires a manifest-backed dataset")
+    return table.copy().reset_index(drop=True)
+
+
 class Trainer:
     def __init__(self, config: Dict):
         if config.get("dose_response", {}).get("enabled", False):
@@ -278,8 +294,12 @@ class Trainer:
         )
         self.output_dir = Path(config["train"].get("output_dir", "runs/sabids"))
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        self._training_asset_initial_path: Optional[Path] = None
+        self._training_asset_filtered: Optional[pd.DataFrame] = None
+        self._prepare_training_asset_evidence_config()
         self.train_loader, self.val_loader, self.train_sampler = build_loaders(config)
         self._record_run_inputs()
+        self._record_training_asset_evidence()
         if str(config.get("train", {}).get("stage", "")) in {"interaction", "input_segment"}:
             missing_labels = config.get("runtime", {}).get("missing_label_assets", [])
             if missing_labels:
@@ -459,6 +479,99 @@ class Trainer:
             )
         if self.monitor_denoise_drift:
             self._initialize_denoise_probe()
+
+    def _prepare_training_asset_evidence_config(self) -> None:
+        evidence_cfg = self.config.get("training_asset_evidence", {})
+        if not evidence_cfg.get("enabled", False):
+            return
+        if str(self.config.get("train", {}).get("stage", "")) != "denoise":
+            raise ValueError("training_asset_evidence is only valid for stage=denoise")
+        if self.config.get("train", {}).get("resume"):
+            raise ValueError(
+                "training_asset_evidence cannot be enabled retroactively on a resumed run"
+            )
+        existing_training = [
+            path.name
+            for path in (
+                self.output_dir / "last.pth",
+                self.output_dir / "best.pth",
+                self.output_dir / "history.csv",
+            )
+            if path.exists()
+        ]
+        if existing_training:
+            raise FileExistsError(
+                "Refusing retroactive training evidence for existing artifacts: "
+                + ", ".join(existing_training)
+            )
+        from sabids.experiments.dose_response import (
+            audit_d1_reproduction_config,
+            git_commit,
+            resolve,
+            write_strict_json_exclusive,
+        )
+        project_root = Path(evidence_cfg.get("project_root", ".")).expanduser().resolve()
+        if evidence_cfg.get("reference_resolved_config"):
+            epochs = int(self.config.get("train", {}).get("epochs", 0))
+            if self.config["train"].get("checkpoint_selection_rule") != "fixed_final_primary":
+                raise ValueError("Formal D1 reproduction requires fixed_final_primary")
+            if int(self.config["train"].get("fixed_epoch", -1)) != epochs:
+                raise ValueError("Formal D1 fixed_epoch must equal the configured budget")
+            if int(self.config["train"].get("early_stopping_patience", 0)) <= epochs:
+                raise ValueError("Formal D1 reproduction must not early-stop before fixed_final")
+            audit = audit_d1_reproduction_config(project_root, self.config)
+            write_strict_json_exclusive(
+                self.output_dir / "d1_reproduction_semantic_audit.json", audit
+            )
+        lock_value = evidence_cfg.get("protocol_lock")
+        if lock_value:
+            lock_path = resolve(project_root, lock_value)
+            lock = load_protocol_lock(lock_path)
+            for key in CONSISTENCY_KEYS:
+                configured = self.config.get(key)
+                if configured is not None and configured != lock[key]:
+                    raise ValueError(f"Training config {key} differs from protocol lock")
+            if self.config.get("protocol_id") != lock["protocol_id"]:
+                raise ValueError("Training config protocol_id differs from protocol lock")
+            self.config.setdefault("runtime", {})["active_protocol_lock"] = lock
+            self.config["runtime"]["active_protocol_lock_path"] = str(lock_path)
+        self.config.setdefault("runtime", {})["git_commit"] = git_commit(project_root)
+
+    def _record_training_asset_evidence(self) -> None:
+        evidence_cfg = self.config.get("training_asset_evidence", {})
+        if not evidence_cfg.get("enabled", False):
+            return
+        from sabids.experiments.dose_response import create_training_asset_evidence
+        train = _effective_dataset_table(self.train_loader.dataset)
+        val = _effective_dataset_table(self.val_loader.dataset)
+        filtered = pd.concat([train, val], ignore_index=True)
+        lock = self.config.get("runtime", {}).get("active_protocol_lock")
+        if lock:
+            train_groups = set(train["group_id"].astype(str).unique())
+            val_groups = set(val["group_id"].astype(str).unique())
+            if train_groups != set(lock["train_positions"]):
+                raise ValueError("Effective denoising train groups differ from protocol lock")
+            if val_groups != set(lock["validation_positions"]):
+                raise ValueError("Effective denoising validation groups differ from protocol lock")
+        self._training_asset_filtered = filtered
+        self._training_asset_initial_path = (
+            self.output_dir / "training_asset_inventory_initial.json"
+        )
+        project_root = Path(evidence_cfg.get("project_root", ".")).expanduser().resolve()
+        evidence = create_training_asset_evidence(
+            project_root, self.config, filtered, self._training_asset_initial_path
+        )
+        runtime = self.config.setdefault("runtime", {})
+        if runtime.get("manifest_sha256") != evidence["manifest_sha256"]:
+            raise RuntimeError("Training evidence manifest SHA differs from Trainer runtime")
+        if runtime.get("effective_split_sha256") != evidence["effective_split_sha256"]:
+            raise RuntimeError("Training evidence effective split differs from Trainer runtime")
+        runtime["train_val_noisy_clean_asset_sha256"] = evidence[
+            "train_val_noisy_clean_asset_sha256"
+        ]
+        runtime["training_asset_inventory_initial"] = str(
+            self._training_asset_initial_path.resolve()
+        )
 
     def _write_initialization_audit(self) -> None:
         """Fingerprint the exact post-load, pre-training state for paired runs."""
@@ -650,12 +763,16 @@ class Trainer:
         runtime["effective_groups"] = {}
         runtime["effective_rows"] = {}
         for role in ("train", "val"):
-            split = str(data_config.get(f"{role}_split", role))
-            part = table[table["split"].astype(str) == split]
-            configured_groups = data_config.get(f"{role}_groups")
-            if configured_groups:
-                allowed = {str(value) for value in configured_groups}
-                part = part[part["group_id"].astype(str).isin(allowed)]
+            if self.config.get("training_asset_evidence", {}).get("enabled", False):
+                loader = self.train_loader if role == "train" else self.val_loader
+                part = _effective_dataset_table(loader.dataset)
+            else:
+                split = str(data_config.get(f"{role}_split", role))
+                part = table[table["split"].astype(str) == split]
+                configured_groups = data_config.get(f"{role}_groups")
+                if configured_groups:
+                    allowed = {str(value) for value in configured_groups}
+                    part = part[part["group_id"].astype(str).isin(allowed)]
             runtime["effective_groups"][role] = sorted(
                 part["group_id"].astype(str).unique().tolist()
             )
@@ -1734,6 +1851,7 @@ class Trainer:
                 checkpoint_extra(-1),
             )
             print(f"Epoch 000 diagnostics: {epoch0}")
+        completed_epochs = int(self.start_epoch)
         for epoch in range(self.start_epoch, epochs):
             start = time.time()
             train_metrics = self.train_epoch(epoch)
@@ -1847,6 +1965,7 @@ class Trainer:
                 f"Epoch {epoch + 1:03d} | monitor={monitored:.5f} | "
                 f"best={self.best_metric:.5f} | bad_epochs={self.bad_epochs}"
             )
+            completed_epochs = epoch + 1
             if self.bad_epochs >= patience:
                 print("Early stopping triggered.")
                 break
@@ -1876,4 +1995,28 @@ class Trainer:
                 "notice": self.config["dose_response"].get("notice", "")})
             if changed_frozen or not changed_trainable:
                 raise RuntimeError("Dose path update check failed; see dose_training_metadata.json")
+        if self.config.get("training_asset_evidence", {}).get("enabled", False):
+            from sabids.experiments.dose_response import (
+                asset_inventory,
+                bind_training_asset_evidence,
+                resolve,
+            )
+            if self._training_asset_initial_path is None or self._training_asset_filtered is None:
+                raise RuntimeError("Training asset evidence was not created before optimisation")
+            evidence_cfg = self.config["training_asset_evidence"]
+            project_root = Path(evidence_cfg.get("project_root", ".")).expanduser().resolve()
+            data_root = resolve(project_root, self.config["data"].get("root") or project_root)
+            current_records = asset_inventory(
+                data_root, self._training_asset_filtered, include_labels=False
+            )
+            bind_training_asset_evidence(
+                self._training_asset_initial_path,
+                self.output_dir / "training_asset_inventory_last.json",
+                self.output_dir / "last.pth",
+                resolve(project_root, self.config["data"]["manifest"]),
+                current_records,
+                completed_epochs=completed_epochs,
+                configured_epochs=epochs,
+                selection_rule="fixed_final",
+            )
         self.writer.close()

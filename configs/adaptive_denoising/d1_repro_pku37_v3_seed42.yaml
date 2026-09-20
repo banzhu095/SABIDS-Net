@@ -1,0 +1,19 @@
+_base_: ../next_stage_v3/d1_structure_pku37_v3.yaml
+
+# Fresh reproduction only. This must not point at, resume, or overwrite the
+# historical runs/current D1 directory.
+device: cuda
+train:
+  output_dir: runs/adaptive_denoising/pku37_binary_v3/d1_repro_fold0_seed42
+  epochs: 60
+  early_stopping_patience: 61
+  resume: null
+
+training_asset_evidence:
+  enabled: true
+  project_root: .
+  protocol_lock: Manifests/pku37_binary_v3/active_protocol_lock.json
+  reference_resolved_config: runs/current/d1_structure_pku37_v3_fold0_seed42/resolved_config.yaml
+  allowed_semantic_differences:
+    - train.output_dir
+    - training_asset_evidence
