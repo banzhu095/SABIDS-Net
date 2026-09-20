@@ -11,7 +11,12 @@ from .workbook import highlight_group_best, write_workbook
 
 
 def _csv(path: Path) -> pd.DataFrame:
-    return pd.read_csv(path, low_memory=False) if path.is_file() else pd.DataFrame()
+    if not path.is_file():
+        return pd.DataFrame()
+    try:
+        return pd.read_csv(path, low_memory=False)
+    except pd.errors.EmptyDataError:
+        return pd.DataFrame()
 
 
 def _tissue(position: pd.DataFrame, tissue: str) -> pd.DataFrame:

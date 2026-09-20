@@ -15,6 +15,7 @@ from tools.denoise_result_review.image_io import decode_lossless, read_float01, 
 from tools.denoise_result_review.manifest_builder import build_asset_manifest, primary_seeds
 from tools.denoise_result_review.method_literature import implementation_summary, load_literature
 from tools.denoise_result_review.run_discovery import inspect_run
+from tools.denoise_result_review.roi_report import _csv
 from tools.denoise_result_review.workbook import write_workbook
 
 
@@ -102,3 +103,9 @@ def test_legacy_sample_id_recovery_rejects_ambiguous_exact_keys(tmp_path: Path):
     (run / "configs" / "inference_registry.yaml").write_text("methods:\n  bm3d_standard: {seed: 0}\n", encoding="utf-8")
     with pytest.raises(ValueError, match="ambiguous"):
         build_asset_manifest(run, "PKU37", "test", True, ["bm3d_standard"])
+
+
+def test_roi_report_accepts_empty_optional_csv(tmp_path: Path):
+    path = tmp_path / "roi_failures.csv"
+    path.write_text("", encoding="utf-8")
+    assert _csv(path).empty

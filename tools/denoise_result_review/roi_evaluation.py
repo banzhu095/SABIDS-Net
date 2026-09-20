@@ -89,7 +89,9 @@ def evaluate_rois(input_root: str | Path, registry_path: str | Path, output_root
     complete_formal_positions = formal_test and total_positions == 6 and selected_positions == total_positions
     bootstrap = position_bootstrap(position, complete_position_count=total_positions if complete_formal_positions else None)
     bootstrap.to_csv(metric_dir / "roi_bootstrap_confidence_intervals.csv", index=False)
-    pd.DataFrame(failures).to_csv(metric_dir / "roi_failures.csv", index=False)
+    pd.DataFrame(failures, columns=["roi_id", "sample_id", "method_id", "seed", "failure"]).to_csv(
+        metric_dir / "roi_failures.csv", index=False
+    )
     cnr_rows = []
     for (sample_id, method, seed), group in combined[combined.tissue.isin(["choroid_vessel", "choroid_stroma"])].groupby(["sample_id", "method_id", "seed"]):
         vessel_ids = group[group.tissue == "choroid_vessel"].roi_id.astype(str)
