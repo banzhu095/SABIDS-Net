@@ -444,6 +444,10 @@ def _normalise_reproduction_config(value: dict, root: Path) -> dict:
     train = normalised.get("train", {})
     if train.get("output_dir"):
         train["output_dir"] = str(resolve(root, train["output_dir"]))
+    # A historical run may record the checkpoint used to continue that same
+    # run.  A fresh reproduction must not resume it.  Compare this separately
+    # as run control, not as model/data/optimisation semantics.
+    train["resume"] = None
     return normalised
 
 
@@ -473,7 +477,19 @@ def audit_d1_reproduction_config(root: Path, cfg: dict) -> dict:
     _require(bool(reference_value), "D1 reproduction requires reference_resolved_config")
     reference_path = resolve(root, reference_value)
     _require(reference_path.is_file(), f"Missing reference D1 resolved config: {reference_path}")
-    reference = _normalise_reproduction_config(load_config(reference_path), root)
+    raw_reference = load_config(reference_path)
+    reference_resume = raw_reference.get("train", {}).get("resume")
+    candidate_resume = cfg.get("train", {}).get("resume")
+    operational_differences = []
+    if reference_resume != candidate_resume:
+        operational_differences.append({
+            "path": "train.resume",
+            "reference": reference_resume,
+            "candidate": candidate_resume,
+            "classification": "run_control_not_training_semantics",
+            "reason": "fresh reproduction must not resume the historical run",
+        })
+    reference = _normalise_reproduction_config(raw_reference, root)
     candidate = _normalise_reproduction_config(cfg, root)
     differences = _config_differences(reference, candidate)
     allowed = set(evidence_cfg.get("allowed_semantic_differences", []))
@@ -488,6 +504,10 @@ def audit_d1_reproduction_config(root: Path, cfg: dict) -> dict:
         "reference_resolved_config_sha256": sha256_file(reference_path),
         "allowed_semantic_differences": sorted(allowed),
         "semantic_differences": differences,
+        "operational_differences": operational_differences,
+        "protocol_lock_bindings": cfg.get("runtime", {}).get(
+            "training_asset_protocol_bindings", []
+        ),
         "test_assets_opened": 0,
     }
 

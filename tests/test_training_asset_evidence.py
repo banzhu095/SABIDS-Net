@@ -203,10 +203,12 @@ def test_reproduction_audit_allows_only_output_and_evidence_config(tmp_path):
     reference = _config(tmp_path, manifest)
     reference.pop("training_asset_evidence")
     reference["train"]["output_dir"] = str(tmp_path / "old_run")
+    reference["train"]["resume"] = str(tmp_path / "old_run" / "last.pth")
     reference_path = tmp_path / "old_resolved.yaml"
     save_config(reference, reference_path)
     candidate = copy.deepcopy(reference)
     candidate["train"]["output_dir"] = str(tmp_path / "new_run")
+    candidate["train"]["resume"] = None
     candidate["training_asset_evidence"] = {
         "enabled": True,
         "project_root": str(tmp_path),
@@ -220,6 +222,80 @@ def test_reproduction_audit_allows_only_output_and_evidence_config(tmp_path):
     assert {item["path"] for item in audit["semantic_differences"]} == {
         "train.output_dir", "training_asset_evidence"
     }
+    assert audit["operational_differences"] == [{
+        "path": "train.resume",
+        "reference": str(tmp_path / "old_run" / "last.pth"),
+        "candidate": None,
+        "classification": "run_control_not_training_semantics",
+        "reason": "fresh reproduction must not resume the historical run",
+    }]
     candidate["train"]["learning_rate"] = 9e-4
     with pytest.raises(ValueError, match="learning_rate"):
         dose.audit_d1_reproduction_config(tmp_path, candidate)
+
+
+def test_trainer_binds_stale_template_hashes_from_active_lock_before_audit(tmp_path):
+    manifest, _ = _assets(tmp_path)
+    reference = _config(tmp_path, manifest)
+    reference.pop("training_asset_evidence")
+    reference.update(
+        manifest_root="protocol",
+        data_plan_sha256="active-data",
+        label_inventory_sha256="active-label",
+    )
+    reference["train"].update(
+        output_dir=str(tmp_path / "old_run"),
+        resume=str(tmp_path / "old_run" / "last.pth"),
+        fixed_epoch=1,
+        checkpoint_selection_rule="fixed_final_primary",
+    )
+    reference_path = tmp_path / "old_resolved.yaml"
+    save_config(reference, reference_path)
+    lock = {
+        "protocol_id": "fixture",
+        "manifest_root": "protocol",
+        "data_plan_sha256": "active-data",
+        "label_inventory_sha256": "active-label",
+        "dataset_inventory_sha256": "active-dataset",
+        "split_contract_sha256": "active-contract",
+        "train_positions": ["group_0"],
+        "validation_positions": ["group_2"],
+        "sealed_test_positions": ["group_3"],
+        "input_resolution": [16, 16],
+        "normalization": "fixed",
+        "test_assets_opened": 0,
+    }
+    lock_path = tmp_path / "active_protocol_lock.json"
+    dose.write_strict_json(lock_path, lock)
+    candidate = copy.deepcopy(reference)
+    candidate.update(data_plan_sha256="stale-data", label_inventory_sha256="stale-label")
+    candidate["train"].update(
+        output_dir=str(tmp_path / "new_run"), resume=None, early_stopping_patience=2
+    )
+    candidate["training_asset_evidence"] = {
+        "enabled": True,
+        "project_root": str(tmp_path),
+        "protocol_lock": str(lock_path),
+        "reference_resolved_config": str(reference_path),
+        "allowed_semantic_differences": [
+            "train.output_dir", "training_asset_evidence"
+        ],
+    }
+    trainer = Trainer.__new__(Trainer)
+    trainer.config = candidate
+    trainer.output_dir = Path(candidate["train"]["output_dir"])
+    trainer.output_dir.mkdir(parents=True)
+    trainer._prepare_training_asset_evidence_config()
+    assert candidate["data_plan_sha256"] == "active-data"
+    assert candidate["label_inventory_sha256"] == "active-label"
+    report = json.loads(
+        (trainer.output_dir / "d1_reproduction_semantic_audit.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert {item["path"] for item in report["protocol_lock_bindings"]} == {
+        "data_plan_sha256", "label_inventory_sha256"
+    }
+    assert {item["path"] for item in report["semantic_differences"]} == {
+        "train.output_dir", "training_asset_evidence"
+    }

@@ -49,7 +49,6 @@ from ..utils import (
     write_json,
 )
 from ..experiments.protocol_lock import (
-    CONSISTENCY_KEYS,
     load_protocol_lock,
     validate_checkpoint_config,
 )
@@ -511,6 +510,30 @@ class Trainer:
             write_strict_json_exclusive,
         )
         project_root = Path(evidence_cfg.get("project_root", ".")).expanduser().resolve()
+        lock_value = evidence_cfg.get("protocol_lock")
+        if lock_value:
+            lock_path = resolve(project_root, lock_value)
+            lock = load_protocol_lock(lock_path)
+            if self.config.get("protocol_id") != lock["protocol_id"]:
+                raise ValueError("Training config protocol_id differs from protocol lock")
+            bindings = []
+            # The launch suite historically injected these values from the
+            # active lock into resolved configs. Reproduce that binding before
+            # semantic comparison instead of trusting stale template hashes.
+            for key in ("manifest_root", "data_plan_sha256", "label_inventory_sha256"):
+                previous = self.config.get(key)
+                current = lock[key]
+                if previous != current:
+                    bindings.append({"path": key, "configured": previous, "bound": current})
+                self.config[key] = current
+            if list(self.config["data"].get("target_size", [])) != list(lock["input_resolution"]):
+                raise ValueError("Training target_size differs from protocol lock")
+            if self.config["data"].get("normalization") != lock["normalization"]:
+                raise ValueError("Training normalization differs from protocol lock")
+            runtime = self.config.setdefault("runtime", {})
+            runtime["active_protocol_lock"] = lock
+            runtime["active_protocol_lock_path"] = str(lock_path)
+            runtime["training_asset_protocol_bindings"] = bindings
         if evidence_cfg.get("reference_resolved_config"):
             epochs = int(self.config.get("train", {}).get("epochs", 0))
             if self.config["train"].get("checkpoint_selection_rule") != "fixed_final_primary":
@@ -523,18 +546,6 @@ class Trainer:
             write_strict_json_exclusive(
                 self.output_dir / "d1_reproduction_semantic_audit.json", audit
             )
-        lock_value = evidence_cfg.get("protocol_lock")
-        if lock_value:
-            lock_path = resolve(project_root, lock_value)
-            lock = load_protocol_lock(lock_path)
-            for key in CONSISTENCY_KEYS:
-                configured = self.config.get(key)
-                if configured is not None and configured != lock[key]:
-                    raise ValueError(f"Training config {key} differs from protocol lock")
-            if self.config.get("protocol_id") != lock["protocol_id"]:
-                raise ValueError("Training config protocol_id differs from protocol lock")
-            self.config.setdefault("runtime", {})["active_protocol_lock"] = lock
-            self.config["runtime"]["active_protocol_lock_path"] = str(lock_path)
         self.config.setdefault("runtime", {})["git_commit"] = git_commit(project_root)
 
     def _record_training_asset_evidence(self) -> None:

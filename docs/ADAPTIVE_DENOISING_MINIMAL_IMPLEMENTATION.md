@@ -104,6 +104,13 @@ records 覆盖 D1 **实际筛选**的全部 train/val noisy/clean，按 `(sample
 fixed normalization、AdamW/cosine、batch/accumulation、增强、seed 和 60 轮预算有任何差异
 都会在开始训练前阻塞。fixed-final 主分析不依赖 val PSNR 选模。
 
+旧正式 run 可能由启动器写入 active-lock 的 data-plan/label-inventory SHA，也可能因中断
+续跑而在 resolved config 留下 `train.resume`。新复现会在语义审计前从显式 active lock
+绑定这些协议 SHA，并在报告的 `protocol_lock_bindings` 中保留模板旧值与绑定值；随后仍
+要求绑定后的身份与旧正式 resolved config 一致。`train.resume` 单列为
+`operational_differences`：新 run 必须为 null，绝不能加载旧 run 的模型、optimizer 或
+scheduler 状态；该差异不属于模型、数据、损失、优化器超参数或增强语义变化。
+
 pth 使用 trusted-local `torch.load(weights_only=False)`，不要对来源不明的文件使用。
 本轮没有修改历史 D1 Trainer 默认行为或给旧 checkpoint 回填指纹。
 
