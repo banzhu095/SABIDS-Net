@@ -1,0 +1,17 @@
+{
+  "seed": 42,
+  "validation_position_count": 3,
+  "all_metrics_finite": false,
+  "teacher_changed_parameter_count_zero": false,
+  "frozen_changed_parameter_count_zero": false,
+  "checkpoint_bindings_passed": false,
+  "alpha_zero_identity_passed": false,
+  "d2_task_improves_structure_endpoint_over_d1": false,
+  "no_structure_hallucination": false,
+  "psnr_above_noisy": false,
+  "at_least_two_of_three_positions_same_direction": false,
+  "not_driven_by_single_frame": false,
+  "fixed_final_and_predefined_best_direction_agree": false,
+  "dose_and_checkpoint_rules_frozen": false,
+  "numeric_endpoints": {}
+}

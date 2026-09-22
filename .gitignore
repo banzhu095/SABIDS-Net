@@ -47,7 +47,16 @@ dist/
 /lightning_logs/
 /tmp/
 /cache/adaptive_denoising/
-/reports/adaptive_denoising/
+/reports/adaptive_denoising/*
+!/reports/adaptive_denoising/d2/
+/reports/adaptive_denoising/d2/*
+!/reports/adaptive_denoising/d2/CHECKPOINT_BINDING.md
+!/reports/adaptive_denoising/d2/METRIC_DEFINITIONS.md
+!/reports/adaptive_denoising/d2/EXPERIMENT_MATRIX.md
+!/reports/adaptive_denoising/d2/SEED42_GATE.md
+!/reports/adaptive_denoising/d2/RESULTS_TABLE.csv
+!/reports/adaptive_denoising/d2/FAILURE_CASES.md
+!/reports/adaptive_denoising/d2/SUMMARY.md
 /third_party_external/
 /Downloaded_Denoise_Review/
 /ROI_Denoise_Analysis/

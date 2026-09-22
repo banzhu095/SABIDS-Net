@@ -30,6 +30,7 @@ from sabids.data.transforms import _resize_pad
 from sabids.experiments.protocol_lock import CONSISTENCY_KEYS, load_protocol_lock, sha256_file
 
 ALPHAS = (0.0, 0.25, 0.5, 0.75, 1.0, 1.25)
+DOSE_CURVES = ("oracle", "d1", "d2_pixel", "d2_task", "d2_last")
 VERSION = "dose-model-grid-v1"
 SMOKE_NOTICE = "NOT FOR SCIENTIFIC EVALUATION"
 REQUIRED_METADATA = (
@@ -100,6 +101,7 @@ def tensor_sha(tensor: torch.Tensor) -> str:
 def code_fingerprint(root: Path) -> str:
     # Include dirty source contents: HEAD alone cannot distinguish uncommitted fixes.
     paths = ["sabids/experiments/dose_response.py", "tools/prepare_dose_response_inputs.py",
+             "sabids/experiments/d2.py", "sabids/losses/d2.py",
              "sabids/data/dataset.py", "sabids/data/transforms.py",
              "sabids/engine/trainer.py", "sabids/losses/total.py", "configs/base.yaml",
              "configs/adaptive_denoising/dose_response_common.yaml",
@@ -150,8 +152,8 @@ def dose_input(noisy: np.ndarray, reference: np.ndarray, alpha: float,
                curve_type: str, valid: np.ndarray | None = None) -> tuple[np.ndarray, dict]:
     """reference is clean for oracle, CLIPPED forward_denoise_only for d1."""
     alpha_code(alpha)
-    if curve_type not in {"oracle", "d1"}:
-        raise ValueError("curve_type must be oracle or d1")
+    if curve_type not in DOSE_CURVES:
+        raise ValueError(f"curve_type must be one of {DOSE_CURVES}")
     x, target = _image(noisy), _image(reference)
     if x.shape != target.shape:
         raise ValueError("All inputs must use the same model grid")
@@ -177,7 +179,7 @@ def cache_key(metadata: dict) -> str:
     if missing:
         raise ValueError(f"Missing cache identity metadata: {missing}")
     alpha_code(metadata["alpha"])
-    if metadata["curve_type"] not in {"oracle", "d1"}:
+    if metadata["curve_type"] not in DOSE_CURVES:
         raise ValueError("Unknown curve type")
     keys = list(REQUIRED_METADATA) + [k for k in ("source_label_assets_sha256", "cache_content_role") if k in metadata]
     return stable_sha({k: metadata[k] for k in keys})
@@ -644,7 +646,8 @@ def audit_bound_training_asset_evidence(
 
 def formal_preflight(root: Path, checkpoint_path: str | None, lock_path: str | None,
                      split_contract: str | None, selection_rule: str | None,
-                     training_asset_inventory: str | None = None) -> dict:
+                     training_asset_inventory: str | None = None,
+                     checkpoint_binding: str | None = None) -> dict:
     """Validate protocol metadata first, then train/val pixels. Trusted local pth only."""
     report = {"mode": "formal", "status": "blocked", "issues": [],
               "test_assets_opened": 0, "test_evaluation_performed": False,
@@ -796,6 +799,8 @@ def formal_preflight(root: Path, checkpoint_path: str | None, lock_path: str | N
         )
         if selection_rule == "best_validation_psnr":
             _require(cp.name == "best.pth" and cfg["train"].get("monitor") == "psnr", "Not predeclared best PSNR checkpoint")
+            _require(bool(training_asset_inventory) and bool(checkpoint_binding),
+                     "Best checkpoint requires training-start inventory and derived binding")
             best_epoch = int(history_audit["best_epoch"])
             _require(report["d1_epoch"] == best_epoch, "Checkpoint epoch is not validation PSNR best (first tie)")
             metadata = json.loads((cp.parent / "run_metadata.json").read_text(encoding="utf-8-sig"))
@@ -809,17 +814,42 @@ def formal_preflight(root: Path, checkpoint_path: str | None, lock_path: str | N
         pixel_sha = stable_sha(pixel_records)
         expected_pixel_sha = runtime.get("train_val_noisy_clean_asset_sha256")
         if training_asset_inventory:
-            evidence = audit_bound_training_asset_evidence(
-                resolve(root, training_asset_inventory),
-                checkpoint_sha256=report["checkpoint_sha256"],
-                manifest_sha256=sha256_file(manifest),
-                current_records=pixel_records,
-                selection_rule=str(selection_rule),
-                completed_epochs=report["d1_epoch"],
-            )
-            _require(resolve(root, evidence.get("checkpoint_path", "")) == cp,
-                     "Training asset inventory checkpoint path mismatch")
-            expected_pixel_sha = evidence.get("train_val_noisy_clean_asset_sha256")
+            inventory_path = resolve(root, training_asset_inventory)
+            if selection_rule == "best_validation_psnr":
+                _require(bool(checkpoint_binding), "Best checkpoint requires explicit derived binding")
+                initial = json.loads(inventory_path.read_text(encoding="utf-8-sig"))
+                _require(initial.get("recorded_at_training") is True
+                         and initial.get("recorded_before_optimizer_step") is True,
+                         "Best checkpoint requires original training-start inventory")
+                _require(initial.get("manifest_sha256") == sha256_file(manifest)
+                         and initial.get("records") == pixel_records
+                         and initial.get("records_sha256") == pixel_sha
+                         and initial.get("train_val_noisy_clean_asset_sha256") == pixel_sha,
+                         "Best checkpoint initial inventory differs from current train/val pixels")
+                from sabids.experiments.d2 import audit_best_checkpoint_binding
+                binding = audit_best_checkpoint_binding(
+                    resolve(root, checkpoint_binding), cp, inventory_path, history_path,
+                    rp, cp.parent / "run_metadata.json", lp, contract_path,
+                )
+                _require(binding.get("checkpoint_epoch") == report["d1_epoch"]
+                         and binding.get("protocol_id") == lock["protocol_id"]
+                         and binding.get("effective_split_sha256") == effective,
+                         "Best checkpoint binding identity mismatch")
+                expected_pixel_sha = initial.get("train_val_noisy_clean_asset_sha256")
+                report["checkpoint_binding"] = str(resolve(root, checkpoint_binding))
+                report["checkpoint_binding_sha256"] = sha256_file(resolve(root, checkpoint_binding))
+            else:
+                evidence = audit_bound_training_asset_evidence(
+                    inventory_path,
+                    checkpoint_sha256=report["checkpoint_sha256"],
+                    manifest_sha256=sha256_file(manifest),
+                    current_records=pixel_records,
+                    selection_rule=str(selection_rule),
+                    completed_epochs=report["d1_epoch"],
+                )
+                _require(resolve(root, evidence.get("checkpoint_path", "")) == cp,
+                         "Training asset inventory checkpoint path mismatch")
+                expected_pixel_sha = evidence.get("train_val_noisy_clean_asset_sha256")
         _require(expected_pixel_sha == pixel_sha, "Historical D1 noisy/clean pixel fingerprint missing/mismatch; require immutable training evidence")
         labels = pd.read_csv(protocol_root / "label_inventory.csv", dtype=str).fillna("")
         for row in labels[labels.group_id.isin(set(development.group_id))].to_dict("records"):
@@ -903,8 +933,18 @@ def validate_dose_config(cfg: dict, require_fresh: bool = True) -> None:
     if cfg["dose_response"]["mode"] == "formal":
         _require(registry["preflight"]["status"] == "passed", "Dose registry preflight blocked")
         pf = registry["preflight"]
-        live = formal_preflight(root, pf["checkpoint_path"], pf["protocol_lock"],
-                                registry["split_contract"], pf["selection_rule"], registry.get("training_asset_inventory"))
+        if pf.get("restoration_mode") == "structure_d2":
+            from sabids.experiments.d2 import formal_d2_preflight
+            live = formal_d2_preflight(
+                root, resolve(root, pf["checkpoint_path"]),
+                resolve(root, registry["checkpoint_binding"]), pf["checkpoint_kind"],
+                resolve(root, pf["protocol_lock"]), resolve(root, registry["split_contract"]),
+            )
+        else:
+            live = formal_preflight(root, pf["checkpoint_path"], pf["protocol_lock"],
+                                    registry["split_contract"], pf["selection_rule"],
+                                    registry.get("training_asset_inventory"),
+                                    registry.get("checkpoint_binding"))
         _require(live["status"] == "passed", f"Live formal gate blocked: {live['issues']}")
         for key in ("checkpoint_sha256", "protocol_lock_sha256", "segmentation_manifest_sha256", "segmentation_asset_inventory"):
             _require(live[key] == pf[key], f"Live fingerprint drift: {key}")

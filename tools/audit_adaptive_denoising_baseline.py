@@ -52,6 +52,7 @@ def main() -> None:
     p.add_argument("--split-contract")
     p.add_argument("--selection-rule", choices=("best_validation_psnr", "fixed_final"))
     p.add_argument("--training-asset-inventory")
+    p.add_argument("--checkpoint-binding")
     p.add_argument("--mode", choices=("formal", "smoke"), default="formal")
     p.add_argument("--output", default="reports/adaptive_denoising/preflight_v1")
     a = p.parse_args()
@@ -62,7 +63,8 @@ def main() -> None:
                   "test_assets_opened": 0}
     else:
         result = formal_preflight(root, a.denoiser_checkpoint, a.protocol_lock,
-                                  a.split_contract, a.selection_rule, a.training_asset_inventory)
+                                  a.split_contract, a.selection_rule, a.training_asset_inventory,
+                                  a.checkpoint_binding)
     result["readonly_inventory"] = readonly_inventory(root)
     out = (root / a.output).resolve()
     if (root / "reports/adaptive_denoising").resolve() not in out.parents:

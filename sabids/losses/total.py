@@ -20,6 +20,7 @@ from .common import (
 )
 from .pseudo import build_dual_source_pseudo_labels, confidence_masked_bce
 from .rmac import rmac_loss
+from .d2 import D2StructureLoss
 
 
 def _zero(output: Dict[str, torch.Tensor]) -> torch.Tensor:
@@ -60,6 +61,11 @@ class SABIDSLoss(nn.Module):
             ),
             **common,
         )
+        self.d2_loss = (
+            D2StructureLoss(config.get("d2", {}))
+            if str(config.get("restoration_mode", "legacy")) == "structure_d2"
+            else None
+        )
 
     def _weight(self, name: str, default: float = 0.0) -> float:
         return float(self.weights.get(name, default))
@@ -82,7 +88,28 @@ class SABIDSLoss(nn.Module):
             char = charbonnier(prediction, target)
             ssim_term = multi_scale_ssim_loss(prediction, target)
             mode = str(self.config.get("restoration_mode", "legacy"))
-            if mode == "structure_d1":
+            if mode == "structure_d2":
+                assert self.d2_loss is not None
+                selected_batch = {
+                    key: (value[valid] if torch.is_tensor(value)
+                          and value.ndim > 0 and value.shape[0] == valid.shape[0] else value)
+                    for key, value in batch.items()
+                }
+                teacher = None
+                if "d2_teacher_layer_logits" in output:
+                    teacher = {
+                        "layer_logits": output["d2_teacher_layer_logits"][valid],
+                        "vessel_logits": output["d2_teacher_vessel_logits"][valid],
+                        "clean_layer_prob": output["d2_teacher_clean_layer_prob"][valid],
+                        "clean_vessel_prob": output["d2_teacher_clean_vessel_prob"][valid],
+                    }
+                d2 = self.d2_loss(
+                    prediction, batch["image"][valid].float(), target,
+                    selected_batch, teacher,
+                )
+                image = d2.pop("d2_total")
+                raw = d2
+            elif mode == "structure_d1":
                 grad = multiscale_gradient_loss(
                     prediction, target, float(self.config.get("structure_beta", 2.0))
                 )
@@ -108,11 +135,15 @@ class SABIDSLoss(nn.Module):
             edge = (
                 boundary_weight * (torch.abs(pred_gx - target_gx) + torch.abs(pred_gy - target_gy))
             ).mean()
-            if mode != "structure_d1":
+            if mode not in {"structure_d1", "structure_d2"}:
                 image = image + 0.1 * edge
 
             residual_target = batch["image"][valid].float() - target
-            residual = F.l1_loss(output["residual"][valid].float(), residual_target)
+            residual = (
+                prediction.sum() * 0.0
+                if mode == "structure_d2"
+                else F.l1_loss(output["residual"][valid].float(), residual_target)
+            )
         return image, residual, raw
 
     def _segmentation(

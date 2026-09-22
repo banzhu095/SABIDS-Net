@@ -1,5 +1,15 @@
 # SABIDS-Net project context
 
+## Opt-in D2 development path (2026-09-22)
+
+The `feature/structure-preserving-d2-v1` branch adds an experimental,
+independent D2 denoiser. It reuses the D1 architecture but adds modular
+train-label-only vessel ROI, boundary, local CNR, frozen-teacher task,
+identity/residual and structure-leakage objectives. It is not the established
+baseline and changes no legacy default. Size/contrast component thresholds are
+frozen from development-train labels. Seed 43/44 configuration is prohibited
+until the preregistered seed-42 gate passes.
+
 Last consolidated: 2026-08-28
 
 ## 1. Research objective

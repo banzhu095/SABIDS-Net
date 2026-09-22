@@ -1,0 +1,48 @@
+_base_: ../next_stage_v3/d1_structure_pku37_v3.yaml
+
+# Do not run this template directly. tools/prepare_d2_seed42.py binds the
+# evidence-checked D1 initialization, optional teacher, frozen strata and a
+# fresh output path before producing an executable config.
+device: cpu
+seed: 42
+model:
+  d2s_enabled: false
+  s2d_enabled: false
+  enable_denoise_to_seg: false
+  enable_seg_to_denoise: false
+data:
+  load_segmentation_labels: true
+train:
+  output_dir: runs/adaptive_denoising/DO_NOT_RUN_D2_TEMPLATE
+  pretrained: null
+  strict_pretrained: true
+  resume: null
+  checkpoint_selection_rule: d2_hierarchical_fixed_budget_v1
+loss:
+  definition_version: pku37-v3-d2-template-v1
+  restoration_mode: structure_d2
+  weights:
+    reconstruction: 1.0
+    residual: 0.0
+    identity: 0.0
+  d2:
+    boundary_width_pixels: 3
+    epsilon: 0.000001
+    cnr_error_cap: 5.0
+    structure_beta: 2.0
+    weights:
+      charbonnier: 1.0
+      ms_ssim: 0.2
+      gradient: 0.1
+      laplacian: 0.05
+d2:
+  enabled: true
+  template_only: true
+  selection:
+    rule: psnr_noninferiority_then_teacher
+    psnr_noninferiority_db: 0.2
+    tie_break: earliest_epoch
+    fixed_before_training: true
+  teacher:
+    enabled: false
+

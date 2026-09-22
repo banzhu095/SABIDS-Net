@@ -50,6 +50,26 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--p1-minimum-main-fraction", type=float, default=0.5)
     parser.add_argument("--p2-smoothness", type=float, default=2.0)
     parser.add_argument("--p2-max-displacement", type=int, default=8)
+    parser.add_argument(
+        "--vessel-strata-definition",
+        help="Frozen train-only D2 vessel-strata JSON; omitted for legacy evaluation.",
+    )
+    parser.add_argument(
+        "--evaluate-clean-identity", action="store_true",
+        help="Explicit denoising diagnostic: run the model on clean validation input.",
+    )
+    parser.add_argument(
+        "--d2-diagnostics", action="store_true",
+        help="Enable opt-in D2 vessel-ROI, residual leakage and hallucination metrics.",
+    )
+    parser.add_argument(
+        "--d2-checkpoint-kind", choices=("d2_pixel", "d2_task", "d2_last"),
+        help="Required explicit checkpoint identity for an opt-in D2 run.",
+    )
+    parser.add_argument(
+        "--d2-checkpoint-binding",
+        help="Required immutable binding JSON for an opt-in D2 checkpoint.",
+    )
     return parser.parse_args()
 
 
@@ -73,6 +93,20 @@ def main() -> None:
     device = get_device(config.get("device", "auto"))
     model = build_model(config).to(device)
     checkpoint = torch.load(args.checkpoint, map_location=device, **({"weights_only": False} if dose else {}))
+    if config.get("d2", {}).get("enabled", False):
+        if not args.d2_checkpoint_kind or not args.d2_checkpoint_binding:
+            raise ValueError("D2 evaluation requires explicit checkpoint kind and binding")
+        from sabids.experiments.d2 import audit_d2_checkpoint_binding
+        expected_binding_kind = {
+            "d2_pixel": "best_pixel",
+            "d2_task": "best_task_preserving",
+            "d2_last": "last",
+        }[args.d2_checkpoint_kind]
+        audit_d2_checkpoint_binding(
+            Path(args.d2_checkpoint_binding).expanduser().resolve(),
+            Path(args.checkpoint).expanduser().resolve(),
+            expected_binding_kind,
+        )
     if dose:
         import json
         from sabids.experiments.dose_response import sha256_file
@@ -119,6 +153,14 @@ def main() -> None:
         pin_memory=True,
     )
     evaluation = config.get("evaluation", {})
+    vessel_strata_definition = None
+    strata_path = args.vessel_strata_definition or evaluation.get("vessel_strata_definition")
+    if strata_path:
+        import json
+        resolved_strata = Path(strata_path).expanduser().resolve()
+        if not resolved_strata.is_file():
+            raise FileNotFoundError(f"Missing vessel strata definition: {resolved_strata}")
+        vessel_strata_definition = json.loads(resolved_strata.read_text(encoding="utf-8-sig"))
     default_threshold = float(evaluation.get("threshold", 0.5))
     summary = evaluate_model(
         model,
@@ -172,6 +214,9 @@ def main() -> None:
                         "checkpoint_sha256": sha256_file(args.checkpoint),
                         "checkpoint_epoch": checkpoint["epoch"] + 1,
                         "evaluation_checkpoint_kind": Path(args.checkpoint).name} if dose else None),
+        vessel_strata_definition=vessel_strata_definition,
+        evaluate_clean_identity=args.evaluate_clean_identity,
+        d2_diagnostics=args.d2_diagnostics,
     )
     print(summary)
 

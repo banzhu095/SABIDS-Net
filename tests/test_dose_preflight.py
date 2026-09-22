@@ -3,6 +3,8 @@ import csv
 import copy
 import hashlib
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -345,20 +347,168 @@ def test_segmentation_manifest_cannot_override_locked_cohort(evidence):
     assert "differs from locked data plan" in result["issues"][0]
 
 
-def test_best_selection_is_frozen_and_sha_bound(evidence):
-    e = evidence
+def _best_binding_sources(e):
+    cfg = copy.deepcopy(e["cfg"])
+    cfg["protocol_id"] = e["lock"]["protocol_id"]
+    cfg["runtime"]["git_commit"] = dose.git_commit(e["root"])
+    cfg["training_asset_evidence"] = {
+        "enabled": True, "project_root": str(e["root"])
+    }
+    save_config(cfg, e["checkpoint"].parent / "resolved_config.yaml")
     cp = e["checkpoint"].with_name("best.pth")
     raw = torch.load(e["checkpoint"], map_location="cpu", weights_only=False)
     raw["epoch"] = 2
+    raw["config"] = cfg
+    raw["best_metric"] = 32.0
+    raw["optimizer"] = {"state": {0: {"step": torch.tensor(3)}}, "param_groups": []}
+    raw["scheduler"] = {"last_epoch": 3}
     torch.save(raw, cp)
     pd.DataFrame([{"epoch": i, "val_psnr": 32. if i == 3 else 30.} for i in range(1, 61)]).to_csv(cp.parent / "history.csv", index=False)
-    dose.write_strict_json(cp.parent / "run_metadata.json", {"best_checkpoint_sha256": dose.sha256_file(cp)})
-    result = dose.formal_preflight(e["root"], str(cp), str(e["lock_path"]), str(e["contract"]), "best_validation_psnr")
+    dose.write_strict_json(cp.parent / "run_metadata.json", {
+        "best_checkpoint_sha256": dose.sha256_file(cp), "best_epoch": 3,
+        "monitor": "psnr", "best_metric": 32.0,
+        "best_checkpoint": str(cp.resolve()), "run_id": cp.parent.name,
+        "selection_rule": "best_validation_psnr",
+    })
+    filtered = e["joint"][e["joint"].split.isin(["train", "val"])]
+    initial = cp.parent / "training_asset_inventory_initial.json"
+    dose.create_training_asset_evidence(e["root"], cfg, filtered, initial)
+    return {
+        "config": cfg, "checkpoint": cp, "history": cp.parent / "history.csv",
+        "resolved": cp.parent / "resolved_config.yaml",
+        "metadata": cp.parent / "run_metadata.json", "initial": initial,
+        "binding": cp.parent / "checkpoint_binding_best.json",
+    }
+
+
+def test_best_selection_is_frozen_and_sha_bound(evidence):
+    e = evidence
+    sources = _best_binding_sources(e)
+    from sabids.experiments.d2 import bind_best_checkpoint_evidence
+    bind_best_checkpoint_evidence(
+        e["root"], sources["initial"], sources["checkpoint"], sources["history"],
+        sources["resolved"], sources["metadata"], e["lock_path"], e["contract"],
+        sources["binding"],
+    )
+    result = dose.formal_preflight(
+        e["root"], str(sources["checkpoint"]), str(e["lock_path"]), str(e["contract"]),
+        "best_validation_psnr", str(sources["initial"]), str(sources["binding"]),
+    )
     assert result["status"] == "passed", result
     assert result["history_schema_drift_detected"] is False
     assert result["history_row_width_distribution"] == {"2": 60}
     assert result["val_psnr_trusted"] is True
     assert result["selection_history_audit"]["best_epoch"] == 3
-    dose.write_strict_json(cp.parent / "run_metadata.json", {"best_checkpoint_sha256": "incorrect"})
-    result = dose.formal_preflight(e["root"], str(cp), str(e["lock_path"]), str(e["contract"]), "best_validation_psnr")
+    history_path = sources["history"]
+    original_history = history_path.read_bytes()
+    changed_bytes = original_history.replace(b"60,30.0", b"60,30.1")
+    assert changed_bytes != original_history
+    history_path.write_bytes(changed_bytes)
+    changed_history = dose.formal_preflight(
+        e["root"], str(sources["checkpoint"]), str(e["lock_path"]), str(e["contract"]),
+        "best_validation_psnr", str(sources["initial"]), str(sources["binding"]),
+    )
+    assert changed_history["status"] == "blocked"
+    assert "source changed: history" in changed_history["issues"][0]
+    history_path.write_bytes(original_history)
+    dose.write_strict_json(sources["metadata"], {
+        "best_checkpoint_sha256": "incorrect", "best_epoch": 3,
+        "monitor": "psnr", "best_metric": 32.0,
+        "best_checkpoint": str(sources["checkpoint"].resolve()),
+        "run_id": sources["checkpoint"].parent.name,
+        "selection_rule": "best_validation_psnr",
+    })
+    result = dose.formal_preflight(
+        e["root"], str(sources["checkpoint"]), str(e["lock_path"]), str(e["contract"]),
+        "best_validation_psnr", str(sources["initial"]), str(sources["binding"]),
+    )
     assert result["status"] == "blocked" and "provenance SHA" in result["issues"][0]
+
+
+@pytest.mark.parametrize("failure,match", [
+    ("checkpoint_sha", "checkpoint SHA"),
+    ("history_best_epoch", "epoch differs"),
+    ("checkpoint_epoch", "epoch differs"),
+    ("run_id", "run ID"),
+    ("data_plan", "data_plan_sha256"),
+    ("selection_rule", "selection rule"),
+    ("missing_initial", "Missing binding source initial_inventory"),
+    ("overwritten_best", "checkpoint SHA"),
+])
+def test_best_binding_fail_closed_for_each_provenance_break(evidence, failure, match):
+    from sabids.experiments.d2 import bind_best_checkpoint_evidence
+    e = evidence
+    sources = _best_binding_sources(e)
+    if failure in {"checkpoint_sha", "overwritten_best"}:
+        raw = torch.load(sources["checkpoint"], map_location="cpu", weights_only=False)
+        raw["tampered_after_training"] = True
+        torch.save(raw, sources["checkpoint"])
+    elif failure == "history_best_epoch":
+        pd.DataFrame([
+            {"epoch": i, "val_psnr": 32.0 if i == 4 else 30.0}
+            for i in range(1, 61)
+        ]).to_csv(sources["history"], index=False)
+    elif failure == "checkpoint_epoch":
+        raw = torch.load(sources["checkpoint"], map_location="cpu", weights_only=False)
+        raw["epoch"] = 3
+        torch.save(raw, sources["checkpoint"])
+        metadata = json.loads(sources["metadata"].read_text())
+        metadata["best_checkpoint_sha256"] = dose.sha256_file(sources["checkpoint"])
+        dose.write_strict_json(sources["metadata"], metadata)
+    elif failure == "run_id":
+        metadata = json.loads(sources["metadata"].read_text())
+        metadata["run_id"] = "different_run"
+        dose.write_strict_json(sources["metadata"], metadata)
+    elif failure == "data_plan":
+        lock = json.loads(e["lock_path"].read_text())
+        lock["data_plan_sha256"] = "different"
+        dose.write_strict_json(e["lock_path"], lock)
+    elif failure == "selection_rule":
+        metadata = json.loads(sources["metadata"].read_text())
+        metadata["selection_rule"] = "fixed_final"
+        dose.write_strict_json(sources["metadata"], metadata)
+    elif failure == "missing_initial":
+        sources["initial"].unlink()
+    with pytest.raises(ValueError, match=match):
+        bind_best_checkpoint_evidence(
+            e["root"], sources["initial"], sources["checkpoint"], sources["history"],
+            sources["resolved"], sources["metadata"], e["lock_path"], e["contract"],
+            sources["binding"],
+        )
+
+
+def test_teacher_audit_derives_selection_and_training_cohort_identity(evidence):
+    e = evidence
+    run = e["root"] / "teacher_run"
+    run.mkdir()
+    config = copy.deepcopy(e["cfg"])
+    config["protocol_id"] = e["lock"]["protocol_id"]
+    config["train"].update(
+        stage="segment", monitor="vessel_soft_dice", output_dir=str(run)
+    )
+    resolved = run / "resolved_config.yaml"
+    save_config(config, resolved)
+    checkpoint = run / "best.pth"
+    torch.save({
+        "model": build_model(config).state_dict(), "config": config,
+        "epoch": 2, "best_metric": .75,
+    }, checkpoint)
+    dose.write_strict_json(run / "run_metadata.json", {
+        "best_checkpoint_sha256": dose.sha256_file(checkpoint),
+        "best_checkpoint": str(checkpoint.resolve()),
+        "best_epoch": 3, "monitor": "vessel_soft_dice", "best_metric": .75,
+    })
+    output = run / "teacher_evidence.json"
+    process = subprocess.run([
+        sys.executable, str(ROOT / "tools/audit_d2_teacher.py"),
+        "--project-root", str(e["root"]), "--checkpoint", str(checkpoint),
+        "--resolved-config", str(resolved), "--protocol-lock", str(e["lock_path"]),
+        "--output", str(output),
+    ], cwd=ROOT, capture_output=True, text=True)
+    assert process.returncode == 0, process.stderr
+    result = json.loads(output.read_text(encoding="utf-8"))
+    assert result["selection_rule"] == "best_validation_vessel_soft_dice"
+    assert result["training_data"].startswith("teacher-development-cohort:")
+    assert result["train_groups"] == ["pku_0001"]
+    assert result["validation_groups"] == ["pku_0002"]
+    assert result["test_assets_opened"] == 0

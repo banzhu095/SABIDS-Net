@@ -11,6 +11,7 @@ from torch.utils.data import DataLoader
 from sabids.data.dataset import OCTManifestDataset
 from sabids.data.transforms import JointOCTTransform, _resize_pad
 from sabids.engine.evaluator import evaluate_model
+from sabids.experiments.d2 import derive_vessel_strata
 from sabids.experiments.dose_response import to_model_grid
 
 
@@ -98,6 +99,38 @@ def test_model_grid_refuses_original_restoration(tmp_path):
                        model_grid_contract=True, restore_original_geometry=True, tasks=("layer", "vessel"))
 
 
+def test_opt_in_d2_diagnostics_write_region_and_frozen_strata_csv(tmp_path):
+    dataset, grid = dataset_fixture(tmp_path)
+    definition = derive_vessel_strata([{
+        "split": "train", "vessel": grid["vessel"].astype(bool),
+        "layer": grid["layer"].astype(bool), "valid": grid["spatial_valid"].astype(bool),
+        "noisy": grid["noisy"], "clean": grid["clean"],
+    }])
+
+    class FixedDenoiser(torch.nn.Module):
+        def forward_denoise_only(self, image):
+            denoised = torch.clamp(image * .9, 0, 1)
+            return {"denoised": denoised, "denoised_raw": denoised}
+
+    output = tmp_path / "d2_diagnostics"
+    summary = evaluate_model(
+        FixedDenoiser(), DataLoader(dataset, batch_size=1), torch.device("cpu"),
+        output_dir=output, stage="denoise", tasks=("denoise",),
+        postprocess_modes=("p0",), restore_original_geometry=False,
+        d2_diagnostics=True, vessel_strata_definition=definition,
+    )
+    assert summary["n_frames"] == 1
+    leakage = pd.read_csv(output / "structure_leakage_metrics.csv")
+    for column in (
+        "residual_vessel_mean_abs", "residual_vessel_boundary_mean_abs",
+        "residual_small_vessel_mean_abs", "residual_low_contrast_vessel_mean_abs",
+        "residual_small_low_contrast_vessel_mean_abs",
+        "residual_layer_stroma_mean_abs", "residual_layer_outside_mean_abs",
+    ):
+        assert column in leakage
+    assert not (output / "component_metrics.csv").exists()
+
+
 def test_explicit_augmentation_plan_applied_without_global_rng(tmp_path):
     dataset, grid = dataset_fixture(tmp_path)
     dataset.transform.training = True
@@ -159,6 +192,19 @@ def test_preparation_reuse_is_exact_and_drift_rejected(prepared_project):
     with pytest.raises(FileExistsError, match="identity mismatch"):
         prepare(root, result["preflight"], curves=["oracle", "d1"], alphas=[0., .75], seeds=[42],
                 budget="smoke", tag="unit_fixture", device_name="cpu")
+
+
+def test_d2_curve_type_is_written_explicitly_in_generated_config(prepared_project):
+    from sabids.config import load_config
+    from tools.prepare_dose_response_inputs import prepare
+    root, result = prepared_project
+    prepared = prepare(
+        root, result["preflight"], curves=["d2_task"], alphas=[0.], seeds=[42],
+        budget="smoke", tag="d2_curve_fixture", device_name="cpu",
+    )
+    config = load_config(prepared["configs"][0])
+    assert config["dose_response"]["curve_type"] == "d2_task"
+    assert config["dose_response"]["alpha"] == 0.0
 
 
 @pytest.mark.parametrize("key", ["auxiliary", "interaction", "pretrained", "existing_output", "unknown_cache"])

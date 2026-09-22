@@ -334,6 +334,9 @@ class Trainer:
                 config.get("model", {}).get("stage2_train_denoise_to_seg", False)
             ),
         )
+        self.d2_teacher: Optional[SABIDSNet] = None
+        self._d2_teacher_initial_sha: Dict[str, str] = {}
+        self._setup_d2_teacher()
         self.loss_fn = SABIDSLoss(config["loss"]).to(self.device)
         memory_safe_joint = bool(
             config["train"].get("memory_safe_joint", True)
@@ -479,6 +482,123 @@ class Trainer:
         if self.monitor_denoise_drift:
             self._initialize_denoise_probe()
 
+    def _setup_d2_teacher(self) -> None:
+        d2_cfg = self.config.get("d2", {})
+        if not d2_cfg.get("enabled", False):
+            return
+        if d2_cfg.get("template_only", False):
+            raise ValueError("D2 template is not executable; use tools/prepare_d2_seed42.py")
+        if self.config.get("train", {}).get("stage") != "denoise":
+            raise ValueError("D2 is only supported with train.stage=denoise")
+        if self.config.get("loss", {}).get("restoration_mode") != "structure_d2":
+            raise ValueError("D2 requires loss.restoration_mode=structure_d2")
+        if self.config.get("train", {}).get("resume"):
+            raise ValueError("D2 registered runs must start fresh; resume is not supported")
+        if not self.config.get("data", {}).get("load_segmentation_labels", False):
+            raise ValueError("D2 requires explicit train/val segmentation label loading")
+        teacher_cfg = d2_cfg.get("teacher", {})
+        if not teacher_cfg.get("enabled", False):
+            if any(float(self.config.get("loss", {}).get("d2", {}).get("weights", {}).get(key, 0.0)) > 0
+                   for key in ("teacher_task", "teacher_consistency")):
+                raise ValueError("D2 teacher loss is nonzero but no teacher is enabled")
+            write_json({
+                "status": "not_applicable",
+                "enabled": False,
+                "reason": "This registered D2 ablation has no teacher objective",
+                "requires_grad_parameter_count": 0,
+                "changed_parameter_count": 0,
+                "test_assets_opened": 0,
+            }, self.output_dir / "teacher_audit.json")
+            return
+        checkpoint_value = teacher_cfg.get("checkpoint")
+        expected_sha = teacher_cfg.get("sha256")
+        evidence_value = teacher_cfg.get("evidence")
+        evidence_sha = teacher_cfg.get("evidence_sha256")
+        if not checkpoint_value or not expected_sha or not evidence_value or not evidence_sha:
+            raise ValueError("D2 teacher checkpoint, evidence and frozen SHA256 values are required")
+        checkpoint_path = Path(checkpoint_value).expanduser().resolve()
+        if not checkpoint_path.is_file():
+            raise FileNotFoundError(f"Missing D2 segmentation teacher: {checkpoint_path}")
+        actual_sha = _sha256_file(checkpoint_path)
+        if actual_sha != expected_sha:
+            raise ValueError("D2 segmentation teacher SHA256 mismatch")
+        evidence_path = Path(evidence_value).expanduser().resolve()
+        if not evidence_path.is_file() or _sha256_file(evidence_path) != evidence_sha:
+            raise ValueError("D2 segmentation teacher evidence missing or changed")
+        evidence = json.loads(evidence_path.read_text(encoding="utf-8-sig"))
+        bound_teacher_sha = evidence.get("checkpoint_sha256") or evidence.get("best_checkpoint_sha256")
+        if (bound_teacher_sha != actual_sha
+                or evidence.get("status", "passed") not in {"passed", "completed"}
+                or int(evidence.get("test_assets_opened", -1)) != 0
+                or evidence.get("selection_rule") != teacher_cfg.get("selection_rule")
+                or evidence.get("training_data") != teacher_cfg.get("training_data")
+                or evidence.get("split") != teacher_cfg.get("split")):
+            raise ValueError("D2 teacher evidence binds a different checkpoint")
+        raw = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+        if not isinstance(raw, dict) or not raw.get("config") or not raw.get("model"):
+            raise ValueError("D2 teacher checkpoint lacks model/config provenance")
+        teacher_config = raw["config"]
+        expected_protocol = self.config.get("runtime", {}).get("active_protocol_lock", {})
+        if expected_protocol:
+            validate_checkpoint_config(raw, expected_protocol, "D2 segmentation teacher")
+        # Teacher presence must not consume the D2 model/data RNG streams and
+        # thereby confound paired D20/D24/D25 comparisons.
+        cpu_rng_state = torch.get_rng_state()
+        cuda_rng_states = torch.cuda.get_rng_state_all() if self.device.type == "cuda" else None
+        try:
+            teacher = build_model(teacher_config).to(self.device)
+            teacher.load_state_dict(raw["model"], strict=True)
+        finally:
+            torch.set_rng_state(cpu_rng_state)
+            if cuda_rng_states is not None:
+                torch.cuda.set_rng_state_all(cuda_rng_states)
+        teacher.eval()
+        for parameter in teacher.parameters():
+            parameter.requires_grad_(False)
+        if any(id(left) == id(right) for left in self.model.parameters() for right in teacher.parameters()):
+            raise RuntimeError("D2 and segmentation teacher unexpectedly share parameters")
+        from sabids.experiments.dose_response import tensor_sha
+        self.d2_teacher = teacher
+        self._d2_teacher_initial_sha = {
+            name: tensor_sha(parameter) for name, parameter in teacher.named_parameters()
+        }
+        write_json({
+            "status": "passed",
+            "checkpoint": str(checkpoint_path),
+            "checkpoint_sha256": actual_sha,
+            "selection_rule": teacher_cfg.get("selection_rule"),
+            "training_data": teacher_cfg.get("training_data"),
+            "split": teacher_cfg.get("split"),
+            "evidence": str(evidence_path),
+            "evidence_sha256": evidence_sha,
+            "parameter_count": sum(parameter.numel() for parameter in teacher.parameters()),
+            "requires_grad_parameter_count": sum(
+                parameter.numel() for parameter in teacher.parameters() if parameter.requires_grad
+            ),
+            "shares_parameter_objects_with_d2": False,
+            "test_assets_opened": 0,
+        }, self.output_dir / "teacher_audit.json")
+
+    def _attach_d2_teacher_outputs(
+        self, output: Dict[str, torch.Tensor], batch: Dict[str, torch.Tensor]
+    ) -> None:
+        if self.d2_teacher is None:
+            return
+        self.d2_teacher.eval()
+        teacher_prediction = self.d2_teacher(
+            output["denoised_raw"], return_features=False, return_auxiliary=False
+        )
+        with torch.no_grad():
+            teacher_clean = self.d2_teacher(
+                batch["clean"], return_features=False, return_auxiliary=False
+            )
+        output.update({
+            "d2_teacher_layer_logits": teacher_prediction["layer_logits"],
+            "d2_teacher_vessel_logits": teacher_prediction["vessel_logits"],
+            "d2_teacher_clean_layer_prob": teacher_clean["layer_prob"],
+            "d2_teacher_clean_vessel_prob": teacher_clean["vessel_prob"],
+        })
+
     def _prepare_training_asset_evidence_config(self) -> None:
         evidence_cfg = self.config.get("training_asset_evidence", {})
         if not evidence_cfg.get("enabled", False):
@@ -560,10 +680,19 @@ class Trainer:
         if lock:
             train_groups = set(train["group_id"].astype(str).unique())
             val_groups = set(val["group_id"].astype(str).unique())
-            if train_groups != set(lock["train_positions"]):
-                raise ValueError("Effective denoising train groups differ from protocol lock")
-            if val_groups != set(lock["validation_positions"]):
-                raise ValueError("Effective denoising validation groups differ from protocol lock")
+            d2_run_mode = self.config.get("d2", {}).get("run_mode")
+            partial_diagnostic = d2_run_mode in {"smoke", "overfit"}
+            if partial_diagnostic:
+                if not train_groups <= set(lock["train_positions"]):
+                    raise ValueError("D2 diagnostic train groups exceed the locked development train cohort")
+                if not val_groups <= set(lock["validation_positions"]):
+                    raise ValueError("D2 diagnostic validation groups exceed the locked validation cohort")
+                self.config.setdefault("runtime", {})["partial_protocol_diagnostic"] = True
+            else:
+                if train_groups != set(lock["train_positions"]):
+                    raise ValueError("Effective denoising train groups differ from protocol lock")
+                if val_groups != set(lock["validation_positions"]):
+                    raise ValueError("Effective denoising validation groups differ from protocol lock")
         self._training_asset_filtered = filtered
         self._training_asset_initial_path = (
             self.output_dir / "training_asset_inventory_initial.json"
@@ -877,6 +1006,12 @@ class Trainer:
                 _sha256_file(best_checkpoint) if best_checkpoint.is_file() else None
             ),
         }
+        if (self.config.get("training_asset_evidence", {}).get("enabled", False)
+                or self.config.get("d2", {}).get("enabled", False)):
+            metadata.update({
+                "run_id": self.output_dir.name,
+                "selection_rule": f"best_validation_{monitor}",
+            })
         write_json(metadata, self.output_dir / "run_metadata.json")
 
     @torch.no_grad()
@@ -1053,6 +1188,8 @@ class Trainer:
     def train_epoch(self, epoch: int) -> Dict[str, float]:
         self.model.train()
         self.model.enforce_frozen_eval()
+        if self.d2_teacher is not None:
+            self.d2_teacher.eval()
         if self.phase_machine is not None:
             self.phase_machine.record_epoch_phase(epoch)
             PhaseStateMachine.set_trainable(self.model, self.phase_machine.phase(epoch))
@@ -1156,6 +1293,7 @@ class Trainer:
                            if self.config.get("dose_response", {}).get("enabled", False) else {}),
                     )
                 )
+                self._attach_d2_teacher_outputs(output, batch)
                 losses = self.loss_fn(
                     output,
                     batch,
@@ -1463,6 +1601,19 @@ class Trainer:
             progress.set_postfix(loss=totals["total"] / steps)
             del output, repeat_output, clean_output, teacher_output, losses
         result = {key: value / max(steps, 1) for key, value in totals.items()}
+        if self.d2_teacher is not None:
+            from sabids.experiments.dose_response import tensor_sha
+            changed = [
+                name for name, parameter in self.d2_teacher.named_parameters()
+                if tensor_sha(parameter) != self._d2_teacher_initial_sha[name]
+            ]
+            result["teacher_changed_parameter_count"] = float(len(changed))
+            result["teacher_requires_grad_parameter_count"] = float(sum(
+                parameter.numel() for parameter in self.d2_teacher.parameters()
+                if parameter.requires_grad
+            ))
+            if changed or result["teacher_requires_grad_parameter_count"]:
+                raise RuntimeError(f"Frozen D2 teacher audit failed: {changed[:5]}")
         for key, count in diagnostic_counts.items():
             result[key] = totals[key] / max(count, 1)
         result.update(
@@ -1623,6 +1774,15 @@ class Trainer:
                 return_auxiliary=False,
                 interaction_guidance_image=batch.get("interaction_guidance", batch["image"]).to(self.device, non_blocking=True),
             )
+            d2_teacher_layer_probability = None
+            d2_teacher_vessel_probability = None
+            if self.d2_teacher is not None:
+                self.d2_teacher.eval()
+                teacher_prediction = self.d2_teacher(
+                    output["denoised"], return_features=False, return_auxiliary=False
+                )
+                d2_teacher_layer_probability = teacher_prediction["layer_prob"].cpu().numpy()
+                d2_teacher_vessel_probability = teacher_prediction["vessel_prob"].cpu().numpy()
             d2s_disabled_vessel_probability = None
             if bool(self.config["train"].get("monitor_d2s_sensitivity", False)):
                 interactions = list(evaluation_model.interactions.values())
@@ -1652,6 +1812,7 @@ class Trainer:
             layer = layer_probability >= layer_threshold
             vessel = vessel_probability >= vessel_threshold
             for index, group_id in enumerate(batch["group_id"]):
+                d2_task_scores = []
                 group_sample_ids[str(group_id)].append(
                     str(batch["sample_id"][index])
                 )
@@ -1683,11 +1844,19 @@ class Trainer:
                             layer_probability[index, 0], target, valid
                         )
                     )
+                    if d2_teacher_layer_probability is not None:
+                        d2_task_scores.append(soft_dice_score(
+                            d2_teacher_layer_probability[index, 0], target, valid
+                        ))
                 if bool(batch["has_vessel"][index]):
                     target = batch["vessel_mask"][index, 0].numpy() > 0.5
                     vessel_valid = valid & (
                         batch["vessel_valid_mask"][index, 0].numpy() > 0.5
                     )
+                    if d2_teacher_vessel_probability is not None:
+                        d2_task_scores.append(soft_dice_score(
+                            d2_teacher_vessel_probability[index, 0], target, vessel_valid
+                        ))
                     if d2s_disabled_vessel_probability is not None:
                         group_values[group_id][
                             "d2s_disabled_vessel_soft_dice"
@@ -1734,6 +1903,10 @@ class Trainer:
                                 vessel_valid,
                             )
                         )
+                if d2_task_scores:
+                    group_values[group_id]["teacher_task_preservation"].append(
+                        float(np.mean(d2_task_scores))
+                    )
                 if bool(batch["has_clean"][index]) and not self.config.get("dose_response", {}).get("enabled", False):
                     prediction = output["denoised"][index, 0].cpu().numpy()
                     target = batch["clean"][index, 0].numpy()
@@ -1813,10 +1986,16 @@ class Trainer:
             f"stopgrad_repeat={self.config['train'].get('stopgrad_repeat_teacher', True)}"
         )
         diagnostics_dir = self.output_dir / "diagnostics"
+        d2_selection_rows: list[dict] = []
+
+        d2_global_optimizer_step = 0
 
         def checkpoint_extra(epoch_index: int) -> Dict:
             if self.phase_machine is None:
-                return {"phase_state": None}
+                extra = {"phase_state": None}
+                if self.config.get("d2", {}).get("enabled", False):
+                    extra["global_optimizer_step"] = int(d2_global_optimizer_step)
+                return extra
             state = self.phase_machine.snapshot(epoch_index)
             state["batch_plan_state"].update({
                 "train_loader_generator_state": (
@@ -1832,7 +2011,10 @@ class Trainer:
                 name for name, parameter in self.model.named_parameters()
                 if parameter.requires_grad
             ]
-            return {"phase_state": state}
+            extra = {"phase_state": state}
+            if self.config.get("d2", {}).get("enabled", False):
+                extra["global_optimizer_step"] = int(d2_global_optimizer_step)
+            return extra
 
         if self.start_epoch == 0 and bool(
             self.config["train"].get("evaluate_epoch0", False)
@@ -1866,6 +2048,8 @@ class Trainer:
         for epoch in range(self.start_epoch, epochs):
             start = time.time()
             train_metrics = self.train_epoch(epoch)
+            if self.config.get("d2", {}).get("enabled", False):
+                d2_global_optimizer_step += int(train_metrics.get("optimizer_steps", 0))
             epoch_number = epoch + 1
             val_metrics = self.validate(
                 group_output=diagnostics_dir
@@ -1957,6 +2141,22 @@ class Trainer:
                 ema_state,
                 checkpoint_state,
             )
+            if self.config.get("d2", {}).get("enabled", False):
+                if "psnr" not in val_metrics or "teacher_task_preservation" not in val_metrics:
+                    if self.d2_teacher is not None:
+                        raise RuntimeError("D2 validation lacks frozen-teacher preservation metric")
+                d2_selection_rows.append({
+                    "epoch": epoch_number,
+                    "val_psnr": float(val_metrics.get("psnr", float("nan"))),
+                    "val_teacher_task_preservation": float(
+                        val_metrics.get("teacher_task_preservation", val_metrics.get("psnr", float("nan")))
+                    ),
+                })
+                candidate_path = self.output_dir / "d2_selection_candidates" / f"epoch{epoch_number:03d}.pth"
+                save_checkpoint(
+                    candidate_path, self.model, self.optimizer, self.scheduler, epoch,
+                    self.best_metric, self.config, self.scaler, ema_state, checkpoint_state,
+                )
             if improved:
                 best_path = self.output_dir / "best.pth"
                 save_checkpoint(
@@ -2006,6 +2206,130 @@ class Trainer:
                 "notice": self.config["dose_response"].get("notice", "")})
             if changed_frozen or not changed_trainable:
                 raise RuntimeError("Dose path update check failed; see dose_training_metadata.json")
+        if self.config.get("d2", {}).get("enabled", False):
+            if completed_epochs != epochs:
+                raise RuntimeError("D2 fixed-budget run ended before checkpoint selection")
+            teacher_audit_path = self.output_dir / "teacher_audit.json"
+            teacher_audit = json.loads(teacher_audit_path.read_text(encoding="utf-8"))
+            teacher_audit.update({
+                "completed_epochs_audited": completed_epochs,
+                "changed_parameter_count": 0,
+                "requires_grad_parameter_count": int(
+                    sum(parameter.numel() for parameter in self.d2_teacher.parameters() if parameter.requires_grad)
+                    if self.d2_teacher is not None else 0
+                ),
+                "status": "passed" if self.d2_teacher is not None else "not_applicable",
+            })
+            write_json(teacher_audit, teacher_audit_path)
+            # Fail closed before copying or binding any selected checkpoint.
+            # A run with frozen drift or no trainable update must never leave a
+            # provenance file that looks eligible for downstream use.
+            from sabids.experiments.dose_response import tensor_sha, write_strict_json
+            initialization = json.loads(
+                (self.output_dir / "initialization_audit.json").read_text(encoding="utf-8")
+            )
+            changed_trainable, changed_frozen = [], []
+            for name, parameter in self.model.named_parameters():
+                changed = tensor_sha(parameter) != initialization["tensor_sha256"][name]
+                if changed and parameter.requires_grad:
+                    changed_trainable.append(name)
+                elif changed:
+                    changed_frozen.append(name)
+            parameter_audit = {
+                "status": "passed" if changed_trainable and not changed_frozen else "failed",
+                "changed_trainable_parameter_names": changed_trainable,
+                "changed_frozen_parameter_names": changed_frozen,
+                "changed_trainable_parameter_count": len(changed_trainable),
+                "changed_frozen_parameter_count": len(changed_frozen),
+                "test_assets_opened": 0,
+            }
+            write_strict_json(self.output_dir / "parameter_audit.json", parameter_audit)
+            if parameter_audit["status"] != "passed":
+                raise RuntimeError("D2 parameter audit failed")
+            import shutil
+            from sabids.experiments.d2 import select_d2_checkpoints, write_d2_checkpoint_binding
+            selection = select_d2_checkpoints(
+                pd.DataFrame(d2_selection_rows),
+                psnr_noninferiority_db=float(
+                    self.config["d2"].get("selection", {}).get("psnr_noninferiority_db", 0.2)
+                ),
+            )
+            selection["completed_epochs"] = completed_epochs
+            d2_history = pd.read_csv(self.output_dir / "history.csv", low_memory=False)
+            d2_selection_table = pd.DataFrame(d2_selection_rows)
+            def d2_checkpoint_details(selected_epoch: int) -> Dict[str, float | int]:
+                selected_rows = d2_history[pd.to_numeric(d2_history["epoch"]).eq(selected_epoch)]
+                if len(selected_rows) != 1:
+                    raise RuntimeError(f"D2 history does not uniquely contain epoch {selected_epoch}")
+                metric_rows = d2_selection_table[
+                    pd.to_numeric(d2_selection_table["epoch"]).eq(selected_epoch)
+                ]
+                if len(metric_rows) != 1:
+                    raise RuntimeError(
+                        f"D2 selection audit does not uniquely contain epoch {selected_epoch}"
+                    )
+                metric_row = metric_rows.iloc[0]
+                through_epoch = d2_history[pd.to_numeric(d2_history["epoch"]).le(selected_epoch)]
+                return {
+                    "epoch": int(selected_epoch),
+                    "global_optimizer_step": int(
+                        pd.to_numeric(through_epoch["train_optimizer_steps"]).sum()
+                    ),
+                    "val_psnr": float(metric_row["val_psnr"]),
+                    "val_teacher_task_preservation": float(
+                        metric_row["val_teacher_task_preservation"]
+                    ),
+                }
+            selection["checkpoint_details"] = {
+                "best_pixel": d2_checkpoint_details(int(selection["best_pixel_epoch"])),
+                "best_task_preserving": d2_checkpoint_details(
+                    int(selection["best_task_preserving_epoch"])
+                ),
+                "last": d2_checkpoint_details(completed_epochs),
+            }
+            selection["fixed_before_training"] = self.config["d2"].get("selection", {})
+            selection["test_assets_opened"] = 0
+            selection_path = self.output_dir / "selection_history_audit.json"
+            write_strict_json(selection_path, selection)
+            selected = {
+                "best_pixel": int(selection["best_pixel_epoch"]),
+                "best_task_preserving": int(selection["best_task_preserving_epoch"]),
+            }
+            for kind, selected_epoch in selected.items():
+                source = self.output_dir / "d2_selection_candidates" / f"epoch{selected_epoch:03d}.pth"
+                destination = self.output_dir / f"{kind}.pth"
+                if destination.exists():
+                    raise FileExistsError(f"Refusing existing D2 selected checkpoint: {destination}")
+                shutil.copy2(source, destination)
+                write_d2_checkpoint_binding(
+                    self._training_asset_initial_path,
+                    destination,
+                    self.output_dir / f"checkpoint_binding_{kind}.json",
+                    kind,
+                    selection,
+                    selection_path,
+                    self.output_dir / "teacher_audit.json",
+                    self.output_dir / "parameter_audit.json",
+                )
+            history_table = pd.read_csv(self.output_dir / "history.csv", low_memory=False)
+            write_strict_json(self.output_dir / "cost_profile.json", {
+                "completed_epochs": completed_epochs,
+                "training_validation_seconds": float(history_table["seconds"].sum()),
+                "optimizer_steps": int(history_table["train_optimizer_steps"].sum()),
+                "trainable_parameters": int(count_parameters(self.model)),
+                "peak_cuda_memory_bytes": (
+                    float(history_table["train_cuda_peak_memory_bytes"].max())
+                    if "train_cuda_peak_memory_bytes" in history_table else None
+                ),
+                "checkpoint_candidate_count": len(d2_selection_rows),
+                "scientific_evaluation": bool(
+                    self.config.get("d2", {}).get("scientific_evaluation", False)
+                ),
+                "notice": self.config.get("d2", {}).get(
+                    "notice", "NOT FOR SCIENTIFIC EVALUATION"
+                ),
+                "test_assets_opened": 0,
+            })
         if self.config.get("training_asset_evidence", {}).get("enabled", False):
             from sabids.experiments.dose_response import (
                 asset_inventory,
@@ -2020,7 +2344,7 @@ class Trainer:
             current_records = asset_inventory(
                 data_root, self._training_asset_filtered, include_labels=False
             )
-            bind_training_asset_evidence(
+            last_evidence = bind_training_asset_evidence(
                 self._training_asset_initial_path,
                 self.output_dir / "training_asset_inventory_last.json",
                 self.output_dir / "last.pth",
@@ -2030,4 +2354,18 @@ class Trainer:
                 configured_epochs=epochs,
                 selection_rule="fixed_final",
             )
+            if self.config.get("d2", {}).get("enabled", False):
+                from sabids.experiments.d2 import write_d2_checkpoint_binding
+                selection = json.loads(
+                    (self.output_dir / "selection_history_audit.json").read_text(encoding="utf-8")
+                )
+                write_d2_checkpoint_binding(
+                    self._training_asset_initial_path,
+                    self.output_dir / "last.pth",
+                    self.output_dir / "checkpoint_binding_last.json",
+                    "last", selection,
+                    self.output_dir / "selection_history_audit.json",
+                    self.output_dir / "teacher_audit.json",
+                    self.output_dir / "parameter_audit.json",
+                )
         self.writer.close()

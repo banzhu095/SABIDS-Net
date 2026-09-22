@@ -1,5 +1,21 @@
 # SABIDS-Net experiment log
 
+## 2026-09-22 — D2 implementation only
+
+- Branch: `feature/structure-preserving-d2-v1`.
+- Added best-D1 derived checkpoint binding, train-only vessel component strata,
+  modular D2 objectives, frozen teacher auditing, hierarchical checkpoint
+  selection/binding, D2-aware dose preparation, seed-42 config/gate/report tools.
+- Ran local CPU synthetic D20 and D25 end-to-end smoke tests. Both produced
+  initial/last asset evidence, parameter audits and all three D2 checkpoint
+  bindings; D25 additionally proved zero frozen-teacher parameter changes.
+  These temporary pytest artifacts are marked `NOT FOR SCIENTIFIC EVALUATION`.
+- `python -m compileall -q .`, `git diff --check`, 138 focused tests and all
+  312 repository tests passed locally. No CUDA overfit/pilot/formal training
+  and no project test asset evaluation were performed.
+- Cloud best-D1 source assets are absent locally, so scientific best-D1/D2 use
+  remains conditional on the cloud binding/preflight passing.
+
 This is the durable experiment ledger. Update it after an experiment finishes or
 when a run is intentionally stopped. Do not rewrite old outcomes to match a new
 hypothesis; append a new entry and link the relevant Git commit/config.

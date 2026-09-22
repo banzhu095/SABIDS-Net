@@ -18,7 +18,7 @@ import yaml
 from sabids.config import load_config, save_config
 from sabids.data.io import read_gray
 from sabids.experiments.dose_response import (
-    ALPHAS, SMOKE_NOTICE, VERSION, alpha_code, asset_inventory, cache_key,
+    ALPHAS, DOSE_CURVES, SMOKE_NOTICE, VERSION, alpha_code, asset_inventory, cache_key,
     code_fingerprint, dose_deterministic_algorithms, dose_input, formal_preflight, git_commit, read_binary_mask, resolve, save_cache,
     sha256_file, stable_sha, to_model_grid, write_strict_json,
 )
@@ -81,7 +81,8 @@ def _new_json(path: Path, value: dict) -> None:
 @dose_deterministic_algorithms()
 def prepare(root: Path, preflight: dict, *, curves: list[str], alphas: list[float],
             seeds: list[int], budget: str, tag: str, device_name: str,
-            split_contract: str | None = None, training_asset_inventory: str | None = None) -> dict:
+            split_contract: str | None = None, training_asset_inventory: str | None = None,
+            checkpoint_binding: str | None = None) -> dict:
     from sabids.engine.trainer import build_model
     from sabids.utils import get_device
     if preflight["status"] != "passed":
@@ -90,8 +91,11 @@ def prepare(root: Path, preflight: dict, *, curves: list[str], alphas: list[floa
         raise ValueError("tag must be a portable, non-path token")
     for a in alphas:
         alpha_code(a)
-    if not curves or len(set(curves)) != len(curves) or not set(curves) <= {"oracle", "d1"}:
-        raise ValueError("Nonempty unique oracle/d1 curves required")
+    if not curves or len(set(curves)) != len(curves) or not set(curves) <= set(DOSE_CURVES):
+        raise ValueError(f"Nonempty unique curves from {DOSE_CURVES} required")
+    model_curves = set(curves) - {"oracle"}
+    if len(model_curves) > 1:
+        raise ValueError("One preparation binds one denoiser checkpoint; compare model curves in separate registries")
     if len(set(alphas)) != len(alphas) or len(set(seeds)) != len(seeds) or not alphas or not seeds:
         raise ValueError("Nonempty, unique alpha/seed lists required")
     mode = preflight["mode"]
@@ -179,15 +183,15 @@ def prepare(root: Path, preflight: dict, *, curves: list[str], alphas: list[floa
             save_cache(path, grid[role].astype(np.float32), {**base_meta, "curve_type": "oracle", "alpha": 0., "cache_content_role": role})
             common[role] = str(path)
         with torch.inference_mode():
-            d1 = model.forward_denoise_only(torch.from_numpy(grid["noisy"][None, None]).to(device))["denoised"][0, 0].cpu().numpy().astype(np.float32)
-        if d1.shape != target or not np.isfinite(d1).all():
-            raise ValueError("D1 prediction invalid")
-        d1 = d1 * grid["spatial_valid"]
+            denoiser_output = model.forward_denoise_only(torch.from_numpy(grid["noisy"][None, None]).to(device))["denoised"][0, 0].cpu().numpy().astype(np.float32)
+        if denoiser_output.shape != target or not np.isfinite(denoiser_output).all():
+            raise ValueError("Denoiser prediction invalid")
+        denoiser_output = denoiser_output * grid["spatial_valid"]
         by_sample[row["sample_id"]] = {"geometry": geometry, "common_assets": common,
                                        "source_assets_sha256": source_label_sha}
         for c in curves:
             for a in alphas:
-                value, stats = dose_input(grid["noisy"], grid["clean"] if c == "oracle" else d1,
+                value, stats = dose_input(grid["noisy"], grid["clean"] if c == "oracle" else denoiser_output,
                                           a, c, valid=grid["spatial_valid"])
                 meta = {**base_meta, **stats, "curve_type": c, "alpha": a,
                         "output_min": float(value.min()), "output_max": float(value.max())}
@@ -209,7 +213,7 @@ def prepare(root: Path, preflight: dict, *, curves: list[str], alphas: list[floa
             with manifest.open("x", encoding="utf-8", newline="") as f:
                 f.write(payload)
         for seed in seeds:
-            cfg = load_config(root / f"configs/adaptive_denoising/dose_{curve}.yaml")
+            cfg = load_config(root / f"configs/adaptive_denoising/dose_{'oracle' if curve == 'oracle' else 'd1'}.yaml")
             cfg.pop("runtime", None)
             if mode == "smoke":
                 cfg["model"] = copy.deepcopy(d1_cfg["model"])
@@ -221,7 +225,8 @@ def prepare(root: Path, preflight: dict, *, curves: list[str], alphas: list[floa
                                 output_dir=str(run_root / name / f"{curve}_{alpha_code(alpha)}_seed{seed}"))
             if budget in {"overfit", "smoke"}:
                 cfg["data"].update(max_train_samples=2, max_val_samples=2)
-            cfg["dose_response"].update(project_root=str(root), protocol_id=protocol, mode=mode, alpha=alpha,
+            cfg["dose_response"].update(project_root=str(root), protocol_id=protocol, mode=mode,
+                curve_type=curve, alpha=alpha,
                 budget=budget, preparation_registry=str(registry_path), manifest_sha256=sha256_file(manifest),
                 scientific_evaluation=mode == "formal" and budget not in {"overfit", "smoke"},
                 notice=SMOKE_NOTICE if budget in {"smoke", "overfit"} else "")
@@ -237,6 +242,7 @@ def prepare(root: Path, preflight: dict, *, curves: list[str], alphas: list[floa
     result = {"identity": identity, "preflight": preflight, "code_version": code,
               "split_contract": str(resolve(root, split_contract)) if split_contract else None,
               "training_asset_inventory": str(resolve(root, training_asset_inventory)) if training_asset_inventory else None,
+              "checkpoint_binding": str(resolve(root, checkpoint_binding)) if checkpoint_binding else None,
               "samples": by_sample, "configs": configs,
               "config_sha256": {p: sha256_file(p) for p in configs}, "test_assets_opened": 0,
               "notice": SMOKE_NOTICE if mode == "smoke" else "",
@@ -279,7 +285,10 @@ def main() -> None:
     p.add_argument("--split-contract")
     p.add_argument("--selection-rule", choices=("best_validation_psnr", "fixed_final"))
     p.add_argument("--training-asset-inventory")
-    p.add_argument("--curves", nargs="+", choices=("oracle", "d1"), default=["oracle", "d1"])
+    p.add_argument("--checkpoint-binding")
+    p.add_argument("--d2-checkpoint-kind", choices=("d2_pixel", "d2_task", "d2_last"))
+    p.add_argument("--d2-checkpoint-binding")
+    p.add_argument("--curves", nargs="+", choices=DOSE_CURVES, default=["oracle", "d1"])
     p.add_argument("--alphas", nargs="+", type=float, default=list(ALPHAS))
     p.add_argument("--seeds", nargs="+", type=int, default=[42])
     p.add_argument("--budget", choices=("smoke", "overfit", "pilot", "full"), required=True)
@@ -299,14 +308,30 @@ def main() -> None:
     else:
         if a.synthetic_smoke:
             p.error("Synthetic assets cannot be formal")
-        pf = formal_preflight(root, a.denoiser_checkpoint, a.protocol_lock,
-                              a.split_contract, a.selection_rule, a.training_asset_inventory)
+        non_oracle = set(a.curves) - {"oracle"}
+        if a.d2_checkpoint_kind:
+            if non_oracle != {a.d2_checkpoint_kind}:
+                p.error("D2 checkpoint kind must exactly match the single non-oracle curve")
+            if not a.denoiser_checkpoint or not a.d2_checkpoint_binding:
+                p.error("D2 formal preparation requires checkpoint and D2 checkpoint binding")
+            from sabids.experiments.d2 import formal_d2_preflight
+            pf = formal_d2_preflight(
+                root, resolve(root, a.denoiser_checkpoint),
+                resolve(root, a.d2_checkpoint_binding), a.d2_checkpoint_kind,
+                resolve(root, a.protocol_lock), resolve(root, a.split_contract),
+            )
+        else:
+            pf = formal_preflight(root, a.denoiser_checkpoint, a.protocol_lock,
+                                  a.split_contract, a.selection_rule, a.training_asset_inventory,
+                                  a.checkpoint_binding)
         if pf["status"] != "passed":
             print(json.dumps(pf, ensure_ascii=False, indent=2, allow_nan=False))
             raise SystemExit(2)
+    effective_binding = a.d2_checkpoint_binding if a.d2_checkpoint_kind else a.checkpoint_binding
     result = prepare(root, pf, curves=a.curves, alphas=a.alphas, seeds=a.seeds,
                      budget=a.budget, tag=a.tag, device_name=a.device,
-                     split_contract=a.split_contract, training_asset_inventory=a.training_asset_inventory)
+                     split_contract=a.split_contract, training_asset_inventory=a.training_asset_inventory,
+                     checkpoint_binding=effective_binding)
     if a.cpu_smoke:
         result["cpu_smoke"] = cpu_smoke(result["configs"],
             root / "runs/adaptive_denoising" / pf["protocol"]["protocol_id"] / "dose_v1/cpu_smoke_report.json")

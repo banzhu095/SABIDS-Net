@@ -7,7 +7,7 @@ import torch
 from sabids.config import load_config
 from sabids.engine.trainer import build_model
 from sabids.experiments.dose_response import (
-    ALPHAS, alpha_code, augmentation_plan_sha, cache_key, deterministic_flip,
+    ALPHAS, DOSE_CURVES, alpha_code, augmentation_plan_sha, cache_key, deterministic_flip,
     dose_deterministic_algorithms, dose_input, read_binary_mask, save_cache, write_strict_json,
 )
 from sabids.losses import SABIDSLoss
@@ -72,7 +72,7 @@ def metadata():
             "geometry_sha256": "g", "code_version": "v", "split": "train"}
 
 
-@pytest.mark.parametrize("curve", ["oracle", "d1"])
+@pytest.mark.parametrize("curve", DOSE_CURVES)
 @pytest.mark.parametrize("alpha", ALPHAS)
 def test_formula_dtype_range_and_repeatability(curve, alpha):
     x = np.array([[.05, .9], [.7, .1]], np.float32)
@@ -106,8 +106,8 @@ def test_clip_fractions_exclude_padding():
 def test_codes_and_cache_key_identity():
     assert [alpha_code(a) for a in ALPHAS] == ["a000", "a025", "a050", "a075", "a100", "a125"]
     m = metadata()
-    keys = {cache_key({**m, "curve_type": c, "alpha": a}) for c in ("oracle", "d1") for a in ALPHAS}
-    assert len(keys) == 12
+    keys = {cache_key({**m, "curve_type": c, "alpha": a}) for c in DOSE_CURVES for a in ALPHAS}
+    assert len(keys) == len(DOSE_CURVES) * len(ALPHAS)
     for field in ("protocol_id", "sample_id", "checkpoint_sha256", "source_noisy_sha256",
                   "source_clean_sha256", "resolved_config_sha256", "geometry_sha256", "code_version", "split"):
         assert cache_key({**m, field: "different"}) != cache_key(m)

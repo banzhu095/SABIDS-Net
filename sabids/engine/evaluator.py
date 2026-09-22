@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 import cv2
 import numpy as np
@@ -58,6 +58,9 @@ def evaluate_model(
     p2_max_displacement: int = 8,
     model_grid_contract: bool = False,
     dose_metadata: Optional[Dict[str, object]] = None,
+    vessel_strata_definition: Optional[Dict[str, Any]] = None,
+    evaluate_clean_identity: bool = False,
+    d2_diagnostics: bool = False,
 ) -> Dict[str, object]:
     model.eval()
     dose_metadata = dose_metadata or {}
@@ -67,6 +70,11 @@ def evaluate_model(
         raise ValueError("Dose model-grid contract requires P0 0.5, segmentation-only, no original restoration")
     layer_threshold = threshold if layer_threshold is None else layer_threshold
     vessel_threshold = threshold if vessel_threshold is None else vessel_threshold
+    if vessel_strata_definition is not None:
+        if restore_original_geometry or float(vessel_threshold) != 0.5:
+            raise ValueError(
+                "Frozen vessel strata require model-grid evaluation and P0 vessel threshold 0.5"
+            )
     requested = set(tasks) if tasks is not None else None
     evaluate_denoising = "denoise" in requested if requested is not None else stage not in {"segment", "private_seg"}
     evaluate_layer = "layer" in requested if requested is not None else stage != "denoise"
@@ -76,7 +84,15 @@ def evaluate_model(
     invalid_modes = set(modes) - {"p0", "p1", "p2", "p3"}
     if invalid_modes:
         raise ValueError(f"Unknown postprocess modes: {sorted(invalid_modes)}")
+    if vessel_strata_definition is not None and (
+        modes != ("p0",)
+        or not (evaluate_vessel or (d2_diagnostics and evaluate_denoising))
+    ):
+        raise ValueError(
+            "Frozen vessel strata require P0 vessel evaluation or explicit D2 denoising diagnostics"
+        )
     rows = []
+    component_rows: list[dict] = []
     repeat_outputs = []
     qualitative_crops = []
     output_path = Path(output_dir) if output_dir else None
@@ -96,6 +112,11 @@ def evaluate_model(
             )
         )
         denoised = output["denoised"].cpu().numpy()
+        clean_identity_prediction = None
+        if evaluate_clean_identity and evaluate_denoising and bool(batch["has_clean"].any()):
+            clean_identity_prediction = model.forward_denoise_only(
+                batch["clean"].to(device, non_blocking=True)
+            )["denoised_raw"].cpu().numpy()
         layer_probability = (
             output["layer_prob"].cpu().numpy()
             if evaluate_segmentation
@@ -249,6 +270,11 @@ def evaluate_model(
                 row["cnr_error_auto"] = abs(
                     row["cnr_denoised_auto"] - row["cnr_clean_auto"]
                 )
+                if clean_identity_prediction is not None:
+                    identity_eval = restored(clean_identity_prediction[index, 0][crop])
+                    row["clean_identity_mae"] = float(
+                        np.mean(np.abs(identity_eval[valid_eval] - target[valid_eval]))
+                    )
             if (evaluate_segmentation or evaluate_denoising) and bool(batch["has_layer"][index]):
                 layer_true = restored(batch["layer_mask"][index, 0].numpy()[crop], True) & layer_valid_eval
                 if evaluate_denoising and bool(batch["has_clean"][index]):
@@ -298,12 +324,81 @@ def evaluate_model(
                     vessel_roi = vessel_true & vessel_valid
                     for name, image_eval in (("noisy", noisy_eval), ("denoised", denoised_eval), ("clean", target)):
                         row[f"vessel_stroma_cnr_{name}"] = region_cnr(image_eval, vessel_roi, stroma)
+                    if d2_diagnostics and vessel_roi.any():
+                        row["vessel_roi_mae"] = float(
+                            np.mean(np.abs(denoised_eval[vessel_roi] - target[vessel_roi]))
+                        )
+                        row["vessel_roi_mae_noisy"] = float(
+                            np.mean(np.abs(noisy_eval[vessel_roi] - target[vessel_roi]))
+                        )
+                        row["vessel_roi_mae_reduction"] = (
+                            row["vessel_roi_mae_noisy"] - row["vessel_roi_mae"]
+                        )
                     row["vessel_stroma_cnr_abs_error"] = abs(
                         row["vessel_stroma_cnr_denoised"] - row["vessel_stroma_cnr_clean"]
                     )
                     row["vessel_stroma_cnr_noisy_abs_error"] = abs(
                         row["vessel_stroma_cnr_noisy"] - row["vessel_stroma_cnr_clean"]
                     )
+                    if d2_diagnostics:
+                        residual = np.abs(noisy_eval - denoised_eval)
+                        kernel_width = max(1, int(round(boundary_band_width)))
+                        kernel = np.ones((2 * kernel_width + 1,) * 2, dtype=np.uint8)
+                        dilated = cv2.dilate(vessel_true.astype(np.uint8), kernel).astype(bool)
+                        eroded = cv2.erode(vessel_true.astype(np.uint8), kernel).astype(bool)
+                        vessel_boundary = (dilated ^ eroded) & vessel_valid
+                        structure = (vessel_true | vessel_boundary) & vessel_valid
+                        outside_structure = vessel_valid & ~structure
+                        layer_stroma = layer_true & ~vessel_true & vessel_valid
+                        layer_outside = ~layer_true & vessel_valid
+                        row["residual_vessel_mean_abs"] = (
+                            float(residual[vessel_true & vessel_valid].mean())
+                            if (vessel_true & vessel_valid).any() else float("nan")
+                        )
+                        row["residual_vessel_boundary_mean_abs"] = (
+                            float(residual[vessel_boundary].mean())
+                            if vessel_boundary.any() else float("nan")
+                        )
+                        row["residual_structure_leakage"] = (
+                            float(residual[structure].mean()) if structure.any() else float("nan")
+                        )
+                        total_residual = float(residual[vessel_valid].sum())
+                        row["residual_structure_energy_fraction"] = (
+                            float(residual[structure].sum()) / total_residual
+                            if total_residual > 0.0 and structure.any() else float("nan")
+                        )
+                        row["residual_structure_abs_fraction"] = (
+                            float(residual[structure].sum()) / total_residual
+                            if total_residual > 0.0 and structure.any() else float("nan")
+                        )
+                        row["residual_layer_stroma_mean_abs"] = (
+                            float(residual[layer_stroma].mean())
+                            if layer_stroma.any() else float("nan")
+                        )
+                        row["residual_layer_outside_mean_abs"] = (
+                            float(residual[layer_outside].mean())
+                            if layer_outside.any() else float("nan")
+                        )
+                        if vessel_strata_definition is not None:
+                            from sabids.experiments.d2 import component_strata_masks
+                            strata_masks = component_strata_masks(
+                                vessel_true, layer_true, vessel_valid, noisy_eval,
+                                vessel_strata_definition,
+                            )
+                            for stratum, mask in strata_masks.items():
+                                row[f"residual_{stratum}_vessel_mean_abs"] = (
+                                    float(residual[mask].mean())
+                                    if mask.any() else float("nan")
+                                )
+                        row["residual_outside_structure_mean_abs"] = (
+                            float(residual[outside_structure].mean())
+                            if outside_structure.any() else float("nan")
+                        )
+                        clean_error = np.abs(denoised_eval - target)
+                        row["structure_hallucination_error"] = (
+                            float(clean_error[outside_structure].mean())
+                            if outside_structure.any() else float("nan")
+                        )
             if evaluate_vessel and bool(batch["has_vessel"][index]):
                 vessel_tp = vessel_pred & vessel_true & vessel_valid
                 vessel_fp = vessel_pred & ~vessel_true & vessel_valid
@@ -360,6 +455,46 @@ def evaluate_model(
                 row["vessel_area_fraction_pred"] = predicted_fraction
                 row["vessel_area_fraction_true"] = true_fraction
                 row["vessel_area_fraction_mae"] = abs(predicted_fraction - true_fraction)
+                if vessel_strata_definition is not None and bool(batch["has_layer"][index]):
+                    from sabids.experiments.d2 import (
+                        aggregate_component_rows,
+                        evaluate_vessel_components,
+                    )
+                    sample_components = evaluate_vessel_components(
+                        vessel_pred,
+                        vessel_true,
+                        layer_true,
+                        vessel_valid,
+                        noisy_eval,
+                        vessel_strata_definition,
+                        target if target is not None else None,
+                    )
+                    for component in sample_components:
+                        component.update({
+                            "sample_id": str(batch["sample_id"][index]),
+                            "group_id": str(batch["group_id"][index]),
+                            "patient_id": str(batch["patient_id"][index]),
+                            "dataset": str(batch["dataset"][index]),
+                        })
+                    component_rows.extend(sample_components)
+                    row.update({
+                        f"vessel_component_{key}": value
+                        for key, value in aggregate_component_rows(sample_components).items()
+                    })
+                    if vessel_strata_definition.get("fixed_area_thresholds") is not None:
+                        row.update({
+                            f"vessel_component_fixed_{key}": value
+                            for key, value in aggregate_component_rows(
+                                sample_components, area_key="area_bin_fixed"
+                            ).items()
+                        })
+                    if vessel_strata_definition.get("low_contrast_q25_clean") is not None:
+                        row.update({
+                            f"vessel_component_clean_contrast_sensitivity_{key}": value
+                            for key, value in aggregate_component_rows(
+                                sample_components, contrast_key="clean_contrast_bin"
+                            ).items()
+                        })
 
             # P0 is always the immutable raw threshold result. P1/P2 affect only
             # the layer; P3 strictly clips the raw vessel prediction to P2/P1.
@@ -602,6 +737,11 @@ def evaluate_model(
         if component_size_thresholds is not None
         else None
     )
+    if vessel_strata_definition is not None:
+        summary["vessel_strata_definition_sha256"] = vessel_strata_definition.get(
+            "definition_sha256"
+        )
+        summary["vessel_strata_version"] = vessel_strata_definition.get("version")
     summary["boundary_band_width_pixels"] = float(boundary_band_width)
     summary["postprocess_modes"] = list(modes)
     summary["restored_original_geometry"] = bool(restore_original_geometry)
@@ -625,6 +765,37 @@ def evaluate_model(
     if output_path:
         frame_table.to_csv(output_path / "frame_metrics.csv", index=False, encoding="utf-8-sig")
         group_table.to_csv(output_path / "group_metrics.csv", index=False, encoding="utf-8-sig")
+        if vessel_strata_definition is not None and evaluate_vessel:
+            component_table = pd.DataFrame(component_rows)
+            component_table.to_csv(
+                output_path / "component_metrics.csv", index=False, encoding="utf-8-sig"
+            )
+            contrast_columns = [
+                name for name in component_table.columns
+                if name in {"sample_id", "group_id", "patient_id", "dataset", "component_id"}
+                or "contrast" in name or name in {"coverage", "area_pixels", "area_bin_quantile"}
+            ]
+            component_table[contrast_columns].to_csv(
+                output_path / "contrast_metrics.csv", index=False, encoding="utf-8-sig"
+            )
+        if d2_diagnostics:
+            identity = [
+                column for column in ("sample_id", "group_id", "patient_id", "dataset")
+                if column in frame_table.columns
+            ]
+            diagnostic_columns = [
+                column for column in frame_table.columns
+                if column.startswith("residual_")
+                or column in {
+                    "vessel_roi_mae", "vessel_roi_mae_noisy",
+                    "vessel_roi_mae_reduction", "structure_hallucination_error",
+                }
+            ]
+            frame_table[identity + diagnostic_columns].to_csv(
+                output_path / "structure_leakage_metrics.csv",
+                index=False,
+                encoding="utf-8-sig",
+            )
         if qualitative_crops:
             pd.DataFrame(qualitative_crops).drop_duplicates().to_csv(
                 output_path / "qualitative_crops.csv", index=False, encoding="utf-8-sig"
@@ -670,6 +841,17 @@ def evaluate_model(
                     "Connected-component pixel area in resized/padded model "
                     "coordinates; thresholds must be derived from training labels"
                 ),
+                **({"vessel_component_recall_at_025": (
+                    "Primary GT-component endpoint: fraction of components with at least "
+                    "25% predicted coverage; strata are frozen from development-train labels"
+                )} if vessel_strata_definition is not None else {}),
+                **({"residual_structure_leakage": (
+                    "Mean absolute noisy-minus-denoised residual inside GT vessel or its "
+                    "configured model-grid boundary band; diagnostic, not a noise label"
+                ), "structure_leakage_metrics.csv": (
+                    "Frame-level residual diagnostics; small/low-contrast regions use the "
+                    "frozen development-train vessel-strata definition when supplied"
+                )} if d2_diagnostics else {}),
             },
             output_path / "metric_definitions.json",
         )
