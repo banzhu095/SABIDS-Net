@@ -1,5 +1,15 @@
 # SABIDS-Net experiment log
 
+## 2026-09-23 — D2 seed-42 preparation CLI device correction
+
+- Corrected the documented D25 overfit command/CLI mismatch:
+  `tools/prepare_d2_seed42.py` now accepts `--device`. Omitting it preserves
+  the existing mode defaults (`cpu` for smoke and `cuda` otherwise), while an
+  explicit value is recorded in both generated configs and the preparation
+  report. The failed argument parse generated no config or run assets, so the
+  subsequent missing-YAML and premature overfit-audit failures were cascading
+  effects rather than training failures.
+
 ## 2026-09-23 — D2 formal teacher evidence closure (implementation only)
 
 - Read-only audit of `GPT_light_d2_teacher_blocker_20260923_100230.tar.gz`

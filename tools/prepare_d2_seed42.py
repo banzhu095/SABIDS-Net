@@ -44,13 +44,18 @@ def _resolved(root: Path, value: str) -> Path:
     return path.resolve() if path.is_absolute() else (root / path).resolve()
 
 
-def main() -> None:
+def _arguments(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--project-root", default=".")
     parser.add_argument("--mode", choices=tuple(MODE), required=True)
     parser.add_argument("--arms", nargs="+", choices=tuple(ARMS), required=True)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--tag", required=True)
+    parser.add_argument(
+        "--device",
+        default=None,
+        help="Explicit generated-config device; defaults to the selected mode",
+    )
     parser.add_argument("--seed42-gate")
     parser.add_argument("--d1-checkpoint", required=True)
     parser.add_argument("--d1-initial-inventory", required=True)
@@ -64,7 +69,11 @@ def main() -> None:
     parser.add_argument("--teacher-training-data")
     parser.add_argument("--teacher-split", default="train")
     parser.add_argument("--output-dir", default="runs/adaptive_denoising/d2_v1_launch_configs")
-    args = parser.parse_args()
+    return parser.parse_args(argv)
+
+
+def main() -> None:
+    args = _arguments()
     if args.mode == "full":
         if args.seed not in {42, 43, 44} or not args.seed42_gate:
             raise SystemExit("BLOCKED: full configs require seed 42/43/44 and an explicit seed-42 gate")
@@ -132,7 +141,7 @@ def main() -> None:
         cfg = deepcopy(base)
         cfg["seed"] = args.seed
         cfg["deterministic"] = True
-        cfg["device"] = mode["device"]
+        cfg["device"] = args.device or mode["device"]
         cfg.setdefault("data", {}).update({
             "load_segmentation_labels": True,
             "max_train_samples": mode["max_train_samples"],
@@ -196,6 +205,7 @@ def main() -> None:
                           "command": f"python train.py --config {config_path}"})
     report = {
         "status": "prepared", "seed": args.seed, "mode": args.mode, "tag": args.tag,
+        "device": args.device or mode["device"],
         "d1_checkpoint_sha256": sha256_file(d1_checkpoint),
         "d1_checkpoint_binding": str(_resolved(root, args.d1_checkpoint_binding)),
         "vessel_strata_definition_sha256": claimed, "runs": generated,
