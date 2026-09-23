@@ -27,6 +27,44 @@ from sabids.losses.d2 import D2StructureLoss
 ROOT = __import__("pathlib").Path(__file__).resolve().parents[1]
 
 
+def test_memory_safe_teacher_keeps_source_gradient_and_detaches_clean_reference():
+    class TinyTeacher(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.mapping = torch.nn.Conv2d(1, 2, 1, bias=False)
+
+        def forward(self, image, return_features=False, return_auxiliary=False):
+            logits = self.mapping(image)
+            return {
+                "layer_logits": logits[:, :1],
+                "vessel_logits": logits[:, 1:],
+                "layer_prob": torch.sigmoid(logits[:, :1]),
+                "vessel_prob": torch.sigmoid(logits[:, 1:]),
+            }
+
+    trainer = Trainer.__new__(Trainer)
+    trainer.config = {"train": {"memory_safe_d2_teacher": True}}
+    trainer.d2_teacher = TinyTeacher().eval()
+    for parameter in trainer.d2_teacher.parameters():
+        parameter.requires_grad_(False)
+
+    batch = {"clean": torch.full((1, 1, 8, 8), 0.5)}
+    clean = trainer._precompute_d2_teacher_clean_outputs(batch)
+    assert clean is not None
+    assert not clean["clean_layer_prob"].requires_grad
+    assert not clean["clean_vessel_prob"].requires_grad
+
+    denoised = torch.full((1, 1, 8, 8), 0.4, requires_grad=True)
+    output = {"denoised_raw": denoised}
+    trainer._attach_d2_teacher_outputs(output, batch, clean)
+    assert output["d2_teacher_layer_logits"].requires_grad
+    assert output["d2_teacher_vessel_logits"].requires_grad
+    (output["d2_teacher_layer_logits"].sum()
+     + output["d2_teacher_vessel_logits"].sum()).backward()
+    assert denoised.grad is not None and torch.isfinite(denoised.grad).all()
+    assert all(parameter.grad is None for parameter in trainer.d2_teacher.parameters())
+
+
 def _sample(low=False, adjacent=False):
     noisy = np.full((16, 16), 0.5, np.float32)
     clean = noisy.copy()

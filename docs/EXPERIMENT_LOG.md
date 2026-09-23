@@ -1,5 +1,26 @@
 # SABIDS-Net experiment log
 
+## 2026-09-23 — D25 frozen-teacher CUDA memory correction
+
+- Cloud D25 overfit reached the first batch but exhausted a 24 GB RTX 3090
+  while running the clean frozen-teacher reference after the clean-identity,
+  noisy-student and differentiable teacher graphs were already resident. This
+  was real allocation pressure, not allocator fragmentation or another GPU
+  process.
+- The opt-in D2 teacher path now computes its detached clean reference before
+  student graphs and activation-checkpoints the differentiable
+  teacher-on-denoised path. Teacher parameters remain frozen while teacher-task
+  gradients still reach the denoised image. Legacy and non-D2 paths are
+  unchanged; generated D2 configs record `memory_safe_d2_teacher: true`.
+
+## 2026-09-23 — D2 split-contract resolver correction
+
+- Corrected the cloud command that reconstructs `SABIDS_SPLIT_CONTRACT` from
+  its locked SHA. The contract is stored under `configs/data/`, while the old
+  command searched only `Manifests/` and therefore exported an empty value.
+  Resolution now searches both versioned configuration and manifest roots and
+  still requires exactly one hash match; D1 preflight remains fail closed.
+
 ## 2026-09-23 — D2 seed-42 preparation CLI device correction
 
 - Corrected the documented D25 overfit command/CLI mismatch:

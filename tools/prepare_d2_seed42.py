@@ -160,6 +160,7 @@ def main() -> None:
             "checkpoint_selection_rule": "d2_hierarchical_fixed_budget_v1",
             "monitor": "psnr", "pretrained": str(d1_checkpoint), "strict_pretrained": True,
             "resume": None, "num_workers": 0 if args.mode == "smoke" else cfg["train"].get("num_workers", 4),
+            "memory_safe_d2_teacher": True,
         })
         cfg["training_asset_evidence"] = {
             "enabled": True, "project_root": str(root), "protocol_lock": str(lock_path),

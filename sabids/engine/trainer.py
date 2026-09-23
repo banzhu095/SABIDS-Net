@@ -16,6 +16,7 @@ import torch
 import cv2
 from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader, Subset
+from torch.utils.checkpoint import checkpoint
 try:
     from torch.utils.tensorboard import SummaryWriter
 except ImportError:  # Training metrics still persist in CSV/JSON without it.
@@ -587,24 +588,57 @@ class Trainer:
             "test_assets_opened": 0,
         }, self.output_dir / "teacher_audit.json")
 
+    def _precompute_d2_teacher_clean_outputs(
+        self, batch: Dict[str, torch.Tensor]
+    ) -> Optional[Dict[str, torch.Tensor]]:
+        """Compute the detached clean reference before student graphs exist."""
+        if self.d2_teacher is None:
+            return None
+        self.d2_teacher.eval()
+        with torch.no_grad():
+            raw = self.d2_teacher(
+                batch["clean"], return_features=False, return_auxiliary=False
+            )
+        clean = {
+            "clean_layer_prob": raw["layer_prob"].detach(),
+            "clean_vessel_prob": raw["vessel_prob"].detach(),
+        }
+        del raw
+        return clean
+
     def _attach_d2_teacher_outputs(
-        self, output: Dict[str, torch.Tensor], batch: Dict[str, torch.Tensor]
+        self,
+        output: Dict[str, torch.Tensor],
+        batch: Dict[str, torch.Tensor],
+        clean_reference: Optional[Dict[str, torch.Tensor]] = None,
     ) -> None:
         if self.d2_teacher is None:
             return
         self.d2_teacher.eval()
-        teacher_prediction = self.d2_teacher(
-            output["denoised_raw"], return_features=False, return_auxiliary=False
-        )
-        with torch.no_grad():
-            teacher_clean = self.d2_teacher(
-                batch["clean"], return_features=False, return_auxiliary=False
+        if clean_reference is None:
+            clean_reference = self._precompute_d2_teacher_clean_outputs(batch)
+        assert clean_reference is not None
+
+        def teacher_logits(image: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+            prediction = self.d2_teacher(
+                image, return_features=False, return_auxiliary=False
             )
+            return prediction["layer_logits"], prediction["vessel_logits"]
+
+        if bool(self.config.get("train", {}).get("memory_safe_d2_teacher", False)):
+            layer_logits, vessel_logits = checkpoint(
+                teacher_logits,
+                output["denoised_raw"],
+                use_reentrant=False,
+                preserve_rng_state=True,
+            )
+        else:
+            layer_logits, vessel_logits = teacher_logits(output["denoised_raw"])
         output.update({
-            "d2_teacher_layer_logits": teacher_prediction["layer_logits"],
-            "d2_teacher_vessel_logits": teacher_prediction["vessel_logits"],
-            "d2_teacher_clean_layer_prob": teacher_clean["layer_prob"],
-            "d2_teacher_clean_vessel_prob": teacher_clean["vessel_prob"],
+            "d2_teacher_layer_logits": layer_logits,
+            "d2_teacher_vessel_logits": vessel_logits,
+            "d2_teacher_clean_layer_prob": clean_reference["clean_layer_prob"],
+            "d2_teacher_clean_vessel_prob": clean_reference["clean_vessel_prob"],
         })
 
     def _prepare_formal_d2_teacher_config(self) -> None:
@@ -1420,6 +1454,10 @@ class Trainer:
                 torch.cuda.amp.autocast() if self.amp_enabled else nullcontext()
             )
             with amp_context:
+                # The clean teacher target is detached.  Compute it before any
+                # student graph so its transient activations never overlap the
+                # clean/noisy student and differentiable teacher graphs.
+                d2_teacher_clean = self._precompute_d2_teacher_clean_outputs(batch)
                 repeat_output, clean_output, teacher_output = self._forward_auxiliary(
                     batch, detach_cross
                 )
@@ -1434,7 +1472,7 @@ class Trainer:
                            if self.config.get("dose_response", {}).get("enabled", False) else {}),
                     )
                 )
-                self._attach_d2_teacher_outputs(output, batch)
+                self._attach_d2_teacher_outputs(output, batch, d2_teacher_clean)
                 losses = self.loss_fn(
                     output,
                     batch,
@@ -1542,6 +1580,7 @@ class Trainer:
                         grad_scale=current_scale,
                     )
                     del output, repeat_output, clean_output, teacher_output, losses
+                    del d2_teacher_clean
                     continue
                 consecutive_amp_overflows = 0
                 d2s_gradients = [
@@ -1741,6 +1780,7 @@ class Trainer:
                             ] += float(item[name].item())
             progress.set_postfix(loss=totals["total"] / steps)
             del output, repeat_output, clean_output, teacher_output, losses
+            del d2_teacher_clean
         result = {key: value / max(steps, 1) for key, value in totals.items()}
         if self.d2_teacher is not None:
             from sabids.experiments.dose_response import tensor_sha
@@ -2479,6 +2519,12 @@ class Trainer:
                     if "train_cuda_peak_memory_bytes" in history_table else None
                 ),
                 "checkpoint_candidate_count": len(d2_selection_rows),
+                "memory_safe_d2_teacher": bool(
+                    self.config.get("train", {}).get("memory_safe_d2_teacher", False)
+                ),
+                "d2_teacher_clean_precomputed_before_student": bool(
+                    self.d2_teacher is not None
+                ),
                 "scientific_evaluation": bool(
                     self.config.get("d2", {}).get("scientific_evaluation", False)
                 ),

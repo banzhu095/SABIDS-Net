@@ -165,8 +165,9 @@ import hashlib,json
 from pathlib import Path
 root=Path('/mnt/SABIDS-Net'); lock=json.loads((root/'Manifests/pku37_binary_v3/active_protocol_lock.json').read_text())
 matches=[]
-for p in (root/'Manifests').rglob('*.yaml'):
-    if hashlib.sha256(p.read_bytes()).hexdigest()==lock['split_contract_sha256']: matches.append(p)
+for directory in (root/'configs', root/'Manifests'):
+    for p in directory.rglob('*.yaml'):
+        if hashlib.sha256(p.read_bytes()).hexdigest()==lock['split_contract_sha256']: matches.append(p)
 if len(matches)!=1: raise SystemExit(f'BLOCKED split-contract matches={matches}')
 print(matches[0])
 PY
