@@ -13,6 +13,7 @@ from sabids.config import load_config, save_config
 from sabids.engine import Trainer
 from sabids.engine.trainer import build_model
 from sabids.experiments.d2_teacher import (
+    audit_teacher_protocol,
     audit_teacher_binding,
     bind_derived_legacy_teacher,
     bind_native_teacher,
@@ -48,7 +49,8 @@ def _teacher_fixture(tmp_path: Path) -> dict:
         "protocol_id": "fixture", "manifest_root": str(tmp_path),
         "data_plan_sha256": "data-plan", "label_inventory_sha256": "labels",
         "dataset_inventory_sha256": "dataset", "split_contract_sha256": sha256_file(split_contract),
-        "train_positions": ["g0", "g1"], "validation_positions": ["g2"],
+        "train_positions": ["g0", "g1", "g_unlabelled"],
+        "validation_positions": ["g2"],
         "sealed_test_positions": ["g9"], "input_resolution": [16, 16],
         "normalization": "fixed", "test_assets_opened": 0,
     }
@@ -68,7 +70,11 @@ def _teacher_fixture(tmp_path: Path) -> dict:
                   "checkpoint_selection_rule": "best_validation_vessel_soft_dice",
                   "output_dir": str(run)},
         "loss": {"weights": {}},
-        "formal_d2_teacher": {"enabled": True},
+        "formal_d2_teacher": {
+            "enabled": True,
+            "expected_train_positions": ["g0", "g1"],
+            "expected_validation_positions": ["g2"],
+        },
         "runtime": {"active_protocol_lock": lock,
                     "manifest_sha256": sha256_file(manifest),
                     "effective_split_sha256": effective_split_sha(table)},
@@ -153,6 +159,31 @@ def test_native_protocol_binding_passes_and_is_hash_auditable(tmp_path):
     result = _native(e, tmp_path / "native.json")
     assert result["evidence_type"] == "native_protocol_binding"
     assert audit_teacher_binding(tmp_path / "native.json", e["checkpoint"])["status"] == "passed"
+    assert result["train_positions"] == ["g0", "g1"]
+
+
+def test_teacher_protocol_accepts_registered_label_subset_but_rejects_drift(tmp_path):
+    e = _teacher_fixture(tmp_path)
+    protocol = audit_teacher_protocol(
+        tmp_path, load_config(e["config_path"]), e["lock_path"], e["split_contract"]
+    )
+    assert protocol["train_positions"] == ["g0", "g1"]
+    assert protocol["protocol_train_positions"] == ["g0", "g1", "g_unlabelled"]
+    assert protocol["teacher_train_subset_of_protocol"] is True
+
+    config = load_config(e["config_path"])
+    config["formal_d2_teacher"]["expected_train_positions"] = ["g0"]
+    with pytest.raises(ValueError, match="registered label-eligible cohort"):
+        audit_teacher_protocol(tmp_path, config, e["lock_path"], e["split_contract"])
+
+    config = load_config(e["config_path"])
+    table = pd.read_csv(e["manifest"])
+    table.loc[table["group_id"].eq("g1"), "group_id"] = "outside_lock"
+    table.to_csv(e["manifest"], index=False)
+    config["runtime"]["manifest_sha256"] = sha256_file(e["manifest"])
+    config["runtime"]["effective_split_sha256"] = effective_split_sha(table)
+    with pytest.raises(ValueError, match="exceed the active-lock train cohort"):
+        audit_teacher_protocol(tmp_path, config, e["lock_path"], e["split_contract"])
 
 
 def test_complete_immutable_legacy_binding_passes(tmp_path):
@@ -316,6 +347,8 @@ def test_formal_teacher_cpu_smoke_writes_initial_best_last_and_freeze_audits(tmp
     cfg["formal_d2_teacher"] = {
         "enabled": True, "template_only": False, "run_mode": "smoke",
         "split_contract": str(split),
+        "expected_train_positions": ["g0"],
+        "expected_validation_positions": ["g1"],
     }
     run = tmp_path / "formal_teacher"
     trainer = Trainer(cfg)

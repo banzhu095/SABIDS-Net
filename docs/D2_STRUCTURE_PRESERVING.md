@@ -32,9 +32,12 @@ methods, checkpoints, doses, thresholds, and postprocessing are frozen.
 ## Formal segmentation teacher closure
 
 The 2026-09-23 lightweight evidence audit rejected all historical Stage 2
-teachers for formal D2 use. The leading `safe_current` run used only 13 of the
-30 locked training positions, did not record the active protocol/data-plan/
-split-contract hashes, and its label inventory included sealed-test groups.
+teachers for formal D2 use. The 30 active-lock training positions define the
+denoising/development pool; the teacher correctly uses only the label-eligible
+subset in locked `train_segment.csv`. The leading `safe_current` run did not
+record the active protocol/data-plan/split-contract hashes, its 13-position
+cohort could not be bound to that current manifest from the supplied archive,
+and its label inventory included sealed-test groups.
 These facts cannot be repaired by adding a current `protocol_id`. See
 `docs/D2_TEACHER_EVIDENCE_AUDIT.md`.
 

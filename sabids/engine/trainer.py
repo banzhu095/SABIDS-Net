@@ -776,12 +776,35 @@ class Trainer:
             train_groups = set(train["group_id"].astype(str).unique())
             val_groups = set(val["group_id"].astype(str).unique())
             d2_run_mode = self.config.get("d2", {}).get("run_mode")
-            teacher_run_mode = self.config.get("formal_d2_teacher", {}).get("run_mode")
+            teacher_protocol = self.config.get("formal_d2_teacher", {})
+            teacher_run_mode = teacher_protocol.get("run_mode")
             partial_diagnostic = (
                 d2_run_mode in {"smoke", "overfit"}
                 or teacher_run_mode in {"smoke", "overfit"}
             )
-            if partial_diagnostic:
+            if teacher_protocol.get("enabled") is True:
+                expected_train = set(map(str, teacher_protocol.get(
+                    "expected_train_positions", []
+                )))
+                expected_val = set(map(str, teacher_protocol.get(
+                    "expected_validation_positions", []
+                )))
+                if not expected_train:
+                    raise ValueError("Formal teacher lacks its registered label-eligible train cohort")
+                if not expected_train <= set(lock["train_positions"]):
+                    raise ValueError("Formal teacher train cohort exceeds the active-lock train cohort")
+                if expected_val != set(lock["validation_positions"]):
+                    raise ValueError("Formal teacher validation cohort differs from active lock")
+                if partial_diagnostic:
+                    if not train_groups <= expected_train or not val_groups <= expected_val:
+                        raise ValueError("Teacher diagnostic groups exceed the registered teacher cohort")
+                    self.config.setdefault("runtime", {})["partial_protocol_diagnostic"] = True
+                else:
+                    if train_groups != expected_train:
+                        raise ValueError("Effective teacher train groups differ from the registered label-eligible cohort")
+                    if val_groups != expected_val:
+                        raise ValueError("Effective teacher validation groups differ from the registered cohort")
+            elif partial_diagnostic:
                 if not train_groups <= set(lock["train_positions"]):
                     raise ValueError("D2 diagnostic train groups exceed the locked development train cohort")
                 if not val_groups <= set(lock["validation_positions"]):

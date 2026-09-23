@@ -130,6 +130,70 @@ def filtered_teacher_manifest(config: dict, table: pd.DataFrame) -> pd.DataFrame
     return result
 
 
+def validate_teacher_cohort(
+    train: Any,
+    validation: Any,
+    lock: dict,
+    *,
+    expected_train: Any | None = None,
+    expected_validation: Any | None = None,
+) -> dict:
+    """Validate the label-eligible teacher cohort inside the locked data split.
+
+    ``lock.train_positions`` is the complete denoising/development pool.  A
+    segmentation teacher may use only the label-eligible subset represented by
+    ``train_segment.csv``; it must never be expanded to all denoising groups.
+    """
+    train_positions = _normal_positions(train)
+    validation_positions = _normal_positions(validation)
+    locked_train = _normal_positions(lock["train_positions"])
+    locked_validation = _normal_positions(lock["validation_positions"])
+    sealed_test = set(_normal_positions(lock["sealed_test_positions"]))
+    _require(bool(train_positions), "Teacher training cohort is empty")
+    _require(set(train_positions) <= set(locked_train),
+             "Teacher train positions exceed the active-lock train cohort")
+    _require(validation_positions == locked_validation,
+             "Teacher validation positions differ from active lock")
+    _require(not (set(train_positions) | set(validation_positions)) & sealed_test,
+             "Teacher development cohort overlaps sealed test")
+    if expected_train is not None:
+        _require(train_positions == _normal_positions(expected_train),
+                 "Teacher train positions differ from the registered label-eligible cohort")
+    if expected_validation is not None:
+        _require(validation_positions == _normal_positions(expected_validation),
+                 "Teacher validation positions differ from the registered cohort")
+    return {
+        "train_positions": train_positions,
+        "validation_positions": validation_positions,
+        "protocol_train_positions": locked_train,
+        "teacher_train_subset_of_protocol": True,
+    }
+
+
+def locked_teacher_cohort(root: Path, config: dict, lock: dict) -> dict:
+    """Read the active protocol's segmentation manifest without opening assets."""
+    manifest = resolve(root, lock["manifest_root"]) / "train_segment.csv"
+    _require(manifest.is_file(), f"Missing locked teacher manifest: {manifest}")
+    table = pd.read_csv(manifest, dtype=str).fillna("")
+    # Historical run-specific group filters are evidence about that run, not
+    # the definition of the current locked label-eligible cohort.
+    cohort_config = {**config, "data": dict(config["data"])}
+    cohort_config["data"].pop("train_groups", None)
+    cohort_config["data"].pop("val_groups", None)
+    filtered = filtered_teacher_manifest(cohort_config, table)
+    cohort = validate_teacher_cohort(
+        filtered.loc[filtered["split"].eq("train"), "group_id"],
+        filtered.loc[filtered["split"].eq("val"), "group_id"],
+        lock,
+    )
+    return {
+        **cohort,
+        "manifest": manifest,
+        "manifest_sha256": sha256_file(manifest),
+        "effective_split_sha256": effective_split_sha(filtered),
+    }
+
+
 def audit_teacher_protocol(
     root: Path, config: dict, protocol_lock: Path, split_contract: Path
 ) -> dict:
@@ -148,14 +212,20 @@ def audit_teacher_protocol(
     manifest = resolve(root, config["data"]["manifest"])
     table = pd.read_csv(manifest, dtype=str).fillna("")
     filtered = filtered_teacher_manifest(config, table)
-    train = _normal_positions(filtered.loc[filtered["split"].eq("train"), "group_id"])
-    val = _normal_positions(filtered.loc[filtered["split"].eq("val"), "group_id"])
-    _require(train == _normal_positions(lock["train_positions"]),
-             "Teacher train positions differ from active lock")
-    _require(val == _normal_positions(lock["validation_positions"]),
-             "Teacher validation positions differ from active lock")
-    _require(not (set(train) | set(val)) & set(lock["sealed_test_positions"]),
-             "Teacher development cohort overlaps sealed test")
+    train = filtered.loc[filtered["split"].eq("train"), "group_id"]
+    val = filtered.loc[filtered["split"].eq("val"), "group_id"]
+    teacher_protocol = config.get("formal_d2_teacher", {})
+    cohort = validate_teacher_cohort(
+        train,
+        val,
+        lock,
+        expected_train=teacher_protocol.get("expected_train_positions"),
+        expected_validation=teacher_protocol.get("expected_validation_positions"),
+    )
+    _require(teacher_protocol.get("expected_train_positions") is not None,
+             "Formal teacher lacks its registered label-eligible train cohort")
+    _require(teacher_protocol.get("expected_validation_positions") is not None,
+             "Formal teacher lacks its registered validation cohort")
     runtime = config.get("runtime", {})
     _require(runtime.get("manifest_sha256") == sha256_file(manifest),
              "Teacher manifest SHA missing or changed")
@@ -166,8 +236,7 @@ def audit_teacher_protocol(
         "lock": lock,
         "manifest": manifest,
         "filtered": filtered,
-        "train_positions": train,
-        "validation_positions": val,
+        **cohort,
         "effective_split_sha256": split_sha,
     }
 
@@ -366,12 +435,13 @@ def bind_derived_legacy_teacher(
                  f"Legacy protocol evidence mismatch: {key}")
     _require(sha256_file(split_contract) == historical["split_contract_sha256"],
              "Legacy split-contract SHA mismatch")
+    registered = locked_teacher_cohort(root, config, lock)
     _require(_normal_positions(historical.get("train_positions"))
-             == _normal_positions(lock["train_positions"]),
-             "Legacy train positions differ from active lock")
+             == registered["train_positions"],
+             "Legacy train positions differ from the locked label-eligible cohort")
     _require(_normal_positions(historical.get("validation_positions"))
-             == _normal_positions(lock["validation_positions"]),
-             "Legacy validation positions differ from active lock")
+             == registered["validation_positions"],
+             "Legacy validation positions differ from the locked teacher cohort")
     _require(int(historical.get("test_assets_opened", -1)) == 0
              and not historical.get("test_asset_paths"),
              "Legacy evidence references sealed test assets")

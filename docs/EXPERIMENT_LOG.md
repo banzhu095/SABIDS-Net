@@ -3,9 +3,10 @@
 ## 2026-09-23 — D2 formal teacher evidence closure (implementation only)
 
 - Read-only audit of `GPT_light_d2_teacher_blocker_20260923_100230.tar.gz`
-  confirmed that historical `stage2_segment_safe_current_fold0` used 13 locked
-  train positions versus the active protocol's 30, had no protocol/data-plan/
-  split-contract binding, and recorded sealed-test groups in its label asset
+  confirmed that historical `stage2_segment_safe_current_fold0` used 13
+  label-eligible train positions, had no protocol/data-plan/split-contract
+  binding, could not prove that cohort was the current locked
+  `train_segment.csv`, and recorded sealed-test groups in its label asset
   inventory. The historical checkpoint therefore remains ineligible; no
   derived evidence was created.
 - Added an explicit seed-42 safe-current teacher reproduction with train/val
@@ -35,6 +36,15 @@
   and no project test asset evaluation were performed.
 - Cloud best-D1 source assets are absent locally, so scientific best-D1/D2 use
   remains conditional on the cloud binding/preflight passing.
+- Corrected formal-teacher cohort validation after cloud preflight exposed a
+  false equality check. The active lock's 30 training positions are the full
+  denoising/development pool, while segmentation training must exactly match
+  the label-eligible train subset in `train_segment.csv`. Preparation now
+  registers that subset in the generated config; training and binding require
+  exact agreement with it, require it to remain inside the active train pool,
+  keep validation equal to all three locked groups, and keep test sealed.
+  Correction verification: 18 focused teacher-evidence tests and all 330
+  repository tests passed locally; no CUDA run or cloud operation was started.
 
 This is the durable experiment ledger. Update it after an experiment finishes or
 when a run is intentionally stopped. Do not rewrite old outcomes to match a new

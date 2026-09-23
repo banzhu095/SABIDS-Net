@@ -14,7 +14,11 @@ import torch
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path: sys.path.insert(0, str(ROOT))
 from sabids.config import load_config
-from sabids.experiments.d2_teacher import audit_teacher_binding
+from sabids.experiments.d2_teacher import (
+    audit_teacher_binding,
+    filtered_teacher_manifest,
+    validate_teacher_cohort,
+)
 from sabids.engine.trainer import build_model
 from sabids.experiments.dose_response import resolve, stable_sha, write_strict_json_exclusive
 from sabids.experiments.protocol_lock import load_protocol_lock, sha256_file, validate_checkpoint_config
@@ -80,15 +84,23 @@ def main() -> None:
     table = pd.read_csv(manifest, dtype=str).fillna("")
     if not table["split"].isin(["train", "val"]).all():
         raise ValueError("Teacher manifest contains a non-development split")
-    train = table[table["split"].eq(config["data"].get("train_split", "train"))]
-    val = table[table["split"].eq(config["data"].get("val_split", "val"))]
-    if config["data"].get("train_groups"):
-        train = train[train["group_id"].isin(map(str, config["data"]["train_groups"]))]
-    if config["data"].get("val_groups"):
-        val = val[val["group_id"].isin(map(str, config["data"]["val_groups"]))]
-    if (set(train["group_id"]) != set(lock["train_positions"])
-            or set(val["group_id"]) != set(lock["validation_positions"])):
-        raise ValueError("Teacher effective train/validation groups differ from protocol")
+    filtered = filtered_teacher_manifest(config, table)
+    train = filtered[filtered["split"].eq("train")]
+    val = filtered[filtered["split"].eq("val")]
+    teacher_protocol = config.get("formal_d2_teacher", {})
+    expected_train = (
+        binding.get("train_positions") if binding is not None
+        else teacher_protocol.get("expected_train_positions", lock["train_positions"])
+    )
+    expected_validation = (
+        binding.get("validation_positions") if binding is not None
+        else teacher_protocol.get("expected_validation_positions", lock["validation_positions"])
+    )
+    validate_teacher_cohort(
+        train["group_id"], val["group_id"], lock,
+        expected_train=expected_train,
+        expected_validation=expected_validation,
+    )
     checkpoint_sha = sha256_file(checkpoint)
     if checkpoint.name == "best.pth":
         metadata_path = checkpoint.parent / "run_metadata.json"

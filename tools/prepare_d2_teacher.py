@@ -15,7 +15,10 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from sabids.config import load_config, save_config
-from sabids.experiments.d2_teacher import filtered_teacher_manifest
+from sabids.experiments.d2_teacher import (
+    filtered_teacher_manifest,
+    validate_teacher_cohort,
+)
 from sabids.experiments.dose_response import (
     effective_split_sha,
     formal_preflight,
@@ -87,10 +90,11 @@ def main() -> None:
     filtered = filtered_teacher_manifest(config, table)
     train_groups = sorted(filtered.loc[filtered["split"].eq("train"), "group_id"].unique())
     val_groups = sorted(filtered.loc[filtered["split"].eq("val"), "group_id"].unique())
-    if train_groups != sorted(lock["train_positions"]):
-        raise RuntimeError("Teacher manifest train positions differ from active lock")
-    if val_groups != sorted(lock["validation_positions"]):
-        raise RuntimeError("Teacher manifest validation positions differ from active lock")
+    cohort = validate_teacher_cohort(train_groups, val_groups, lock)
+    config["formal_d2_teacher"].update({
+        "expected_train_positions": train_groups,
+        "expected_validation_positions": val_groups,
+    })
     runtime = config.setdefault("runtime", {})
     runtime.update({
         "active_protocol_lock": lock,
@@ -117,6 +121,8 @@ def main() -> None:
         "teacher_effective_split_sha256": runtime["effective_split_sha256"],
         "train_positions": train_groups,
         "validation_positions": val_groups,
+        "protocol_train_positions": cohort["protocol_train_positions"],
+        "teacher_train_subset_of_protocol": cohort["teacher_train_subset_of_protocol"],
         "selection_rule": "best_validation_vessel_soft_dice",
         "test_assets_opened": 0,
     }
