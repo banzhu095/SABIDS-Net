@@ -1,5 +1,25 @@
 # SABIDS-Net experiment log
 
+## 2026-09-23 — D2 formal teacher evidence closure (implementation only)
+
+- Read-only audit of `GPT_light_d2_teacher_blocker_20260923_100230.tar.gz`
+  confirmed that historical `stage2_segment_safe_current_fold0` used 13 locked
+  train positions versus the active protocol's 30, had no protocol/data-plan/
+  split-contract binding, and recorded sealed-test groups in its label asset
+  inventory. The historical checkpoint therefore remains ineligible; no
+  derived evidence was created.
+- Added an explicit seed-42 safe-current teacher reproduction with train/val
+  asset evidence, initial/best/last checkpoints, optimizer-step and parameter
+  audits, strict native/legacy binding gates, overfit audit, and cloud command
+  sequence. Legacy configs remain opt-out and unchanged.
+- Local synthetic CPU smoke completed one teacher epoch, wrote all expected
+  evidence, bound best checkpoint, proved frozen parameters unchanged, and did
+  not access a test asset. This is engineering validation, not a scientific
+  teacher result.
+- `python -m compileall -q .`, `git diff --check`, 76 focused tests and all 329
+  repository tests passed. No CUDA training, formal validation inference,
+  cloud operation, commit, push, or merge was performed.
+
 ## 2026-09-22 — D2 implementation only
 
 - Branch: `feature/structure-preserving-d2-v1`.

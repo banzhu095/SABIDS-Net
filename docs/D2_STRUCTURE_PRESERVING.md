@@ -29,6 +29,125 @@ The seed-42 gate is fail-closed. A passed gate authorizes preparation of
 seed-43/44 configs, not training. Sealed test assets remain unused until all
 methods, checkpoints, doses, thresholds, and postprocessing are frozen.
 
+## Formal segmentation teacher closure
+
+The 2026-09-23 lightweight evidence audit rejected all historical Stage 2
+teachers for formal D2 use. The leading `safe_current` run used only 13 of the
+30 locked training positions, did not record the active protocol/data-plan/
+split-contract hashes, and its label inventory included sealed-test groups.
+These facts cannot be repaired by adding a current `protocol_id`. See
+`docs/D2_TEACHER_EVIDENCE_AUDIT.md`.
+
+The replacement teacher is an explicit opt-in reproduction of the safe-current
+model, frozen-encoder policy and segmentation loss. It uses one seed-42 teacher
+for every D20/D22/D24/D25 seed. It records `initial.pth`, training-time pixel
+inventory, initialization and parameter audits, `best.pth`, `last.pth`, global
+optimizer steps and a native best-checkpoint binding. Legacy Stage 2 behavior
+is unchanged.
+
+Run the following only on the cloud after resolving the D1 and split variables
+shown below. Every output path is new and all writers refuse overwrite:
+
+```bash
+export SABIDS_ROOT=/mnt/SABIDS-Net
+cd "$SABIDS_ROOT"
+export SABIDS_LOCK=Manifests/pku37_binary_v3/active_protocol_lock.json
+export SABIDS_SPLIT_CONTRACT=configs/data/pku37_binary_v3_split.yaml
+export D1_RUN=runs/adaptive_denoising/pku37_binary_v3/d1_repro_fold0_seed42
+export D1_BINDING="$D1_RUN/checkpoint_binding_best_d2_v1.json"
+export TEACHER_RUN=runs/adaptive_denoising/pku37_binary_v3/d2_teacher_fold0_seed42
+export TEACHER_OVERFIT_RUN=runs/adaptive_denoising/pku37_binary_v3/d2_teacher_overfit_seed42
+export TEACHER_LAUNCH=runs/adaptive_denoising/d2_teacher_launch_configs
+mkdir -p "$TEACHER_LAUNCH" reports/adaptive_denoising/d2_runtime
+
+# 1. Formal preflight (no training).
+python tools/prepare_d2_teacher.py --project-root . --mode preflight \
+  --protocol-lock "$SABIDS_LOCK" --split-contract "$SABIDS_SPLIT_CONTRACT" \
+  --d1-checkpoint "$D1_RUN/best.pth" \
+  --d1-training-asset-inventory "$D1_RUN/training_asset_inventory_initial.json" \
+  --d1-checkpoint-binding "$D1_BINDING" \
+  --output reports/adaptive_denoising/d2_runtime/teacher_preflight_v2.json
+
+# 2. Prepare and run the CUDA overfit diagnostic.
+python tools/prepare_d2_teacher.py --project-root . --mode overfit --device cuda \
+  --protocol-lock "$SABIDS_LOCK" --split-contract "$SABIDS_SPLIT_CONTRACT" \
+  --d1-checkpoint "$D1_RUN/best.pth" \
+  --d1-training-asset-inventory "$D1_RUN/training_asset_inventory_initial.json" \
+  --d1-checkpoint-binding "$D1_BINDING" \
+  --run-dir "$TEACHER_OVERFIT_RUN" \
+  --output "$TEACHER_LAUNCH/d2_teacher_overfit_seed42.yaml"
+python train.py --config "$TEACHER_LAUNCH/d2_teacher_overfit_seed42.yaml"
+
+# 3. Audit the overfit gain and parameter boundary.
+python tools/audit_d2_teacher_overfit.py --project-root . \
+  --run-dir "$TEACHER_OVERFIT_RUN" --minimum-gain 0.01 \
+  --output reports/adaptive_denoising/d2_runtime/teacher_overfit_audit_v2.json
+
+# 4. Prepare and run the complete seed-42 teacher.
+python tools/prepare_d2_teacher.py --project-root . --mode formal --device cuda \
+  --protocol-lock "$SABIDS_LOCK" --split-contract "$SABIDS_SPLIT_CONTRACT" \
+  --d1-checkpoint "$D1_RUN/best.pth" \
+  --d1-training-asset-inventory "$D1_RUN/training_asset_inventory_initial.json" \
+  --d1-checkpoint-binding "$D1_BINDING" \
+  --run-dir "$TEACHER_RUN" \
+  --output "$TEACHER_LAUNCH/d2_teacher_formal_seed42.yaml"
+python train.py --config "$TEACHER_LAUNCH/d2_teacher_formal_seed42.yaml"
+
+# 5. Complete validation-only P0 evaluation.
+python evaluate.py --config "$TEACHER_RUN/resolved_config.yaml" \
+  --checkpoint "$TEACHER_RUN/best.pth" --split val \
+  --output "$TEACHER_RUN/validation_results" --tasks layer vessel \
+  --postprocess-modes p0 --layer-threshold 0.5 --vessel-threshold 0.5 \
+  --no-restore-original-geometry --save-predictions
+
+# 6. Bind the validation-selected best checkpoint.
+python tools/bind_d2_teacher_evidence.py --project-root . --mode native \
+  --checkpoint "$TEACHER_RUN/best.pth" --history "$TEACHER_RUN/history.csv" \
+  --resolved-config "$TEACHER_RUN/resolved_config.yaml" \
+  --run-metadata "$TEACHER_RUN/run_metadata.json" \
+  --protocol-lock "$SABIDS_LOCK" --split-contract "$SABIDS_SPLIT_CONTRACT" \
+  --initial-inventory "$TEACHER_RUN/training_asset_inventory_initial.json" \
+  --initial-checkpoint "$TEACHER_RUN/initial.pth" \
+  --initialization-audit "$TEACHER_RUN/initialization_audit.json" \
+  --parameter-audit "$TEACHER_RUN/formal_teacher_parameter_audit.json" \
+  --output "$TEACHER_RUN/checkpoint_binding_teacher_native_v2.json"
+
+# 7. Reload, strictly freeze and emit D2 teacher evidence.
+export TEACHER_EVIDENCE=reports/adaptive_denoising/d2_runtime/teacher_evidence_native_v2.json
+python tools/audit_d2_teacher.py --project-root . \
+  --checkpoint "$TEACHER_RUN/best.pth" \
+  --resolved-config "$TEACHER_RUN/resolved_config.yaml" \
+  --protocol-lock "$SABIDS_LOCK" \
+  --checkpoint-binding "$TEACHER_RUN/checkpoint_binding_teacher_native_v2.json" \
+  --output "$TEACHER_EVIDENCE"
+
+# 8. Freeze train-only vessel strata.
+export STRATA=reports/adaptive_denoising/d2_runtime/vessel_strata_train_v2.json
+python tools/prepare_vessel_strata.py --project-root . \
+  --config "$TEACHER_RUN/resolved_config.yaml" --ring-width 3 --output "$STRATA"
+
+# 9. Prepare and run D25 CUDA overfit with this one frozen teacher.
+export TEACHER_SELECTION_RULE=best_validation_vessel_soft_dice
+export TEACHER_TRAINING_DATA="$(python -c 'import json,os; print(json.load(open(os.environ["TEACHER_EVIDENCE"]))["training_data"])')"
+python tools/prepare_d2_seed42.py --project-root . --mode overfit --arms D25 \
+  --tag overfit_teacher_v2 --seed 42 \
+  --d1-checkpoint "$D1_RUN/best.pth" \
+  --d1-initial-inventory "$D1_RUN/training_asset_inventory_initial.json" \
+  --d1-checkpoint-binding "$D1_BINDING" \
+  --protocol-lock "$SABIDS_LOCK" --split-contract "$SABIDS_SPLIT_CONTRACT" \
+  --vessel-strata-definition "$STRATA" \
+  --teacher-checkpoint "$TEACHER_RUN/best.pth" \
+  --teacher-evidence "$TEACHER_EVIDENCE" \
+  --teacher-selection-rule "$TEACHER_SELECTION_RULE" \
+  --teacher-training-data "$TEACHER_TRAINING_DATA" \
+  --teacher-split development_train_val --device cuda
+python train.py --config \
+  runs/adaptive_denoising/d2_v1_launch_configs/d25_overfit_overfit_teacher_v2_seed42.yaml
+python tools/audit_d2_overfit.py \
+  --run-dir runs/adaptive_denoising/pku37_binary_v3/d2_v1/overfit_overfit_teacher_v2/d25_seed42 \
+  --output reports/adaptive_denoising/d2_runtime/d25_overfit_audit_teacher_v2.json
+```
+
 ## Cloud execution order
 
 Run from `/mnt/SABIDS-Net`. Resolve the already locked split-contract path by
@@ -50,24 +169,26 @@ print(matches[0])
 PY
 )"
 export D1_RUN=runs/adaptive_denoising/pku37_binary_v3/d1_repro_fold0_seed42
+export D1_BINDING="$D1_RUN/checkpoint_binding_best_d2_v1.json"
 ```
 
 Bind and audit D1 best, then freeze train-only vessel strata:
 
 ```bash
-python tools/bind_training_checkpoint_evidence.py --project-root . \
-  --initial-inventory "$D1_RUN/training_asset_inventory_initial.json" \
-  --checkpoint "$D1_RUN/best.pth" --history "$D1_RUN/history.csv" \
-  --resolved-config "$D1_RUN/resolved_config.yaml" \
-  --run-metadata "$D1_RUN/run_metadata.json" --protocol-lock "$SABIDS_LOCK" \
-  --split-contract "$SABIDS_SPLIT_CONTRACT" \
-  --output "$D1_RUN/checkpoint_binding_best.json"
+if [ ! -f "$D1_BINDING" ]; then
+  python tools/bind_training_checkpoint_evidence.py --project-root . \
+    --initial-inventory "$D1_RUN/training_asset_inventory_initial.json" \
+    --checkpoint "$D1_RUN/best.pth" --history "$D1_RUN/history.csv" \
+    --resolved-config "$D1_RUN/resolved_config.yaml" \
+    --run-metadata "$D1_RUN/run_metadata.json" --protocol-lock "$SABIDS_LOCK" \
+    --split-contract "$SABIDS_SPLIT_CONTRACT" --output "$D1_BINDING"
+fi
 
 python tools/audit_adaptive_denoising_baseline.py --project-root . --mode formal \
   --denoiser-checkpoint "$D1_RUN/best.pth" --protocol-lock "$SABIDS_LOCK" \
   --split-contract "$SABIDS_SPLIT_CONTRACT" --selection-rule best_validation_psnr \
   --training-asset-inventory "$D1_RUN/training_asset_inventory_initial.json" \
-  --checkpoint-binding "$D1_RUN/checkpoint_binding_best.json" \
+  --checkpoint-binding "$D1_BINDING" \
   --output reports/adaptive_denoising/d1_best_preflight_$(date +%Y%m%d_%H%M%S)
 
 python tools/prepare_vessel_strata.py --project-root . \
@@ -84,28 +205,24 @@ python tools/prepare_dose_response_inputs.py --project-root . --mode formal \
   --denoiser-checkpoint "$D1_RUN/best.pth" --protocol-lock "$SABIDS_LOCK" \
   --split-contract "$SABIDS_SPLIT_CONTRACT" --selection-rule best_validation_psnr \
   --training-asset-inventory "$D1_RUN/training_asset_inventory_initial.json" \
-  --checkpoint-binding "$D1_RUN/checkpoint_binding_best.json" \
+  --checkpoint-binding "$D1_BINDING" \
   --curves d1 --alphas 0 0.25 0.5 1.0 --seeds 42 --budget pilot \
   --tag d1_best_sensitivity_v1 --device cuda
 ```
 
-Before D24/D25, locate one legal validation-selected segmentation teacher and
-derive its evidence JSON. Do not guess these two source paths. The audit derives
-the selection rule and train/validation cohort identity from the immutable
-sources rather than trusting free-form labels:
+Before D24/D25, complete the formal teacher closure above. Historical Stage 2
+paths are not eligible substitutes. Reuse the single native-bound seed-42
+teacher in every arm:
 
 ```bash
-export TEACHER=/absolute/path/to/legal_segmentation_checkpoint.pth
-export TEACHER_CONFIG=/absolute/path/to/the_same_run/resolved_config.yaml
-export TEACHER_EVIDENCE=reports/adaptive_denoising/d2_runtime/teacher_evidence_v1.json
-python tools/audit_d2_teacher.py --project-root . \
-  --checkpoint "$TEACHER" --resolved-config "$TEACHER_CONFIG" \
-  --protocol-lock "$SABIDS_LOCK" --output "$TEACHER_EVIDENCE"
-test $? -eq 0 || exit $?
+export TEACHER_RUN=runs/adaptive_denoising/pku37_binary_v3/d2_teacher_fold0_seed42
+export TEACHER="$TEACHER_RUN/best.pth"
+export TEACHER_EVIDENCE=reports/adaptive_denoising/d2_runtime/teacher_evidence_native_v2.json
+test -f "$TEACHER" -a -f "$TEACHER_EVIDENCE" || { echo 'BLOCKED: native teacher evidence missing'; exit 1; }
 export TEACHER_SELECTION_RULE="$(python -c 'import json,os; print(json.load(open(os.environ["TEACHER_EVIDENCE"]))["selection_rule"])')"
 export TEACHER_TRAINING_DATA="$(python -c 'import json,os; print(json.load(open(os.environ["TEACHER_EVIDENCE"]))["training_data"])')"
-export STRATA=reports/adaptive_denoising/d2_runtime/vessel_strata_train_v1.json
-COMMON="--project-root . --d1-checkpoint $D1_RUN/best.pth --d1-initial-inventory $D1_RUN/training_asset_inventory_initial.json --d1-checkpoint-binding $D1_RUN/checkpoint_binding_best.json --protocol-lock $SABIDS_LOCK --split-contract $SABIDS_SPLIT_CONTRACT --vessel-strata-definition $STRATA --teacher-checkpoint $TEACHER --teacher-evidence $TEACHER_EVIDENCE --teacher-selection-rule $TEACHER_SELECTION_RULE --teacher-training-data $TEACHER_TRAINING_DATA --teacher-split development_train_val"
+export STRATA=reports/adaptive_denoising/d2_runtime/vessel_strata_train_v2.json
+COMMON="--project-root . --d1-checkpoint $D1_RUN/best.pth --d1-initial-inventory $D1_RUN/training_asset_inventory_initial.json --d1-checkpoint-binding $D1_BINDING --protocol-lock $SABIDS_LOCK --split-contract $SABIDS_SPLIT_CONTRACT --vessel-strata-definition $STRATA --teacher-checkpoint $TEACHER --teacher-evidence $TEACHER_EVIDENCE --teacher-selection-rule $TEACHER_SELECTION_RULE --teacher-training-data $TEACHER_TRAINING_DATA --teacher-split development_train_val"
 python tools/prepare_d2_seed42.py $COMMON --mode smoke --arms D20 D25 --tag smoke_v1
 python train.py --config runs/adaptive_denoising/d2_v1_launch_configs/d20_smoke_smoke_v1_seed42.yaml
 python train.py --config runs/adaptive_denoising/d2_v1_launch_configs/d25_smoke_smoke_v1_seed42.yaml

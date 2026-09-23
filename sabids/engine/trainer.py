@@ -295,6 +295,7 @@ class Trainer:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self._training_asset_initial_path: Optional[Path] = None
         self._training_asset_filtered: Optional[pd.DataFrame] = None
+        self._prepare_formal_d2_teacher_config()
         self._prepare_training_asset_evidence_config()
         self.train_loader, self.val_loader, self.train_sampler = build_loaders(config)
         self._record_run_inputs()
@@ -526,6 +527,13 @@ class Trainer:
         if not evidence_path.is_file() or _sha256_file(evidence_path) != evidence_sha:
             raise ValueError("D2 segmentation teacher evidence missing or changed")
         evidence = json.loads(evidence_path.read_text(encoding="utf-8-sig"))
+        if (
+            d2_cfg.get("run_mode") != "smoke"
+            and evidence.get("evidence_type") not in {
+                "native_protocol_binding", "derived_legacy_binding"
+            }
+        ):
+            raise ValueError("Formal D2 teacher evidence type is unverified")
         bound_teacher_sha = evidence.get("checkpoint_sha256") or evidence.get("best_checkpoint_sha256")
         if (bound_teacher_sha != actual_sha
                 or evidence.get("status", "passed") not in {"passed", "completed"}
@@ -599,12 +607,98 @@ class Trainer:
             "d2_teacher_clean_vessel_prob": teacher_clean["vessel_prob"],
         })
 
+    def _prepare_formal_d2_teacher_config(self) -> None:
+        """Bind the opt-in segmentation teacher to the active protocol.
+
+        This path is deliberately separate from legacy Stage 2.  No behavior
+        changes unless ``formal_d2_teacher.enabled`` is explicitly true.
+        """
+        teacher_cfg = self.config.get("formal_d2_teacher", {})
+        if not teacher_cfg.get("enabled", False):
+            return
+        if teacher_cfg.get("template_only", False):
+            raise ValueError(
+                "Formal D2 teacher template is not executable; use tools/prepare_d2_teacher.py"
+            )
+        from sabids.experiments.dose_response import resolve
+
+        if self.config.get("train", {}).get("stage") != "segment":
+            raise ValueError("Formal D2 teacher requires train.stage=segment")
+        if int(self.config.get("seed", -1)) != 42:
+            raise ValueError("The first formal D2 teacher is fixed to seed 42")
+        train_cfg = self.config["train"]
+        if train_cfg.get("resume"):
+            raise ValueError("Formal D2 teacher must start fresh; resume is forbidden")
+        if train_cfg.get("monitor") != "vessel_soft_dice":
+            raise ValueError("Formal D2 teacher monitor must be vessel_soft_dice")
+        if train_cfg.get("checkpoint_selection_rule") != "best_validation_vessel_soft_dice":
+            raise ValueError("Formal D2 teacher selection rule mismatch")
+        epochs = int(train_cfg.get("epochs", 0))
+        if int(train_cfg.get("early_stopping_patience", 0)) <= epochs:
+            raise ValueError("Formal D2 teacher must complete its fixed training budget")
+        model_cfg = self.config.get("model", {})
+        if any(bool(model_cfg.get(key, False)) for key in (
+            "d2s_enabled", "s2d_enabled", "enable_denoise_to_seg", "enable_seg_to_denoise",
+        )):
+            raise ValueError("Formal D2 teacher requires D->S and S->D disabled")
+        if not bool(model_cfg.get("stage2_freeze_shared_encoder", False)):
+            raise ValueError("Formal D2 teacher requires the safe-current frozen encoder")
+        if bool(model_cfg.get("stage2_train_denoise_to_seg", False)):
+            raise ValueError("Formal D2 teacher cannot train denoise-to-seg interaction")
+        loss = self.config.get("loss", {})
+        expected_weights = {
+            "layer": 1.0, "vessel": 1.0, "vessel_stroma": 0.25,
+            "vessel_area": 0.2, "vessel_outside": 0.0, "containment": 0.1,
+        }
+        for key, expected in expected_weights.items():
+            if float(loss.get("weights", {}).get(key, float("nan"))) != expected:
+                raise ValueError(f"Formal D2 teacher safe-current loss mismatch: {key}")
+        if float(loss.get("auxiliary_weight", 0.0)) != 0.0:
+            raise ValueError("Formal D2 teacher auxiliary loss must be disabled")
+        evidence_cfg = self.config.get("training_asset_evidence", {})
+        if evidence_cfg.get("enabled") is not True:
+            raise ValueError("Formal D2 teacher requires training-time asset evidence")
+        project_root = Path(evidence_cfg.get("project_root", ".")).expanduser().resolve()
+        lock_path = resolve(project_root, evidence_cfg.get("protocol_lock", ""))
+        split_path = resolve(project_root, teacher_cfg.get("split_contract", ""))
+        lock = load_protocol_lock(lock_path)
+        if not split_path.is_file() or _sha256_file(split_path) != lock["split_contract_sha256"]:
+            raise ValueError("Formal D2 teacher split contract is missing or changed")
+        if self.config.get("protocol_id") != lock["protocol_id"]:
+            raise ValueError("Formal D2 teacher protocol_id differs from active lock")
+        if list(self.config["data"].get("target_size", [])) != list(lock["input_resolution"]):
+            raise ValueError("Formal D2 teacher target_size differs from active lock")
+        if self.config["data"].get("normalization") != lock["normalization"]:
+            raise ValueError("Formal D2 teacher normalization differs from active lock")
+        protocol_root = resolve(project_root, lock["manifest_root"])
+        expected_manifest = (protocol_root / "train_segment.csv").resolve()
+        if resolve(project_root, self.config["data"]["manifest"]) != expected_manifest:
+            raise ValueError("Formal D2 teacher must use the locked train_segment.csv")
+        output = self.output_dir.resolve()
+        current_root = (project_root / "runs" / "current").resolve()
+        if output == current_root or current_root in output.parents:
+            raise ValueError("Formal D2 teacher must not overwrite runs/current")
+        for key in ("manifest_root", "data_plan_sha256", "label_inventory_sha256"):
+            self.config[key] = lock[key]
+        runtime = self.config.setdefault("runtime", {})
+        runtime.update({
+            "active_protocol_lock": lock,
+            "active_protocol_lock_path": str(lock_path),
+            "formal_d2_teacher_split_contract": str(split_path),
+            "formal_d2_teacher_split_contract_sha256": _sha256_file(split_path),
+            "test_assets_opened": 0,
+        })
+
     def _prepare_training_asset_evidence_config(self) -> None:
         evidence_cfg = self.config.get("training_asset_evidence", {})
         if not evidence_cfg.get("enabled", False):
             return
-        if str(self.config.get("train", {}).get("stage", "")) != "denoise":
-            raise ValueError("training_asset_evidence is only valid for stage=denoise")
+        stage = str(self.config.get("train", {}).get("stage", ""))
+        formal_teacher = bool(self.config.get("formal_d2_teacher", {}).get("enabled", False))
+        if stage != "denoise" and not (stage == "segment" and formal_teacher):
+            raise ValueError(
+                "training_asset_evidence requires stage=denoise or an explicit formal D2 teacher"
+            )
         if self.config.get("train", {}).get("resume"):
             raise ValueError(
                 "training_asset_evidence cannot be enabled retroactively on a resumed run"
@@ -615,6 +709,7 @@ class Trainer:
                 self.output_dir / "last.pth",
                 self.output_dir / "best.pth",
                 self.output_dir / "history.csv",
+                self.output_dir / "initial.pth",
             )
             if path.exists()
         ]
@@ -681,7 +776,11 @@ class Trainer:
             train_groups = set(train["group_id"].astype(str).unique())
             val_groups = set(val["group_id"].astype(str).unique())
             d2_run_mode = self.config.get("d2", {}).get("run_mode")
-            partial_diagnostic = d2_run_mode in {"smoke", "overfit"}
+            teacher_run_mode = self.config.get("formal_d2_teacher", {}).get("run_mode")
+            partial_diagnostic = (
+                d2_run_mode in {"smoke", "overfit"}
+                or teacher_run_mode in {"smoke", "overfit"}
+            )
             if partial_diagnostic:
                 if not train_groups <= set(lock["train_positions"]):
                     raise ValueError("D2 diagnostic train groups exceed the locked development train cohort")
@@ -790,6 +889,22 @@ class Trainer:
             },
             self.output_dir / "initialization_audit.json",
         )
+        if self.config.get("formal_d2_teacher", {}).get("enabled", False):
+            initial_path = self.output_dir / "initial.pth"
+            if initial_path.exists():
+                raise FileExistsError(f"Refusing existing formal teacher initial checkpoint: {initial_path}")
+            save_checkpoint(
+                initial_path,
+                self.model,
+                self.optimizer,
+                self.scheduler,
+                -1,
+                self.best_metric,
+                self.config,
+                self.scaler,
+                self.ema.state_dict() if self.ema is not None else None,
+                {"global_optimizer_step": 0, "formal_d2_teacher_initial": True},
+            )
         if self.config.get("dose_response", {}).get("enabled", False):
             from sabids.experiments.dose_response import augmentation_plan_sha, stable_sha, write_strict_json
             audit_path = self.output_dir / "initialization_audit.json"
@@ -834,7 +949,10 @@ class Trainer:
         asset_table = table if load_segmentation_labels else table.iloc[0:0]
         if not load_segmentation_labels:
             runtime["label_inventory_splits"] = []
-        elif str(self.config.get("train", {}).get("stage", "")) in {"interaction", "input_segment"}:
+        elif (
+            str(self.config.get("train", {}).get("stage", "")) in {"interaction", "input_segment"}
+            or bool(self.config.get("formal_d2_teacher", {}).get("enabled", False))
+        ):
             allowed_splits = {
                 str(self.config.get("data", {}).get("train_split", "train")),
                 str(self.config.get("data", {}).get("val_split", "val")),
@@ -1989,12 +2107,20 @@ class Trainer:
         d2_selection_rows: list[dict] = []
 
         d2_global_optimizer_step = 0
+        formal_teacher = bool(
+            self.config.get("formal_d2_teacher", {}).get("enabled", False)
+        )
+        formal_teacher_global_optimizer_step = 0
 
         def checkpoint_extra(epoch_index: int) -> Dict:
             if self.phase_machine is None:
                 extra = {"phase_state": None}
                 if self.config.get("d2", {}).get("enabled", False):
                     extra["global_optimizer_step"] = int(d2_global_optimizer_step)
+                elif formal_teacher:
+                    extra["global_optimizer_step"] = int(
+                        formal_teacher_global_optimizer_step
+                    )
                 return extra
             state = self.phase_machine.snapshot(epoch_index)
             state["batch_plan_state"].update({
@@ -2014,6 +2140,10 @@ class Trainer:
             extra = {"phase_state": state}
             if self.config.get("d2", {}).get("enabled", False):
                 extra["global_optimizer_step"] = int(d2_global_optimizer_step)
+            elif formal_teacher:
+                extra["global_optimizer_step"] = int(
+                    formal_teacher_global_optimizer_step
+                )
             return extra
 
         if self.start_epoch == 0 and bool(
@@ -2050,6 +2180,10 @@ class Trainer:
             train_metrics = self.train_epoch(epoch)
             if self.config.get("d2", {}).get("enabled", False):
                 d2_global_optimizer_step += int(train_metrics.get("optimizer_steps", 0))
+            elif formal_teacher:
+                formal_teacher_global_optimizer_step += int(
+                    train_metrics.get("optimizer_steps", 0)
+                )
             epoch_number = epoch + 1
             val_metrics = self.validate(
                 group_output=diagnostics_dir
@@ -2330,6 +2464,69 @@ class Trainer:
                 ),
                 "test_assets_opened": 0,
             })
+        if formal_teacher:
+            if completed_epochs != epochs:
+                raise RuntimeError("Formal D2 teacher ended before its fixed training budget")
+            from sabids.experiments.dose_response import tensor_sha, write_strict_json
+            initialization = json.loads(
+                (self.output_dir / "initialization_audit.json").read_text(encoding="utf-8")
+            )
+            changed_trainable, changed_frozen = [], []
+            trainable_names, frozen_names = [], []
+            allowed_prefixes = (
+                "adapters.layer.", "adapters.vessel.",
+                "decoders.layer.", "decoders.vessel.",
+                "layer_head.", "boundary_head.", "vessel_head.",
+            )
+            for name, parameter in self.model.named_parameters():
+                changed = tensor_sha(parameter) != initialization["tensor_sha256"][name]
+                if parameter.requires_grad:
+                    trainable_names.append(name)
+                    if changed:
+                        changed_trainable.append(name)
+                else:
+                    frozen_names.append(name)
+                    if changed:
+                        changed_frozen.append(name)
+            unexpected_trainable = [
+                name for name in trainable_names
+                if not name.startswith(allowed_prefixes)
+            ]
+            parameter_audit = {
+                "status": "passed" if (
+                    changed_trainable and not changed_frozen
+                    and not unexpected_trainable
+                    and formal_teacher_global_optimizer_step > 0
+                ) else "failed",
+                "trainable_parameter_names": trainable_names,
+                "frozen_parameter_names": frozen_names,
+                "unexpected_trainable_parameter_names": unexpected_trainable,
+                "changed_trainable_parameter_names": changed_trainable,
+                "changed_frozen_parameter_names": changed_frozen,
+                "changed_trainable_parameter_count": len(changed_trainable),
+                "changed_frozen_parameter_count": len(changed_frozen),
+                "optimizer_steps": int(formal_teacher_global_optimizer_step),
+                "completed_epochs": int(completed_epochs),
+                "test_assets_opened": 0,
+            }
+            write_strict_json(
+                self.output_dir / "formal_teacher_parameter_audit.json", parameter_audit
+            )
+            if parameter_audit["status"] != "passed":
+                raise RuntimeError("Formal D2 teacher parameter audit failed")
+            history_table = pd.read_csv(self.output_dir / "history.csv", low_memory=False)
+            write_strict_json(self.output_dir / "formal_teacher_training_summary.json", {
+                "status": "passed",
+                "selection_rule": "best_validation_vessel_soft_dice",
+                "completed_epochs": int(completed_epochs),
+                "optimizer_steps": int(formal_teacher_global_optimizer_step),
+                "best_checkpoint": str((self.output_dir / "best.pth").resolve()),
+                "best_checkpoint_sha256": _sha256_file(self.output_dir / "best.pth"),
+                "last_checkpoint": str((self.output_dir / "last.pth").resolve()),
+                "last_checkpoint_sha256": _sha256_file(self.output_dir / "last.pth"),
+                "history_rows": int(len(history_table)),
+                "test_assets_opened": 0,
+            })
         if self.config.get("training_asset_evidence", {}).get("enabled", False):
             from sabids.experiments.dose_response import (
                 asset_inventory,
@@ -2342,7 +2539,9 @@ class Trainer:
             project_root = Path(evidence_cfg.get("project_root", ".")).expanduser().resolve()
             data_root = resolve(project_root, self.config["data"].get("root") or project_root)
             current_records = asset_inventory(
-                data_root, self._training_asset_filtered, include_labels=False
+                data_root,
+                self._training_asset_filtered,
+                include_labels=formal_teacher,
             )
             last_evidence = bind_training_asset_evidence(
                 self._training_asset_initial_path,

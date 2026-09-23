@@ -1,0 +1,79 @@
+_base_: ../stage2_segment_safe_current.yaml
+
+# Template for a fresh, protocol-native frozen segmentation teacher.  The
+# preparation tool binds the current active lock and D1-best evidence before
+# producing a runnable config; do not run this template directly.
+protocol_id: pku37_binary_v3
+label_type: binary
+seed: 42
+device: cuda
+
+model:
+  d2s_enabled: false
+  s2d_enabled: false
+  enable_denoise_to_seg: false
+  enable_seg_to_denoise: false
+  stage2_freeze_shared_encoder: true
+  stage2_train_denoise_to_seg: false
+
+data:
+  manifest: Manifests/pku37_binary_v3/train_segment.csv
+  root: .
+  train_split: train
+  val_split: val
+  train_datasets: [PKU37]
+  val_datasets: [PKU37]
+  target_size: [512, 512]
+  normalization: fixed
+  samples_per_epoch: 64
+  load_segmentation_labels: true
+
+train:
+  stage: segment
+  output_dir: runs/adaptive_denoising/pku37_binary_v3/DO_NOT_RUN_D2_TEACHER_TEMPLATE
+  epochs: 60
+  batch_size: 2
+  gradient_accumulation_steps: 1
+  num_workers: 4
+  learning_rate: 0.00005
+  minimum_learning_rate: 0.000001
+  weight_decay: 0.0001
+  gradient_clip: 1.0
+  amp: false
+  monitor: vessel_soft_dice
+  checkpoint_selection_rule: best_validation_vessel_soft_dice
+  early_stopping_patience: 61
+  pretrained: runs/adaptive_denoising/pku37_binary_v3/d1_repro_fold0_seed42/best.pth
+  strict_pretrained: false
+  resume: null
+  scheduler: plateau
+  lr_plateau_patience: 4
+  lr_plateau_factor: 0.5
+  evaluate_epoch0: true
+  train_eval_every: 1
+  monitor_denoise_drift: true
+  denoise_drift_tolerance: 0.000001
+
+loss:
+  definition_version: stable-stroma-fp32-v1
+  auxiliary_weight: 0.0
+  weights:
+    layer: 1.0
+    vessel: 1.0
+    vessel_stroma: 0.25
+    vessel_area: 0.2
+    vessel_outside: 0.0
+    containment: 0.1
+
+training_asset_evidence:
+  enabled: true
+  project_root: .
+  protocol_lock: Manifests/pku37_binary_v3/active_protocol_lock.json
+
+formal_d2_teacher:
+  enabled: true
+  template_only: true
+  run_mode: formal
+  split_contract: configs/data/pku37_binary_v3_split.yaml
+  teacher_seed_policy: single_seed42_shared_by_all_d2_arms
+  test_assets_opened: 0

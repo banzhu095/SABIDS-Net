@@ -523,16 +523,27 @@ def create_training_asset_evidence(
     """Record effective train/val noisy+clean pixels before optimisation."""
     evidence_cfg = cfg.get("training_asset_evidence", {})
     _require(evidence_cfg.get("enabled") is True, "Training asset evidence is not enabled")
-    _require(cfg.get("train", {}).get("stage") == "denoise", "Asset evidence is denoise-only")
+    stage = cfg.get("train", {}).get("stage")
+    formal_teacher = bool(cfg.get("formal_d2_teacher", {}).get("enabled", False))
+    _require(
+        stage == "denoise" or (stage == "segment" and formal_teacher),
+        "Asset evidence requires denoise or an explicit formal D2 teacher",
+    )
     _require(filtered["split"].astype(str).isin(["train", "val"]).all(),
              "Filtered training evidence contains a non-development split")
     _require(set(filtered["split"].astype(str)) == {"train", "val"},
              "Training evidence requires both train and validation rows")
     manifest = resolve(root, cfg["data"]["manifest"])
-    records = asset_inventory(resolve(root, cfg["data"].get("root") or root), filtered, False)
+    include_labels = bool(stage == "segment" and formal_teacher)
+    records = asset_inventory(
+        resolve(root, cfg["data"].get("root") or root), filtered, include_labels
+    )
     records_sha = stable_sha(records)
     payload = {
-        "schema_version": "denoiser-training-assets-v1",
+        "schema_version": (
+            "d2-teacher-training-assets-v1" if formal_teacher
+            else "denoiser-training-assets-v1"
+        ),
         "recorded_at_training": True,
         "recorded_before_optimizer_step": True,
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -543,7 +554,13 @@ def create_training_asset_evidence(
         "effective_split_sha256": effective_split_sha(filtered),
         "records": records,
         "records_sha256": records_sha,
+        "train_val_asset_sha256": records_sha,
         "train_val_noisy_clean_asset_sha256": records_sha,
+        "asset_columns": (
+            ["image_path", "clean_path", "layer_mask_path", "vessel_mask_path",
+             "label_valid_mask_path", "vessel_valid_mask_path", "multiclass_label_path"]
+            if include_labels else ["image_path", "clean_path"]
+        ),
         "test_assets_opened": 0,
     }
     write_strict_json_exclusive(output_path, payload)

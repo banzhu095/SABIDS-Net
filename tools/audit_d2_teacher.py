@@ -14,6 +14,8 @@ import torch
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path: sys.path.insert(0, str(ROOT))
 from sabids.config import load_config
+from sabids.experiments.d2_teacher import audit_teacher_binding
+from sabids.engine.trainer import build_model
 from sabids.experiments.dose_response import resolve, stable_sha, write_strict_json_exclusive
 from sabids.experiments.protocol_lock import load_protocol_lock, sha256_file, validate_checkpoint_config
 
@@ -26,6 +28,7 @@ def main() -> None:
     parser.add_argument("--protocol-lock", required=True)
     parser.add_argument("--selection-rule", help="Optional expected derived selection rule")
     parser.add_argument("--training-data", help="Optional expected derived training-cohort identity")
+    parser.add_argument("--checkpoint-binding")
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
     root = Path(args.project_root).expanduser().resolve()
@@ -36,11 +39,39 @@ def main() -> None:
     raw = torch.load(checkpoint, map_location="cpu", weights_only=False)
     if not raw.get("model") or not raw.get("config"):
         raise ValueError("Teacher checkpoint lacks model/config")
-    validate_checkpoint_config(raw, lock, "D2 teacher")
+    binding = None
+    evidence_type = "unverified"
+    if args.checkpoint_binding:
+        binding_path = resolve(root, args.checkpoint_binding)
+        binding = audit_teacher_binding(binding_path, checkpoint)
+        evidence_type = binding["evidence_type"]
+        if binding.get("protocol_id") != lock["protocol_id"]:
+            raise ValueError("Teacher binding protocol differs from active lock")
+        for key in ("data_plan_sha256", "label_inventory_sha256",
+                    "dataset_inventory_sha256", "split_contract_sha256"):
+            if binding.get("protocol_values", {}).get(key) != lock[key]:
+                raise ValueError(f"Teacher binding protocol lock mismatch: {key}")
+    if evidence_type == "native_protocol_binding" or binding is None:
+        validate_checkpoint_config(raw, lock, "D2 teacher")
     config = load_config(config_path)
-    for section in ("model", "data", "train", "loss", "seed"):
+    if config.get("formal_d2_teacher", {}).get("enabled") is True and binding is None:
+        raise ValueError("Formal D2 teacher requires an immutable checkpoint binding")
+    for section in (
+        "model", "data", "train", "loss", "seed", "protocol_id", "label_type",
+        "formal_d2_teacher", "training_asset_evidence",
+    ):
         if raw["config"].get(section) != config.get(section):
             raise ValueError(f"Teacher checkpoint/resolved config mismatch: {section}")
+    with torch.random.fork_rng(devices=[]):
+        teacher = build_model(config)
+    teacher.load_state_dict(raw["model"], strict=True)
+    teacher.eval()
+    for parameter in teacher.parameters():
+        parameter.requires_grad_(False)
+    requires_grad = sum(parameter.numel() for parameter in teacher.parameters()
+                        if parameter.requires_grad)
+    if requires_grad:
+        raise RuntimeError("Frozen teacher audit found trainable parameters")
     if config.get("train", {}).get("stage") not in {
         "segment", "interaction", "input_segment", "joint"
     }:
@@ -55,7 +86,7 @@ def main() -> None:
         train = train[train["group_id"].isin(map(str, config["data"]["train_groups"]))]
     if config["data"].get("val_groups"):
         val = val[val["group_id"].isin(map(str, config["data"]["val_groups"]))]
-    if (not set(train["group_id"]) <= set(lock["train_positions"])
+    if (set(train["group_id"]) != set(lock["train_positions"])
             or set(val["group_id"]) != set(lock["validation_positions"])):
         raise ValueError("Teacher effective train/validation groups differ from protocol")
     checkpoint_sha = sha256_file(checkpoint)
@@ -99,7 +130,8 @@ def main() -> None:
     if args.training_data and args.training_data != training_data:
         raise ValueError("Teacher training-cohort identity mismatch")
     result = {
-        "schema_version": "d2-frozen-teacher-evidence-v1", "status": "passed",
+        "schema_version": "d2-frozen-teacher-evidence-v2", "status": "passed",
+        "evidence_type": evidence_type,
         "checkpoint_path": str(checkpoint), "checkpoint_sha256": checkpoint_sha,
         "checkpoint_epoch": int(raw.get("epoch", -1)) + 1,
         "resolved_config_path": str(config_path), "resolved_config_sha256": sha256_file(config_path),
@@ -109,6 +141,11 @@ def main() -> None:
         "training_data": training_data, "training_data_definition": cohort,
         "train_groups": sorted(set(train["group_id"])),
         "validation_groups": sorted(set(val["group_id"])), "split": "development_train_val",
+        "parameter_count": sum(parameter.numel() for parameter in teacher.parameters()),
+        "requires_grad_parameter_count": requires_grad,
+        "changed_parameter_count": 0,
+        "checkpoint_binding": str(binding_path) if binding is not None else None,
+        "checkpoint_binding_sha256": sha256_file(binding_path) if binding is not None else None,
         "test_assets_opened": 0,
     }
     write_strict_json_exclusive(resolve(root, args.output), result)
