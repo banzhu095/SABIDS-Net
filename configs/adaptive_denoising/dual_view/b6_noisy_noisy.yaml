@@ -1,0 +1,5 @@
+_base_: common.yaml
+data:
+  auxiliary_mode: duplicate_primary
+dual_view:
+  arm: B6

@@ -1,5 +1,15 @@
 # SABIDS-Net project context
 
+## Opt-in noisy-backed dual-view segmentation (2026-09-28)
+
+The `feature/noisy-mild-dual-view-v1` branch adds a validation-only causal
+experiment with a shared-weight Siamese segmentation encoder. The noisy path
+is retained exactly and mild D1 alpha=.25 features enter through zero-scale
+residual gates at 1/8, 1/4 and 1/2. Phase 1 preregisters B0/B1/B3/B6/C1 and a
+B3 inference-only C5 control. It is not an established baseline, does not use
+test data, and does not establish that denoising itself helps segmentation.
+See `docs/DUAL_VIEW_V1.md`.
+
 ## Opt-in D2 development path (2026-09-22)
 
 The `feature/structure-preserving-d2-v1` branch adds an experimental,

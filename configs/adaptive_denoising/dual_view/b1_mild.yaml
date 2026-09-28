@@ -1,0 +1,7 @@
+_base_: common.yaml
+data:
+  auxiliary_mode: none
+dual_view:
+  arm: B1
+  use_auxiliary: false
+  auxiliary_required: false

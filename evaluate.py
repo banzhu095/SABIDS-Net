@@ -70,6 +70,15 @@ def parse_args() -> argparse.Namespace:
         "--d2-checkpoint-binding",
         help="Required immutable binding JSON for an opt-in D2 checkpoint.",
     )
+    parser.add_argument(
+        "--disable-dual-view-auxiliary",
+        action="store_true",
+        help="C5 diagnostic: evaluate a trained B3 checkpoint through its noisy path only.",
+    )
+    parser.add_argument(
+        "--fixed-component-inventory",
+        help="Train-defined thresholds plus immutable validation sample_id+component_id membership.",
+    )
     return parser.parse_args()
 
 
@@ -77,6 +86,9 @@ def main() -> None:
     args = parse_args()
     config = load_config(args.config)
     dose = config.get("dose_response", {}).get("enabled", False)
+    dual_view = config.get("dual_view", {}).get("enabled", False)
+    if dual_view and args.split != "val":
+        raise ValueError("Dual-view v1 evaluation is validation-only; test remains sealed")
     if dose:
         from sabids.experiments.dose_response import validate_dose_config
         validate_dose_config(config, require_fresh=False)
@@ -140,7 +152,15 @@ def main() -> None:
         root=config["data"].get("root"),
         datasets=config["data"].get(f"{args.split}_datasets"),
         groups=config["data"].get(f"{args.split}_groups"),
-        **({"image_column": config["data"]["input_column"], "pretransformed_model_grid": True} if dose else {}),
+        **(
+            {
+                "image_column": config["data"].get("input_column", "image_path"),
+                "auxiliary_image_column": config["data"].get("auxiliary_input_column"),
+                "auxiliary_mode": config["data"].get("auxiliary_mode", "none"),
+                "pretransformed_model_grid": True,
+            }
+            if dose or dual_view else {}
+        ),
     )
     if args.one_frame_per_group:
         indices = [dataset.groups[group_id][0] for group_id in sorted(dataset.groups)]
@@ -154,6 +174,7 @@ def main() -> None:
     )
     evaluation = config.get("evaluation", {})
     vessel_strata_definition = None
+    fixed_component_inventory = None
     strata_path = args.vessel_strata_definition or evaluation.get("vessel_strata_definition")
     if strata_path:
         import json
@@ -161,6 +182,12 @@ def main() -> None:
         if not resolved_strata.is_file():
             raise FileNotFoundError(f"Missing vessel strata definition: {resolved_strata}")
         vessel_strata_definition = json.loads(resolved_strata.read_text(encoding="utf-8-sig"))
+    if args.fixed_component_inventory:
+        import json
+        fixed_path = Path(args.fixed_component_inventory).expanduser().resolve()
+        if not fixed_path.is_file():
+            raise FileNotFoundError(f"Missing fixed component inventory: {fixed_path}")
+        fixed_component_inventory = json.loads(fixed_path.read_text(encoding="utf-8-sig"))
     default_threshold = float(evaluation.get("threshold", 0.5))
     summary = evaluate_model(
         model,
@@ -217,6 +244,8 @@ def main() -> None:
         vessel_strata_definition=vessel_strata_definition,
         evaluate_clean_identity=args.evaluate_clean_identity,
         d2_diagnostics=args.d2_diagnostics,
+        disable_dual_view_auxiliary=args.disable_dual_view_auxiliary,
+        fixed_component_inventory=fixed_component_inventory,
     )
     print(summary)
 

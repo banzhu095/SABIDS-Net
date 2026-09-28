@@ -1081,3 +1081,32 @@ Populate one row per independent fold after validation threshold selection.
   test files reported **86 passed, 12 warnings**; the full repository reported
   **264 passed, 59 warnings**. Warnings are the previously recorded optional
   TensorBoard/CPU pin-memory and dependency deprecations, not test failures.
+# 2026-09-28 — Noisy-backed mild dual-view v1 engineering implementation
+
+- Created local branch `feature/noisy-mild-dual-view-v1` from commit
+  `4a9bc80a4824fd86cda6b338271c962836e771da`; no push, merge, cloud operation,
+  formal CUDA run or test-data access.
+- Added the opt-in shared-weight Siamese segmentation model, zero-initialized
+  noisy-anchored fusion, B0/B1/B3/B6/C1 preparation, C5 evaluation switch,
+  immutable validation-component membership, run/cost audits and paired
+  position-level summaries. Legacy configurations do not instantiate or load
+  an auxiliary image.
+- Formal input assets were absent locally, so formal preparation remains
+  `BLOCKED: DUAL-VIEW INPUT EVIDENCE`. A synthetic non-square CPU smoke ran all
+  five training arms for one epoch, verified common initialization, completed
+  checkpoints/metadata and zero frozen changes; it is not scientific evidence.
+- After recovering the interrupted work, a fresh five-arm smoke at
+  `runs/adaptive_denoising/synthetic_dual_view_smoke_20260928_143856` passed.
+  It additionally verified identical sampler, augmentation, paired cohort and
+  full model initialization hashes across arms. Focused dual-view tests and
+  legacy Dataset/evaluator/Trainer regression tests passed. No test split or
+  local CUDA training was used.
+- Added `tools/run_dual_view_modelwhale.sh` as the only supported cloud entry,
+  with immutable preflight/overfit/pilot/formal/summarize/package stages. The
+  source-frozen pilot gate and lightweight ZIP packager fail closed; overfit
+  uses train rows only, and formal is blocked unless the seed-42 pilot gate
+  passes.
+- Final verification after the recovered changes: `compileall -q .`, shell
+  syntax validation and `git diff --check` passed; the full repository suite
+  reported **345 passed** with only the already documented AMP, optional
+  TensorBoard and CPU pin-memory warnings.

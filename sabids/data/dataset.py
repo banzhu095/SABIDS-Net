@@ -41,6 +41,8 @@ class OCTManifestDataset(Dataset):
         datasets: Optional[List[str]] = None,
         groups: Optional[List[str]] = None,
         image_column: str = "image_path",
+        auxiliary_image_column: Optional[str] = None,
+        auxiliary_mode: str = "none",
         guidance_mapping: Optional[str | Path] = None,
         load_segmentation_labels: bool = True,
         pretransformed_model_grid: bool = False,
@@ -51,6 +53,12 @@ class OCTManifestDataset(Dataset):
         self.transform = transform
         self.sample_repeat = sample_repeat
         self.image_column = str(image_column)
+        self.auxiliary_image_column = (
+            str(auxiliary_image_column) if auxiliary_image_column else None
+        )
+        self.auxiliary_mode = str(auxiliary_mode)
+        if self.auxiliary_mode not in {"none", "column", "duplicate_primary"}:
+            raise ValueError("auxiliary_mode must be none, column, or duplicate_primary")
         self.load_segmentation_labels = bool(load_segmentation_labels)
         self.pretransformed_model_grid = bool(pretransformed_model_grid)
         self.deterministic_augmentation_seed = deterministic_augmentation_seed
@@ -61,6 +69,11 @@ class OCTManifestDataset(Dataset):
             raise ValueError(f"Manifest is missing columns: {sorted(missing)}")
         if self.image_column not in table.columns:
             raise ValueError(f"Manifest is missing configured image column: {self.image_column}")
+        if self.auxiliary_mode == "column" and (
+            not self.auxiliary_image_column
+            or self.auxiliary_image_column not in table.columns
+        ):
+            raise ValueError("column auxiliary mode requires a manifest auxiliary image column")
         table = table[table["split"].astype(str) == str(split)].copy()
         if datasets:
             table = table[table["dataset"].isin(datasets)].copy()
@@ -129,10 +142,17 @@ class OCTManifestDataset(Dataset):
         guidance_row = self.table.iloc[self.guidance_indices.get(index, index)]
 
         image = self._load_optional(row[self.image_column])
+        auxiliary_image = None
+        if self.auxiliary_mode == "duplicate_primary":
+            auxiliary_image = image.copy() if image is not None else None
+        elif self.auxiliary_mode == "column":
+            auxiliary_image = self._load_optional(row[self.auxiliary_image_column])
         repeat = self._load_optional(repeat_row[self.image_column])
         interaction_guidance = self._load_optional(guidance_row[self.image_column])
         if image is None or repeat is None:
             raise RuntimeError(f"Missing required image for sample {row['sample_id']}")
+        if self.auxiliary_mode != "none" and auxiliary_image is None:
+            raise RuntimeError(f"Missing auxiliary image for sample {row['sample_id']}")
         original_height, original_width = image.shape[-2:]
         if self.pretransformed_model_grid:
             if tuple(image.shape) != tuple(self.transform.target_size):
@@ -187,7 +207,10 @@ class OCTManifestDataset(Dataset):
             spatial_valid = self._load_optional(row.get("spatial_valid_mask_path", ""), mask=True)
             if spatial_valid is None:
                 raise ValueError("Prepared model grid requires explicit spatial validity mask")
-            for value in (clean, layer, vessel, label_valid, vessel_valid, spatial_valid):
+            for value in (
+                clean, layer, vessel, label_valid, vessel_valid, spatial_valid,
+                *(() if auxiliary_image is None else (auxiliary_image,)),
+            ):
                 if value is None or value.shape != image.shape:
                     raise ValueError("Prepared image/GT/validity shapes must match without resampling")
             if allow_strong:
@@ -199,7 +222,13 @@ class OCTManifestDataset(Dataset):
             flip_override = deterministic_flip(self.deterministic_augmentation_seed, self.epoch,
                                                str(row["sample_id"]), self.transform.horizontal_flip)
         transformed = self.transform(
-            arrays={"image": image, "repeat": repeat, "clean": clean, "interaction_guidance": interaction_guidance},
+            arrays={
+                "image": image,
+                "auxiliary_image": auxiliary_image,
+                "repeat": repeat,
+                "clean": clean,
+                "interaction_guidance": interaction_guidance,
+            },
             masks={
                 "layer_mask": layer,
                 "vessel_mask": vessel,
@@ -253,6 +282,9 @@ class OCTManifestDataset(Dataset):
             "original_width": int(original_width),
             "manifest_group_frames": int(len(self.group_to_indices[group_id])),
         }
+        if auxiliary_image is not None:
+            output["auxiliary_image"] = transformed["auxiliary_image"]
+            output["has_auxiliary_image"] = torch.tensor(True, dtype=torch.bool)
         if self.pretransformed_model_grid:
             output["metric_coordinate_system"] = "model_grid_px"
             output["augmentation_flip"] = bool(self.transform.training and flip_override)

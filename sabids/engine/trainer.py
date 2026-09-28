@@ -39,7 +39,7 @@ from ..data.transforms import JointOCTTransform
 from ..losses import SABIDSLoss
 from ..training import PhaseStateMachine
 from ..metrics import binary_metrics, soft_dice_score, vessel_diagnostic_metrics
-from ..models import ModelEMA, SABIDSNet
+from ..models import ModelEMA, NoisyMildDualViewSegmenter, SABIDSNet
 from ..utils import (
     CSVLogger,
     count_parameters,
@@ -129,6 +129,8 @@ def build_loaders(config: Dict) -> tuple[DataLoader, DataLoader, object]:
         datasets=data_cfg.get("train_datasets"),
         groups=data_cfg.get("train_groups"),
         image_column=data_cfg.get("input_column", "image_path"),
+        auxiliary_image_column=data_cfg.get("auxiliary_input_column"),
+        auxiliary_mode=data_cfg.get("auxiliary_mode", "none"),
         guidance_mapping=data_cfg.get("guidance_mapping"),
         load_segmentation_labels=load_segmentation_labels,
         pretransformed_model_grid=bool(data_cfg.get("pretransformed_model_grid", False)),
@@ -144,6 +146,8 @@ def build_loaders(config: Dict) -> tuple[DataLoader, DataLoader, object]:
         datasets=data_cfg.get("val_datasets"),
         groups=data_cfg.get("val_groups"),
         image_column=data_cfg.get("input_column", "image_path"),
+        auxiliary_image_column=data_cfg.get("auxiliary_input_column"),
+        auxiliary_mode=data_cfg.get("auxiliary_mode", "none"),
         guidance_mapping=data_cfg.get("guidance_mapping"),
         load_segmentation_labels=load_segmentation_labels,
         pretransformed_model_grid=bool(data_cfg.get("pretransformed_model_grid", False)),
@@ -219,6 +223,8 @@ def build_diagnostic_loader(
             else data_cfg.get("val_groups")
         ),
         image_column=data_cfg.get("input_column", "image_path"),
+        auxiliary_image_column=data_cfg.get("auxiliary_input_column"),
+        auxiliary_mode=data_cfg.get("auxiliary_mode", "none"),
         guidance_mapping=data_cfg.get("guidance_mapping"),
         load_segmentation_labels=_load_segmentation_labels(config),
     )
@@ -244,7 +250,18 @@ def build_diagnostic_loader(
 
 def build_model(config: Dict) -> SABIDSNet:
     model_cfg = config["model"]
-    return SABIDSNet(
+    dual_cfg = config.get("dual_view", {})
+    model_class = NoisyMildDualViewSegmenter if dual_cfg.get("enabled", False) else SABIDSNet
+    extra = (
+        {
+            "dual_view_enabled": bool(dual_cfg.get("use_auxiliary", True)),
+            "auxiliary_required": bool(dual_cfg.get("auxiliary_required", True)),
+            "fusion_levels": tuple(dual_cfg.get("fusion_levels", [3, 2, 1])),
+            "dual_scale_init": float(dual_cfg.get("interaction_scale_init", 0.0)),
+        }
+        if model_class is NoisyMildDualViewSegmenter else {}
+    )
+    return model_class(
         in_channels=int(model_cfg.get("in_channels", 1)),
         channels=tuple(model_cfg.get("channels", [32, 64, 128, 256])),
         encoder_depths=tuple(model_cfg.get("encoder_depths", [2, 2, 4, 6])),
@@ -265,6 +282,7 @@ def build_model(config: Dict) -> SABIDSNet:
         d2s_source_mode=str(model_cfg.get("d2s_source_mode", "cross")),
         strong_s2d_rho=model_cfg.get("strong_s2d_rho"),
         strong_d2s_rho=model_cfg.get("strong_d2s_rho"),
+        **extra,
     )
 
 
@@ -962,7 +980,10 @@ class Trainer:
                 self.ema.state_dict() if self.ema is not None else None,
                 {"global_optimizer_step": 0, "formal_d2_teacher_initial": True},
             )
-        if self.config.get("dose_response", {}).get("enabled", False):
+        if (
+            self.config.get("dose_response", {}).get("enabled", False)
+            or self.config.get("dual_view", {}).get("enabled", False)
+        ):
             from sabids.experiments.dose_response import augmentation_plan_sha, stable_sha, write_strict_json
             audit_path = self.output_dir / "initialization_audit.json"
             audit = json.loads(audit_path.read_text(encoding="utf-8"))
@@ -980,12 +1001,18 @@ class Trainer:
                     if isinstance(self.val_loader.dataset, Subset) else
                     self.val_loader.dataset.table[["sample_id", "group_id", "split"]].to_dict("records")})
             write_strict_json(audit_path, audit)
-            write_strict_json(self.output_dir / "data_plan.json", {
+            data_plan = {
                 "paired_cohort_sha256": audit["paired_cohort_sha256"],
                 "sampler_plan_sha256": audit["sampler_plan_sha256"],
                 "actual_augmentation_plan_sha256": audit["actual_augmentation_plan_sha256"],
                 "train_sample_ids": ids, "sampler_indices_by_epoch": sampler_plan,
-                "dose_response": self.config["dose_response"], "test_assets_opened": 0})
+                "test_assets_opened": 0,
+            }
+            if self.config.get("dose_response", {}).get("enabled", False):
+                data_plan["dose_response"] = self.config["dose_response"]
+            else:
+                data_plan["dual_view"] = self.config["dual_view"]
+            write_strict_json(self.output_dir / "data_plan.json", data_plan)
 
     def _record_run_inputs(self) -> None:
         runtime = self.config.setdefault("runtime", {})
@@ -1042,7 +1069,9 @@ class Trainer:
                 if not asset.is_absolute():
                     asset = (root / asset).resolve()
                 inspection = _inspect_label_asset(asset, allow_float_cache=bool(
-                    self.config.get("dose_response", {}).get("enabled", False))) if asset.is_file() else {}
+                    self.config.get("dose_response", {}).get("enabled", False)
+                    or self.config.get("dual_view", {}).get("enabled", False)
+                )) if asset.is_file() else {}
                 label_assets.append(
                     {
                         "asset_id": f"{group_id}|{column}|{ordinal}",
@@ -1371,7 +1400,10 @@ class Trainer:
         if self.device.type == "cuda":
             torch.cuda.reset_peak_memory_stats(self.device)
         self.train_sampler.set_epoch(epoch)
-        if self.config.get("dose_response", {}).get("enabled", False):
+        if (
+            self.config.get("dose_response", {}).get("enabled", False)
+            or self.config.get("dual_view", {}).get("enabled", False)
+        ):
             self.train_loader.dataset.set_epoch(epoch)
         totals = defaultdict(float)
         steps = 0
@@ -1410,6 +1442,12 @@ class Trainer:
             if parameter.requires_grad and "interactions" in name
             and any(token in name for token in ("layer_anatomy", "vessel_anatomy", "seg_to_denoise_gate"))
         }
+        dual_parameter_start = {
+            name: parameter.detach().clone()
+            for name, parameter in self.model.named_parameters()
+            if name.startswith("dual_fusions.")
+        }
+        dual_gradient_totals = defaultdict(float)
         d2s_gradient_norm_total = 0.0
         s2d_gradient_norm_total = 0.0
         d2s_scale_gradient_total = 0.0
@@ -1466,6 +1504,18 @@ class Trainer:
                     if active_phase == "denoise"
                     else self.model(
                         batch["image"],
+                        **(
+                            {
+                                "auxiliary_image": batch.get("auxiliary_image"),
+                                "disable_auxiliary": bool(
+                                    self.config.get("dual_view", {}).get(
+                                        "disable_auxiliary_inference", False
+                                    )
+                                ),
+                            }
+                            if self.config.get("dual_view", {}).get("enabled", False)
+                            else {}
+                        ),
                         detach_cross=detach_cross,
                         interaction_guidance_image=batch.get("interaction_guidance"),
                         **({"return_auxiliary": False, "return_features": False}
@@ -1671,6 +1721,15 @@ class Trainer:
                     else:
                         group = "other"
                     grouped_gradients[group].append(parameter.grad.detach().float().reshape(-1))
+                    if name.startswith("dual_fusions."):
+                        parts = name.split(".")
+                        level = parts[1]
+                        kind = "gamma" if parts[-1] == "gamma" else (
+                            "adapter" if ".adapter." in name else "gate"
+                        )
+                        dual_gradient_totals[(level, kind)] += float(
+                            torch.linalg.vector_norm(parameter.grad.detach().float()).item()
+                        )
                 group_norms = {
                     group: float(torch.linalg.vector_norm(torch.cat(values)).item())
                     for group, values in grouped_gradients.items() if values
@@ -1761,6 +1820,10 @@ class Trainer:
                     "d2l_gate_saturation_fraction", "d2l_gate_entropy",
                     "d2v_gate_mean", "d2v_gate_std", "d2v_gate_min", "d2v_gate_max",
                     "d2v_gate_saturation_fraction", "d2v_gate_entropy",
+                    "dual_gate_mean", "dual_gate_std", "dual_gate_q25",
+                    "dual_gate_q50", "dual_gate_q75", "dual_gamma",
+                    "dual_noisy_feature_rms", "dual_delta_rms",
+                    "dual_delta_to_noisy_rms", "dual_injection_rms",
                 ):
                     values = [float(item[name].item()) for item in auxiliary if name in item]
                     if values:
@@ -1851,6 +1914,25 @@ class Trainer:
             ]
             result["s2d_scale_update_abs_mean"] = float(torch.stack(deltas).mean().item())
         named_parameters = dict(self.model.named_parameters())
+        for level in sorted(getattr(self.model, "dual_fusions", {}).keys(), key=int):
+            fusion = self.model.dual_fusions[level]
+            result[f"dual_level{level}_gamma"] = float(fusion.gamma.detach().item())
+            for kind in ("gamma", "adapter", "gate"):
+                result[f"dual_level{level}_{kind}_gradient_norm"] = (
+                    dual_gradient_totals[(level, kind)] / max(optimizer_steps, 1)
+                )
+            for kind in ("gamma", "adapter", "gate"):
+                names = [
+                    name for name in dual_parameter_start
+                    if name.startswith(f"dual_fusions.{level}.{kind}")
+                ]
+                if names:
+                    result[f"dual_level{level}_{kind}_update_abs_mean"] = float(
+                        torch.stack([
+                            (named_parameters[name].detach() - dual_parameter_start[name]).float().abs().mean()
+                            for name in names
+                        ]).mean().item()
+                    )
         if shared_encoder_start:
             delta_squared = sum(
                 float((named_parameters[name].detach().float() - initial.float()).square().sum().item())
@@ -1951,6 +2033,20 @@ class Trainer:
             image = batch["image"].to(self.device, non_blocking=True)
             output = evaluation_model(
                 image,
+                **(
+                    {
+                        "auxiliary_image": batch.get("auxiliary_image", batch["image"]).to(
+                            self.device, non_blocking=True
+                        ),
+                        "disable_auxiliary": bool(
+                            self.config.get("dual_view", {}).get(
+                                "disable_auxiliary_inference", False
+                            )
+                        ),
+                    }
+                    if self.config.get("dual_view", {}).get("enabled", False)
+                    else {}
+                ),
                 return_features=False,
                 return_auxiliary=False,
                 interaction_guidance_image=batch.get("interaction_guidance", batch["image"]).to(self.device, non_blocking=True),
@@ -2310,6 +2406,7 @@ class Trainer:
                 if key in {"epoch", "training_phase"}
                 or "interaction_" in key
                 or "mapping_" in key
+                or key.startswith("train_dual_")
             }
             if len(interaction_row) > 2:
                 CSVLogger(self.output_dir / "interaction_strength.csv").log(interaction_row)
@@ -2403,6 +2500,49 @@ class Trainer:
                 "notice": self.config["dose_response"].get("notice", "")})
             if changed_frozen or not changed_trainable:
                 raise RuntimeError("Dose path update check failed; see dose_training_metadata.json")
+        if self.config.get("dual_view", {}).get("enabled", False):
+            from sabids.experiments.dose_response import tensor_sha, write_strict_json
+            history = pd.read_csv(self.output_dir / "history.csv")
+            initial = json.loads(
+                (self.output_dir / "initialization_audit.json").read_text(encoding="utf-8")
+            )
+            changed = {
+                name: tensor_sha(parameter) != initial["tensor_sha256"][name]
+                for name, parameter in self.model.named_parameters()
+            }
+            changed_trainable = [
+                name for name, parameter in self.model.named_parameters()
+                if parameter.requires_grad and changed[name]
+            ]
+            changed_frozen = [
+                name for name, parameter in self.model.named_parameters()
+                if not parameter.requires_grad and changed[name]
+            ]
+            denoiser_frozen_changes = [
+                name for name in changed_frozen
+                if name.startswith(("adapters.denoise", "decoders.denoise", "residual_head"))
+            ]
+            write_strict_json(self.output_dir / "dual_view_training_metadata.json", {
+                "dual_view": self.config["dual_view"],
+                "completed_epochs": int(completed_epochs),
+                "completed_optimizer_steps": int(history["train_optimizer_steps"].sum()),
+                "expected_optimizer_steps": int(self.config["train"]["epochs"]) * math.ceil(
+                    len(self.train_loader) / int(self.config["train"]["gradient_accumulation_steps"])
+                ),
+                "changed_trainable_parameter_names": changed_trainable,
+                "changed_frozen_parameter_names": changed_frozen,
+                "frozen_denoiser_changed_parameter_names": denoiser_frozen_changes,
+                "primary_checkpoint": str(self.output_dir / "last.pth"),
+                "primary_checkpoint_sha256": _sha256_file(self.output_dir / "last.pth"),
+                "secondary_checkpoint": str(self.output_dir / "best.pth"),
+                "selection_rule_primary": "fixed_final",
+                "selection_rule_secondary": "best_validation_vessel_soft_dice",
+                "test_assets_opened": 0,
+            })
+            if changed_frozen or not changed_trainable or completed_epochs != epochs:
+                raise RuntimeError(
+                    "Dual-view update/budget audit failed; see dual_view_training_metadata.json"
+                )
         if self.config.get("d2", {}).get("enabled", False):
             if completed_epochs != epochs:
                 raise RuntimeError("D2 fixed-budget run ended before checkpoint selection")

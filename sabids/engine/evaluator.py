@@ -61,6 +61,8 @@ def evaluate_model(
     vessel_strata_definition: Optional[Dict[str, Any]] = None,
     evaluate_clean_identity: bool = False,
     d2_diagnostics: bool = False,
+    disable_dual_view_auxiliary: bool = False,
+    fixed_component_inventory: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, object]:
     model.eval()
     dose_metadata = dose_metadata or {}
@@ -75,6 +77,10 @@ def evaluate_model(
             raise ValueError(
                 "Frozen vessel strata require model-grid evaluation and P0 vessel threshold 0.5"
             )
+    if fixed_component_inventory is not None and (
+        restore_original_geometry or float(vessel_threshold) != 0.5 or tuple(postprocess_modes) != ("p0",)
+    ):
+        raise ValueError("Fixed dual-view components require model-grid P0 at threshold 0.5")
     requested = set(tasks) if tasks is not None else None
     evaluate_denoising = "denoise" in requested if requested is not None else stage not in {"segment", "private_seg"}
     evaluate_layer = "layer" in requested if requested is not None else stage != "denoise"
@@ -106,6 +112,16 @@ def evaluate_model(
             if stage == "denoise"
             else model(
                 image,
+                **(
+                    {
+                        "auxiliary_image": batch.get("auxiliary_image", batch["image"]).to(
+                            device, non_blocking=True
+                        ),
+                        "disable_auxiliary": bool(disable_dual_view_auxiliary),
+                    }
+                    if getattr(model, "dual_view_enabled", False)
+                    else {}
+                ),
                 return_features=False,
                 return_auxiliary=False,
                 interaction_guidance_image=batch.get("interaction_guidance", batch["image"]).to(device, non_blocking=True),
@@ -455,20 +471,30 @@ def evaluate_model(
                 row["vessel_area_fraction_pred"] = predicted_fraction
                 row["vessel_area_fraction_true"] = true_fraction
                 row["vessel_area_fraction_mae"] = abs(predicted_fraction - true_fraction)
-                if vessel_strata_definition is not None and bool(batch["has_layer"][index]):
+                if (
+                    (vessel_strata_definition is not None or fixed_component_inventory is not None)
+                    and bool(batch["has_layer"][index])
+                ):
                     from sabids.experiments.d2 import (
                         aggregate_component_rows,
                         evaluate_vessel_components,
                     )
-                    sample_components = evaluate_vessel_components(
-                        vessel_pred,
-                        vessel_true,
-                        layer_true,
-                        vessel_valid,
-                        noisy_eval,
-                        vessel_strata_definition,
-                        target if target is not None else None,
-                    )
+                    if fixed_component_inventory is not None:
+                        from sabids.experiments.dual_view import evaluate_fixed_components
+                        sample_components = evaluate_fixed_components(
+                            str(batch["sample_id"][index]), vessel_pred, vessel_true,
+                            vessel_valid, fixed_component_inventory,
+                        )
+                    else:
+                        sample_components = evaluate_vessel_components(
+                            vessel_pred,
+                            vessel_true,
+                            layer_true,
+                            vessel_valid,
+                            noisy_eval,
+                            vessel_strata_definition,
+                            target if target is not None else None,
+                        )
                     for component in sample_components:
                         component.update({
                             "sample_id": str(batch["sample_id"][index]),
@@ -481,14 +507,20 @@ def evaluate_model(
                         f"vessel_component_{key}": value
                         for key, value in aggregate_component_rows(sample_components).items()
                     })
-                    if vessel_strata_definition.get("fixed_area_thresholds") is not None:
+                    if (
+                        vessel_strata_definition is not None
+                        and vessel_strata_definition.get("fixed_area_thresholds") is not None
+                    ):
                         row.update({
                             f"vessel_component_fixed_{key}": value
                             for key, value in aggregate_component_rows(
                                 sample_components, area_key="area_bin_fixed"
                             ).items()
                         })
-                    if vessel_strata_definition.get("low_contrast_q25_clean") is not None:
+                    if (
+                        vessel_strata_definition is not None
+                        and vessel_strata_definition.get("low_contrast_q25_clean") is not None
+                    ):
                         row.update({
                             f"vessel_component_clean_contrast_sensitivity_{key}": value
                             for key, value in aggregate_component_rows(
@@ -742,6 +774,10 @@ def evaluate_model(
             "definition_sha256"
         )
         summary["vessel_strata_version"] = vessel_strata_definition.get("version")
+    if fixed_component_inventory is not None:
+        summary["fixed_component_inventory_sha256"] = fixed_component_inventory.get(
+            "inventory_sha256"
+        )
     summary["boundary_band_width_pixels"] = float(boundary_band_width)
     summary["postprocess_modes"] = list(modes)
     summary["restored_original_geometry"] = bool(restore_original_geometry)
@@ -765,7 +801,7 @@ def evaluate_model(
     if output_path:
         frame_table.to_csv(output_path / "frame_metrics.csv", index=False, encoding="utf-8-sig")
         group_table.to_csv(output_path / "group_metrics.csv", index=False, encoding="utf-8-sig")
-        if vessel_strata_definition is not None and evaluate_vessel:
+        if (vessel_strata_definition is not None or fixed_component_inventory is not None) and evaluate_vessel:
             component_table = pd.DataFrame(component_rows)
             component_table.to_csv(
                 output_path / "component_metrics.csv", index=False, encoding="utf-8-sig"
