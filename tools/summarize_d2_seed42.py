@@ -18,8 +18,22 @@ from sabids.config import load_config
 from sabids.experiments.dose_response import write_strict_json_exclusive
 
 
-def _read(path: Path, run_id: str, arm: str) -> pd.DataFrame:
+def _read(
+    path: Path,
+    run_id: str,
+    arm: str,
+    *,
+    require_validation_split: bool = False,
+) -> pd.DataFrame:
     table = pd.read_csv(path, low_memory=False)
+    if require_validation_split:
+        if "split" not in table.columns:
+            raise ValueError(f"Validation metrics lack a split column: {path}")
+        observed = set(table["split"].dropna().astype(str).str.lower())
+        if observed != {"val"}:
+            raise ValueError(
+                f"Validation-only report found non-val splits {sorted(observed)}: {path}"
+            )
     table.insert(0, "arm", arm)
     table.insert(0, "run_id", run_id)
     return table
@@ -54,7 +68,12 @@ def main() -> None:
         if not cfg_path.is_file():
             failures.append({"run_id": run.name, "asset": str(cfg_path), "reason": "missing"}); continue
         cfg = load_config(cfg_path)
-        if int(cfg.get("seed", -1)) != 42 or cfg.get("evaluation", {}).get("use_test") is not False:
+        # Dose configs are already forced through evaluate.py's validation-only
+        # contract and historically did not declare evaluation.use_test.  A
+        # missing flag is therefore not evidence of test use.  Reject an
+        # explicit opt-in here and independently verify the actual metric-table
+        # split below instead of trusting config absence as either true/false.
+        if int(cfg.get("seed", -1)) != 42 or cfg.get("evaluation", {}).get("use_test") is True:
             raise ValueError(f"Run is not seed-42 validation-only: {run}")
         arm = _arm_label(cfg)
         validation = run / "validation_results"
@@ -76,7 +95,13 @@ def main() -> None:
         targets = {"frame": frames, "position": positions,
                    "component": components, "contrast": contrasts, "leakage": leakages}
         for kind, path in assets.items():
-            if path.is_file(): targets[kind].append(_read(path, run.name, arm))
+            if path.is_file():
+                targets[kind].append(_read(
+                    path,
+                    run.name,
+                    arm,
+                    require_validation_split=kind in {"frame", "position"},
+                ))
             else: failures.append({"run_id": run.name, "asset": str(path), "reason": "missing"})
         prediction_root = validation / "predictions"
         for sample_id in args.fixed_sample_ids:

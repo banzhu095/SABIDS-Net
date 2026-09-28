@@ -19,7 +19,7 @@ def _report_run(root: Path, name: str, config: dict, value: float) -> Path:
     save_config(config, run / "resolved_config.yaml")
     identity = {
         "sample_id": "fixed_frame", "group_id": "pku_0006",
-        "patient_id": "pku_0006", "dataset": "PKU37",
+        "patient_id": "pku_0006", "dataset": "PKU37", "split": "val",
     }
     pd.DataFrame([{**identity, "vessel_dice": value}]).to_csv(
         validation / "frame_metrics.csv", index=False
@@ -50,7 +50,7 @@ def test_group_metrics_is_explicit_position_table_and_dose_arm_is_not_unknown(tm
     )
     dose = _report_run(
         tmp_path, "d2_task_a050", {
-            **common,
+            "seed": 42, "evaluation": {},
             "dose_response": {"enabled": True, "curve_type": "d2_task", "alpha": .5},
         }, .72,
     )
@@ -71,3 +71,41 @@ def test_group_metrics_is_explicit_position_table_and_dose_arm_is_not_unknown(tm
     assert set(positions["vessel_dice"].round(2)) == {.71, .73}
     frames = pd.read_csv(output / "metrics_by_image.csv")
     assert set(frames["vessel_dice"].round(2)) == {.70, .72}
+
+
+def test_report_rejects_explicit_test_opt_in(tmp_path):
+    run = _report_run(
+        tmp_path, "test_opt_in", {
+            "seed": 42,
+            "evaluation": {"use_test": True},
+            "dose_response": {"enabled": True, "curve_type": "d1", "alpha": 0.0},
+        }, .7,
+    )
+    process = subprocess.run([
+        sys.executable, str(ROOT / "tools/summarize_d2_seed42.py"),
+        "--project-root", str(tmp_path), "--run-dirs", str(run),
+        "--output", str(tmp_path / "report"), "--fixed-sample-ids", "fixed_frame",
+    ], cwd=ROOT, capture_output=True, text=True)
+    assert process.returncode != 0
+    assert "not seed-42 validation-only" in process.stderr
+
+
+def test_report_rejects_non_validation_metric_rows(tmp_path):
+    run = _report_run(
+        tmp_path, "wrong_split", {
+            "seed": 42,
+            "evaluation": {},
+            "dose_response": {"enabled": True, "curve_type": "d1", "alpha": 0.0},
+        }, .7,
+    )
+    frame_path = run / "validation_results" / "frame_metrics.csv"
+    frame = pd.read_csv(frame_path)
+    frame.loc[:, "split"] = "test"
+    frame.to_csv(frame_path, index=False)
+    process = subprocess.run([
+        sys.executable, str(ROOT / "tools/summarize_d2_seed42.py"),
+        "--project-root", str(tmp_path), "--run-dirs", str(run),
+        "--output", str(tmp_path / "report"), "--fixed-sample-ids", "fixed_frame",
+    ], cwd=ROOT, capture_output=True, text=True)
+    assert process.returncode != 0
+    assert "non-val splits" in process.stderr
