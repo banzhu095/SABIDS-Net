@@ -14,6 +14,7 @@ from sabids.experiments.dual_view import (
     deterministic_shuffle, evaluate_fixed_components,
 )
 from sabids.experiments.protocol_lock import sha256_file
+from tools.prepare_dual_view_inputs import _recover_generation_time
 
 
 def _write(path: Path, value: np.ndarray) -> str:
@@ -109,6 +110,32 @@ def test_shuffle_rejects_ambiguous_duplicate_sample_ids() -> None:
     ]
     with pytest.raises(ValueError, match="globally unique"):
         deterministic_shuffle(rows, 42)
+
+
+def test_interrupted_preparation_reuses_one_verified_timestamp(tmp_path) -> None:
+    evidence = {
+        "protocol_id": "p",
+        "sha256": {
+            "split_contract": "split", "d1_checkpoint": "checkpoint",
+            "checkpoint_binding": "binding",
+        },
+    }
+    sidecar = tmp_path / "residuals/train/sample/noisy_minus_mild.json"
+    sidecar.parent.mkdir(parents=True)
+    sidecar.write_text(json.dumps({
+        "version": "noisy-mild-dual-view-v1", "protocol_id": "p",
+        "split_contract_sha256": "split",
+        "denoiser_checkpoint_sha256": "checkpoint",
+        "checkpoint_binding_sha256": "binding",
+        "created_at": "2026-09-28T00:00:00+00:00",
+        "test_assets_opened": 0,
+    }), encoding="utf-8")
+    assert _recover_generation_time(tmp_path, evidence) == "2026-09-28T00:00:00+00:00"
+    changed = json.loads(sidecar.read_text(encoding="utf-8"))
+    changed["checkpoint_binding_sha256"] = "wrong"
+    sidecar.write_text(json.dumps(changed), encoding="utf-8")
+    with pytest.raises(FileExistsError, match="identity conflict"):
+        _recover_generation_time(tmp_path, evidence)
 
 
 def test_missing_formal_evidence_fails_closed(tmp_path) -> None:

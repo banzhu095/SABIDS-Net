@@ -46,6 +46,91 @@ def _array_sha(array: np.ndarray) -> str:
     return hashlib.sha256(np.ascontiguousarray(array, dtype=np.float32).tobytes()).hexdigest()
 
 
+def _recover_generation_time(output_root: Path, evidence: dict) -> str:
+    """Reuse the immutable timestamp of a safely interrupted preparation."""
+    sidecars = sorted((output_root / "residuals").glob("*/*/noisy_minus_mild.json"))
+    if not sidecars:
+        return datetime.now(timezone.utc).isoformat()
+    times = set()
+    expected = {
+        "version": "noisy-mild-dual-view-v1",
+        "protocol_id": evidence["protocol_id"],
+        "split_contract_sha256": evidence["sha256"]["split_contract"],
+        "denoiser_checkpoint_sha256": evidence["sha256"]["d1_checkpoint"],
+        "checkpoint_binding_sha256": evidence["sha256"]["checkpoint_binding"],
+        "test_assets_opened": 0,
+    }
+    for sidecar in sidecars:
+        metadata = json.loads(sidecar.read_text(encoding="utf-8"))
+        if any(metadata.get(key) != value for key, value in expected.items()):
+            raise FileExistsError(f"Interrupted cache identity conflict: {sidecar}")
+        created_at = metadata.get("created_at")
+        if not isinstance(created_at, str) or not created_at:
+            raise ValueError(f"Interrupted cache lacks created_at: {sidecar}")
+        times.add(created_at)
+    if len(times) != 1:
+        raise FileExistsError(
+            f"Interrupted preparation has inconsistent timestamps: {sorted(times)}"
+        )
+    return next(iter(times))
+
+
+def _reuse_complete_registry(
+    registry_path: Path,
+    root: Path,
+    evidence: dict,
+    seeds: list[int],
+    budget: str,
+    tag: str,
+) -> dict | None:
+    if not registry_path.is_file():
+        return None
+    result = json.loads(registry_path.read_text(encoding="utf-8-sig"))
+    current_commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=root, text=True,
+        capture_output=True, check=True,
+    ).stdout.strip()
+    recorded_commit = str(result.get("git_commit", ""))
+    commit_is_ancestor = bool(recorded_commit) and subprocess.run(
+        ["git", "merge-base", "--is-ancestor", recorded_commit, current_commit],
+        cwd=root, capture_output=True,
+    ).returncode == 0
+    if (
+        result.get("status") != "passed"
+        or result.get("version") != "noisy-mild-dual-view-v1"
+        or result.get("evidence") != evidence
+        or not commit_is_ancestor
+        or set(result.get("initializations", {})) != {str(seed) for seed in seeds}
+        or result.get("test_assets_opened") != 0
+    ):
+        raise FileExistsError(f"Completed preparation identity conflict: {registry_path}")
+    manifests = result.get("manifests", {})
+    manifest_sha = result.get("manifest_sha256", {})
+    if set(manifests) != set(PRIMARY_ARMS) or any(
+        not Path(path).is_file() or sha256_file(Path(path)) != manifest_sha.get(arm)
+        for arm, path in manifests.items()
+    ):
+        raise FileExistsError("Completed preparation manifest fingerprint mismatch")
+    configs = result.get("configs", [])
+    if len(configs) != len(PRIMARY_ARMS) * len(seeds):
+        raise FileExistsError("Completed preparation config matrix is incomplete")
+    for path in configs:
+        config_path = Path(path)
+        if (
+            not config_path.is_file()
+            or sha256_file(config_path) != result.get("config_sha256", {}).get(path)
+        ):
+            raise FileExistsError(f"Completed preparation config changed: {path}")
+        config = load_config(config_path)
+        if (
+            int(config["seed"]) not in seeds
+            or config["dual_view"].get("budget") != budget
+            or config["dual_view"].get("tag") != tag
+        ):
+            raise FileExistsError(f"Completed preparation config identity mismatch: {path}")
+    return result
+
+
 def _load_dose_manifests(registry: dict) -> dict[float, pd.DataFrame]:
     found: dict[float, pd.DataFrame] = {}
     for config_path in registry.get("configs", []):
@@ -90,6 +175,12 @@ def prepare(root: Path, evidence: dict, registry_path: Path, seeds: list[int], b
         raise RuntimeError(BLOCKED)
     registry = json.loads(registry_path.read_text(encoding="utf-8-sig"))
     dose_tables = _load_dose_manifests(registry)
+    output_root = root / "cache/adaptive_denoising" / evidence["protocol_id"] / "dual_view_v1" / tag
+    completed = _reuse_complete_registry(
+        output_root / "preparation_registry.json", root, evidence, seeds, budget, tag
+    )
+    if completed is not None:
+        return completed
     indexed = {
         alpha: table.set_index("sample_id", drop=False)
         for alpha, table in dose_tables.items()
@@ -98,8 +189,7 @@ def prepare(root: Path, evidence: dict, registry_path: Path, seeds: list[int], b
     if any(set(table.index) != set(ids) for table in indexed.values()):
         raise ValueError("D1 dose manifests do not describe the same cohort")
     base_rows = []
-    output_root = root / "cache/adaptive_denoising" / evidence["protocol_id"] / "dual_view_v1" / tag
-    generated_at = datetime.now(timezone.utc).isoformat()
+    generated_at = _recover_generation_time(output_root, evidence)
     for sample_id in ids:
         rows = {alpha: indexed[alpha].loc[sample_id].to_dict() for alpha in indexed}
         identity = {(row["split"], row["group_id"]) for row in rows.values()}
@@ -148,13 +238,18 @@ def prepare(root: Path, evidence: dict, registry_path: Path, seeds: list[int], b
             "test_assets_opened": 0,
         }
         if residual_path.exists() or residual_sidecar.exists():
-            if not residual_path.is_file() or not residual_sidecar.is_file():
+            if not residual_path.is_file():
                 raise FileExistsError(f"Incomplete residual cache: {residual_path}")
-            if (
-                not np.array_equal(np.load(residual_path, allow_pickle=False), residual)
-                or json.loads(residual_sidecar.read_text(encoding="utf-8")) != residual_meta
-            ):
+            if not np.array_equal(np.load(residual_path, allow_pickle=False), residual):
                 raise FileExistsError(f"Residual identity conflict: {residual_path}")
+            if residual_sidecar.is_file():
+                if json.loads(residual_sidecar.read_text(encoding="utf-8")) != residual_meta:
+                    raise FileExistsError(f"Residual identity conflict: {residual_path}")
+            else:
+                # SIGINT can land between the exclusive NPY write and its
+                # sidecar.  The NPY bytes were recomputed from immutable input
+                # caches above, so completing only the missing sidecar is safe.
+                write_strict_json_exclusive(residual_sidecar, residual_meta)
         else:
             sample_dir.mkdir(parents=True, exist_ok=True)
             with residual_path.open("xb") as handle:

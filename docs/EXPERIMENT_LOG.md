@@ -1118,3 +1118,15 @@ Populate one row per independent fold after validation threshold selection.
   pairs remain impossible. Added imbalanced-group and duplicate-ID regression
   tests; the updated full suite reports **347 passed**. The failed run id is
   preserved and must not be reused.
+- A later seed-42 pilot was interrupted manually after its passed preflight,
+  leaving a valid report directory and possibly partial residual caches.  The
+  ModelWhale entry now supports fail-closed continuation with the same run id:
+  it reuses only byte/identity-verified preparation artifacts, completed runs,
+  validation outputs, audits, summaries and a passed immutable gate.  An
+  incomplete training run or any provenance/config/hash disagreement remains
+  blocked and is never deleted or overwritten.  A SIGINT orphan residual NPY
+  is accepted only when its bytes exactly equal the residual recomputed from
+  the immutable noisy/mild caches; only its missing exclusive sidecar is then
+  completed.  Verification passed: focused dual-view tests **14 passed**, the
+  full repository suite **348 passed**, `compileall`, shell syntax validation
+  and `git diff --check` passed.

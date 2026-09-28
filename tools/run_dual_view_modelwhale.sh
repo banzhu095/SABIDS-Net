@@ -102,13 +102,20 @@ PY
   "$PYTHON_BIN" tools/prepare_dual_view_inputs.py \
     "${evidence_args[@]}" --mode audit | tee "$evidence_tmp"
   if [[ -n "$evidence_output" ]]; then
-    [[ ! -e "$evidence_output" ]] || {
-      echo "BLOCKED: refusing existing preflight report $evidence_output" >&2
+    if [[ -e "$evidence_output" ]]; then
+      "$PYTHON_BIN" - "$evidence_output" "$evidence_tmp" <<'PY'
+import json, sys
+from pathlib import Path
+left, right = (json.loads(Path(path).read_text(encoding="utf-8")) for path in sys.argv[1:])
+if left != right:
+    raise SystemExit("BLOCKED: existing preflight evidence differs")
+print("PASS: reusing identical preflight evidence")
+PY
       rm -f "$evidence_tmp"
-      return 2
-    }
-    mkdir -p "$(dirname "$evidence_output")"
-    mv "$evidence_tmp" "$evidence_output"
+    else
+      mkdir -p "$(dirname "$evidence_output")"
+      mv "$evidence_tmp" "$evidence_output"
+    fi
   else
     rm -f "$evidence_tmp"
   fi
@@ -135,12 +142,87 @@ run_arm() {
   local config="$CACHE_BASE/$tag/config_${arm,,}_seed${seed}.yaml"
   local run="$RUN_BASE/$tag/${arm,,}_seed${seed}"
   [[ -s "$config" ]] || { echo "BLOCKED: missing config $config" >&2; return 2; }
-  [[ ! -e "$run" ]] || {
-    echo "BLOCKED: refusing to reuse/overwrite existing run $run" >&2
-    return 2
-  }
+  if [[ -e "$run" ]]; then
+    "$PYTHON_BIN" - "$config" "$run" <<'PY'
+import json, sys
+from pathlib import Path
+
+import pandas as pd
+import torch
+
+from sabids.config import load_config
+from sabids.experiments.protocol_lock import sha256_file
+
+config_path, run = Path(sys.argv[1]), Path(sys.argv[2])
+required = (
+    "resolved_config.yaml", "history.csv", "last.pth", "best.pth",
+    "dual_view_training_metadata.json",
+)
+missing = [name for name in required if not (run / name).is_file()]
+if missing:
+    raise SystemExit(f"BLOCKED: existing run is incomplete; missing {missing}: {run}")
+expected, resolved = load_config(config_path), load_config(run / "resolved_config.yaml")
+expected.pop("runtime", None)
+resolved.pop("runtime", None)
+if expected != resolved:
+    raise SystemExit(f"BLOCKED: existing run config differs: {run}")
+configured = int(expected["train"]["epochs"])
+history = pd.read_csv(run / "history.csv")
+if "epoch" not in history:
+    raise SystemExit(f"BLOCKED: existing run history lacks epoch: {run}")
+epochs = pd.to_numeric(history["epoch"], errors="raise").astype(int).tolist()
+if epochs != list(range(1, configured + 1)):
+    raise SystemExit(f"BLOCKED: existing run epoch sequence is incomplete: {run}")
+checkpoint = torch.load(run / "last.pth", map_location="cpu", weights_only=False)
+metadata = json.loads((run / "dual_view_training_metadata.json").read_text(encoding="utf-8"))
+checks = {
+    "checkpoint_epoch": int(checkpoint.get("epoch", -2)) + 1 == configured,
+    "completed_epochs": int(metadata.get("completed_epochs", -1)) == configured,
+    "optimizer_budget": metadata.get("completed_optimizer_steps") == metadata.get("expected_optimizer_steps"),
+    "checkpoint_sha": metadata.get("primary_checkpoint_sha256") == sha256_file(run / "last.pth"),
+    "frozen_unchanged": not metadata.get("changed_frozen_parameter_names"),
+    "denoiser_unchanged": not metadata.get("frozen_denoiser_changed_parameter_names"),
+    "test_assets_unopened": metadata.get("test_assets_opened") == 0,
+}
+if not all(checks.values()):
+    raise SystemExit(f"BLOCKED: existing run failed completion audit {checks}: {run}")
+print(f"PASS: reusing completed run {run}")
+PY
+    return 0
+  fi
   mkdir -p "$run"
   "$PYTHON_BIN" train.py --config "$config" 2>&1 | tee "$run/train.log"
+}
+
+evaluation_complete() {
+  local out="$1"
+  local inventory="$2"
+  "$PYTHON_BIN" - "$out" "$inventory" <<'PY'
+import json, sys
+from pathlib import Path
+
+import pandas as pd
+
+out, inventory_path = Path(sys.argv[1]), Path(sys.argv[2])
+required = ("frame_metrics.csv", "group_metrics.csv", "component_metrics.csv", "summary.json")
+missing = [name for name in required if not (out / name).is_file()]
+if missing:
+    raise SystemExit(f"BLOCKED: existing evaluation is incomplete; missing {missing}: {out}")
+for name in ("frame_metrics.csv", "group_metrics.csv"):
+    table = pd.read_csv(out / name)
+    split_column = "source_split" if "source_split" in table else "split" if "split" in table else None
+    if split_column is not None and not table[split_column].astype(str).eq("val").all():
+        raise SystemExit(f"BLOCKED: non-validation rows in {out / name}")
+summary = json.loads((out / "summary.json").read_text(encoding="utf-8"))
+inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
+checks = {
+    "inventory": summary.get("fixed_component_inventory_sha256") == inventory.get("inventory_sha256"),
+    "test_assets_unopened": summary.get("test_assets_opened", 0) == 0,
+}
+if not all(checks.values()):
+    raise SystemExit(f"BLOCKED: existing evaluation identity failed {checks}: {out}")
+print(f"PASS: reusing complete validation evaluation {out}")
+PY
 }
 
 audit_arm() {
@@ -149,8 +231,30 @@ audit_arm() {
   local arm="$3"
   local seed="$4"
   mkdir -p "$report/audits"
+  local output="$report/audits/${arm,,}_seed${seed}.json"
+  if [[ -e "$output" ]]; then
+    "$PYTHON_BIN" - "$output" "$run" "$arm" "$seed" <<'PY'
+import json, sys
+from pathlib import Path
+
+value = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+expected_run = str(Path(sys.argv[2]).resolve())
+checks = {
+    "status": value.get("status") == "passed",
+    "run": value.get("run_dir") == expected_run,
+    "arm": value.get("arm") == sys.argv[3],
+    "seed": int(value.get("seed", -1)) == int(sys.argv[4]),
+    "checks": bool(value.get("checks")) and all(value["checks"].values()),
+    "test_assets_unopened": value.get("test_assets_opened") == 0,
+}
+if not all(checks.values()):
+    raise SystemExit(f"BLOCKED: existing run audit failed identity checks {checks}")
+print(f"PASS: reusing completed run audit {sys.argv[1]}")
+PY
+    return 0
+  fi
   "$PYTHON_BIN" tools/audit_dual_view_run.py \
-    --run-dir "$run" --output "$report/audits/${arm,,}_seed${seed}.json" --device cuda
+    --run-dir "$run" --output "$output" --device cuda
 }
 
 evaluate_arm() {
@@ -164,24 +268,30 @@ evaluate_arm() {
     local checkpoint="$run/${selection}.pth"
     local out="$run/validation_${selection}"
     [[ -s "$checkpoint" ]] || { echo "BLOCKED: missing $checkpoint" >&2; return 2; }
-    [[ ! -e "$out" ]] || { echo "BLOCKED: refusing existing evaluation $out" >&2; return 2; }
-    local prediction_flag=()
-    [[ "$selection" == "last" ]] && prediction_flag=(--save-predictions)
-    "$PYTHON_BIN" evaluate.py \
-      --config "$config" --checkpoint "$checkpoint" --split val --output "$out" \
-      --tasks layer vessel --postprocess-modes p0 --layer-threshold 0.5 \
-      --vessel-threshold 0.5 --no-restore-original-geometry \
-      --fixed-component-inventory "$inventory" "${prediction_flag[@]}"
+    if [[ -e "$out" ]]; then
+      evaluation_complete "$out" "$inventory"
+    else
+      local prediction_flag=()
+      [[ "$selection" == "last" ]] && prediction_flag=(--save-predictions)
+      "$PYTHON_BIN" evaluate.py \
+        --config "$config" --checkpoint "$checkpoint" --split val --output "$out" \
+        --tasks layer vessel --postprocess-modes p0 --layer-threshold 0.5 \
+        --vessel-threshold 0.5 --no-restore-original-geometry \
+        --fixed-component-inventory "$inventory" "${prediction_flag[@]}"
+    fi
   done
   if [[ "$arm" == "B3" ]]; then
     local c5="$run/validation_c5_last"
-    [[ ! -e "$c5" ]] || { echo "BLOCKED: refusing existing C5 evaluation $c5" >&2; return 2; }
-    "$PYTHON_BIN" evaluate.py \
-      --config "$config" --checkpoint "$run/last.pth" --split val --output "$c5" \
-      --tasks layer vessel --postprocess-modes p0 --layer-threshold 0.5 \
-      --vessel-threshold 0.5 --no-restore-original-geometry \
-      --fixed-component-inventory "$inventory" --disable-dual-view-auxiliary \
-      --save-predictions
+    if [[ -e "$c5" ]]; then
+      evaluation_complete "$c5" "$inventory"
+    else
+      "$PYTHON_BIN" evaluate.py \
+        --config "$config" --checkpoint "$run/last.pth" --split val --output "$c5" \
+        --tasks layer vessel --postprocess-modes p0 --layer-threshold 0.5 \
+        --vessel-threshold 0.5 --no-restore-original-geometry \
+        --fixed-component-inventory "$inventory" --disable-dual-view-auxiliary \
+        --save-predictions
+    fi
   fi
   audit_arm "$report" "$run" "$arm" "$seed"
 }
@@ -192,7 +302,26 @@ summarize_tag() {
   shift 2
   local seeds=("$@")
   local summary="$report/summary"
-  [[ ! -e "$summary" ]] || { echo "BLOCKED: refusing existing summary $summary" >&2; return 2; }
+  if [[ -e "$summary" ]]; then
+    "$PYTHON_BIN" - "$summary" <<'PY'
+import json, sys
+from pathlib import Path
+
+summary = Path(sys.argv[1])
+required = (
+    "summary.json", "paired_summary.csv", "metrics_by_seed_position.csv",
+    "paired_position_differences.csv", "failure_case_index.csv",
+)
+missing = [name for name in required if not (summary / name).is_file()]
+if missing:
+    raise SystemExit(f"BLOCKED: existing summary is incomplete; missing {missing}: {summary}")
+value = json.loads((summary / "summary.json").read_text(encoding="utf-8"))
+if value.get("status") != "passed" or value.get("test_assets_opened") != 0:
+    raise SystemExit(f"BLOCKED: existing summary failed identity checks: {summary}")
+print(f"PASS: reusing complete summary {summary}")
+PY
+    return 0
+  fi
   local runs=()
   for seed in "${seeds[@]}"; do
     for arm in b0 b1 b3 b6 c1; do
@@ -214,13 +343,25 @@ run_matrix() {
   local report="$3"
   shift 3
   local seeds=("$@")
-  [[ ! -e "$report" ]] || { echo "BLOCKED: refusing existing report stage $report" >&2; return 2; }
   mkdir -p "$report"
   prepare_budget "$budget" "$tag" "$report/preflight_evidence.json" "${seeds[@]}"
   local b0_config="$CACHE_BASE/$tag/config_b0_seed${seeds[0]}.yaml"
   local inventory="$report/fixed_component_inventory.json"
-  "$PYTHON_BIN" tools/prepare_dual_view_strata.py \
-    --project-root "$PROJECT_ROOT" --config "$b0_config" --output "$inventory"
+  if [[ -s "$inventory" ]]; then
+    "$PYTHON_BIN" - "$inventory" <<'PY'
+import json, sys
+from pathlib import Path
+from sabids.experiments.dose_response import stable_sha
+value = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+claimed = value.pop("inventory_sha256", None)
+if claimed != stable_sha(value) or value.get("test_assets_opened") != 0:
+    raise SystemExit("BLOCKED: existing fixed-component inventory is invalid")
+print("PASS: reusing valid fixed-component inventory")
+PY
+  else
+    "$PYTHON_BIN" tools/prepare_dual_view_strata.py \
+      --project-root "$PROJECT_ROOT" --config "$b0_config" --output "$inventory"
+  fi
   for seed in "${seeds[@]}"; do
     for arm in B0 B1 B3 B6 C1; do
       run_arm "$tag" "$arm" "$seed"
@@ -250,8 +391,21 @@ case "$ACTION" in
     tag="${RUN_ID}_pilot"
     report="$REPORT_BASE/pilot"
     run_matrix pilot "$tag" "$report" 42
-    "$PYTHON_BIN" tools/check_dual_view_gate.py \
-      --paired-summary "$report/summary/paired_summary.csv" --output "$report/gate.json"
+    if [[ -e "$report/gate.json" ]]; then
+      "$PYTHON_BIN" - "$report/gate.json" <<'PY'
+import json, sys
+from pathlib import Path
+gate = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+if gate.get("test_assets_opened") != 0:
+    raise SystemExit("BLOCKED: existing pilot gate has invalid test audit")
+if gate.get("status") != "passed" or gate.get("formal_allowed") is not True:
+    raise SystemExit("BLOCKED: existing preregistered pilot gate did not pass")
+print("PASS: reusing passed preregistered pilot gate")
+PY
+    else
+      "$PYTHON_BIN" tools/check_dual_view_gate.py \
+        --paired-summary "$report/summary/paired_summary.csv" --output "$report/gate.json"
+    fi
     echo "PASS: seed42 pilot and preregistered gate completed"
     ;;
   formal)
