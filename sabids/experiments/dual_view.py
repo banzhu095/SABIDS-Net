@@ -100,30 +100,38 @@ def audit_formal_input_evidence(
 
 
 def deterministic_shuffle(rows: list[dict], seed: int) -> dict[str, str]:
-    """Map every sample to a different anatomical group, deterministically."""
-    ordered = sorted(rows, key=lambda row: (str(row["split"]), str(row["sample_id"])))
+    """Map every sample to a different anatomical group, deterministically.
+
+    This is deliberately not constrained to a bijection.  A cross-group
+    derangement does not exist when the largest group contains more than half
+    of a split, while C1 only requires a reproducible wrong-position guide.
+    Hash selection distributes reuse across all eligible target groups and
+    remains independent of input row order.
+    """
+    ordered = sorted(
+        rows,
+        key=lambda row: (
+            str(row["split"]), str(row["group_id"]), str(row["sample_id"])
+        ),
+    )
+    sample_ids = [str(row["sample_id"]) for row in ordered]
+    if len(sample_ids) != len(set(sample_ids)):
+        raise ValueError("Shuffle control requires globally unique sample_id values")
     mapping: dict[str, str] = {}
     for split in sorted({str(row["split"]) for row in ordered}):
         part = [row for row in ordered if str(row["split"]) == split]
         if len({str(row["group_id"]) for row in part}) < 2:
             raise ValueError("Shuffle control requires at least two groups per split")
-        rng = np.random.default_rng(int(seed) + sum(split.encode("utf-8")))
-        candidates = np.arange(len(part))
-        for _ in range(10_000):
-            rng.shuffle(candidates)
-            if all(
-                str(part[index]["group_id"]) != str(part[int(candidates[index])]["group_id"])
-                for index in range(len(part))
-            ):
-                break
-        else:
-            raise RuntimeError("Could not construct a cross-position shuffle")
-        mapping.update(
-            {
-                str(row["sample_id"]): str(part[int(candidates[index])]["sample_id"])
-                for index, row in enumerate(part)
-            }
-        )
+        for row in part:
+            candidates = [
+                candidate for candidate in part
+                if str(candidate["group_id"]) != str(row["group_id"])
+            ]
+            token = (
+                f"{VERSION}|{int(seed)}|{split}|{row['sample_id']}|{row['group_id']}"
+            ).encode("utf-8")
+            index = int.from_bytes(hashlib.sha256(token).digest()[:8], "big") % len(candidates)
+            mapping[str(row["sample_id"])] = str(candidates[index]["sample_id"])
     return mapping
 
 

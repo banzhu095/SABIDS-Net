@@ -1110,3 +1110,11 @@ Populate one row per independent fold after validation threshold selection.
   syntax validation and `git diff --check` passed; the full repository suite
   reported **345 passed** with only the already documented AMP, optional
   TensorBoard and CPU pin-memory warnings.
+- First cloud preflight passed all D1/checkpoint/protocol/cache checks, but C1
+  preparation exposed an invalid assumption in the original wrong-pair
+  generator: a cross-group bijection may not exist for imbalanced group sizes.
+  Replaced it with deterministic hash-based sampling from all same-split,
+  different-group candidates. Target reuse is explicit and valid for C1; true
+  pairs remain impossible. Added imbalanced-group and duplicate-ID regression
+  tests; the updated full suite reports **347 passed**. The failed run id is
+  preserved and must not be reused.

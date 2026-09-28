@@ -75,15 +75,40 @@ def test_legacy_dataset_does_not_emit_dual_view_keys(tmp_path) -> None:
 
 def test_shuffle_is_deterministic_cross_group_and_breaks_pairing() -> None:
     rows = [
-        {"sample_id": f"s{i}", "group_id": f"g{i % 3}", "split": split}
+        {"sample_id": f"{split}_s{i}", "group_id": f"g{i % 3}", "split": split}
         for split in ("train", "val") for i in range(6)
     ]
     first = deterministic_shuffle(rows, 42)
     second = deterministic_shuffle(rows, 42)
     assert first == second
-    by_id = {row["sample_id"]: row for row in rows if row["split"] == "val"}
-    # IDs repeat across splits in this fixture, but each split has the same group assignment.
+    by_id = {row["sample_id"]: row for row in rows}
+    assert all(by_id[source]["split"] == by_id[target]["split"] for source, target in first.items())
     assert all(by_id[source]["group_id"] != by_id[target]["group_id"] for source, target in first.items())
+
+
+def test_shuffle_supports_highly_imbalanced_groups_without_a_bijection() -> None:
+    rows = [
+        {"sample_id": f"major_{index}", "group_id": "major", "split": "train"}
+        for index in range(9)
+    ] + [{"sample_id": "minor_0", "group_id": "minor", "split": "train"}]
+    mapping = deterministic_shuffle(rows, 42)
+    by_id = {row["sample_id"]: row for row in rows}
+    assert len(mapping) == len(rows)
+    assert all(
+        by_id[source]["group_id"] != by_id[target]["group_id"]
+        for source, target in mapping.items()
+    )
+    # Reuse is expected and valid because a 9:1 cross-group bijection cannot exist.
+    assert len(set(mapping.values())) < len(mapping)
+
+
+def test_shuffle_rejects_ambiguous_duplicate_sample_ids() -> None:
+    rows = [
+        {"sample_id": "same", "group_id": "g1", "split": "train"},
+        {"sample_id": "same", "group_id": "g2", "split": "train"},
+    ]
+    with pytest.raises(ValueError, match="globally unique"):
+        deterministic_shuffle(rows, 42)
 
 
 def test_missing_formal_evidence_fails_closed(tmp_path) -> None:
