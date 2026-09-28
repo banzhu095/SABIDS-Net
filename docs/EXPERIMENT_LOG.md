@@ -1130,3 +1130,12 @@ Populate one row per independent fold after validation threshold selection.
   completed.  Verification passed: focused dual-view tests **14 passed**, the
   full repository suite **348 passed**, `compileall`, shell syntax validation
   and `git diff --check` passed.
+- The first resumed B0 pilot completed all 20 epochs, then exposed a fixed-
+  component row-schema omission during validation: fixed rows lacked the D2
+  aggregator's established `any_overlap = coverage > 0` derived field.  Added
+  that field without changing component membership or thresholds.  The cloud
+  entry now preserves an interrupted partial evaluation by renaming the whole
+  directory before deterministic re-evaluation from the same checkpoint;
+  complete evaluations are reused and identity conflicts still block.  Focused
+  dual-view/D2 tests **23 passed** and the branch's full tracked suite **348
+  passed**; compile, shell syntax and diff checks passed.

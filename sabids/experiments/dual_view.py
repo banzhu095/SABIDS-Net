@@ -232,6 +232,10 @@ def evaluate_fixed_components(
             **member,
             "area_bin_quantile": member["size_bin"],
             "coverage": coverage,
+            # Keep the row schema consumed by aggregate_component_rows.  This
+            # is the same coverage > 0 definition used by D2 component rows;
+            # fixed membership changes only how components/strata are frozen.
+            "any_overlap": float(coverage > 0.0),
             "recall_at_025": float(coverage >= 0.25),
             "recall_at_050": float(coverage >= 0.5),
             "completely_missed": float(coverage == 0.0),

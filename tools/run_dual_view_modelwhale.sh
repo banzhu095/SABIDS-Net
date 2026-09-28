@@ -207,7 +207,8 @@ out, inventory_path = Path(sys.argv[1]), Path(sys.argv[2])
 required = ("frame_metrics.csv", "group_metrics.csv", "component_metrics.csv", "summary.json")
 missing = [name for name in required if not (out / name).is_file()]
 if missing:
-    raise SystemExit(f"BLOCKED: existing evaluation is incomplete; missing {missing}: {out}")
+    print(f"INCOMPLETE: existing evaluation is missing {missing}: {out}", file=sys.stderr)
+    raise SystemExit(3)
 for name in ("frame_metrics.csv", "group_metrics.csv"):
     table = pd.read_csv(out / name)
     split_column = "source_split" if "source_split" in table else "split" if "split" in table else None
@@ -223,6 +224,14 @@ if not all(checks.values()):
     raise SystemExit(f"BLOCKED: existing evaluation identity failed {checks}: {out}")
 print(f"PASS: reusing complete validation evaluation {out}")
 PY
+}
+
+archive_incomplete_evaluation() {
+  local out="$1"
+  local archived="${out}.interrupted_$(date +%Y%m%d_%H%M%S)"
+  [[ ! -e "$archived" ]] || archived="${archived}_$$"
+  mv -- "$out" "$archived"
+  echo "PRESERVED: archived incomplete evaluation at $archived"
 }
 
 audit_arm() {
@@ -268,9 +277,20 @@ evaluate_arm() {
     local checkpoint="$run/${selection}.pth"
     local out="$run/validation_${selection}"
     [[ -s "$checkpoint" ]] || { echo "BLOCKED: missing $checkpoint" >&2; return 2; }
+    local evaluate_required=true
     if [[ -e "$out" ]]; then
-      evaluation_complete "$out" "$inventory"
-    else
+      if evaluation_complete "$out" "$inventory"; then
+        evaluate_required=false
+      else
+        local evaluation_status=$?
+        if [[ "$evaluation_status" -eq 3 ]]; then
+          archive_incomplete_evaluation "$out"
+        else
+          return "$evaluation_status"
+        fi
+      fi
+    fi
+    if [[ "$evaluate_required" == true ]]; then
       local prediction_flag=()
       [[ "$selection" == "last" ]] && prediction_flag=(--save-predictions)
       "$PYTHON_BIN" evaluate.py \
@@ -282,9 +302,20 @@ evaluate_arm() {
   done
   if [[ "$arm" == "B3" ]]; then
     local c5="$run/validation_c5_last"
+    local c5_required=true
     if [[ -e "$c5" ]]; then
-      evaluation_complete "$c5" "$inventory"
-    else
+      if evaluation_complete "$c5" "$inventory"; then
+        c5_required=false
+      else
+        local c5_status=$?
+        if [[ "$c5_status" -eq 3 ]]; then
+          archive_incomplete_evaluation "$c5"
+        else
+          return "$c5_status"
+        fi
+      fi
+    fi
+    if [[ "$c5_required" == true ]]; then
       "$PYTHON_BIN" evaluate.py \
         --config "$config" --checkpoint "$run/last.pth" --split val --output "$c5" \
         --tasks layer vessel --postprocess-modes p0 --layer-threshold 0.5 \

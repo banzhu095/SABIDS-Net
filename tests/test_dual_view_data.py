@@ -13,6 +13,7 @@ from sabids.experiments.dual_view import (
     BLOCKED, audit_formal_input_evidence, build_fixed_component_inventory,
     deterministic_shuffle, evaluate_fixed_components,
 )
+from sabids.experiments.d2 import aggregate_component_rows
 from sabids.experiments.protocol_lock import sha256_file
 from tools.prepare_dual_view_inputs import _recover_generation_time
 
@@ -213,9 +214,13 @@ def test_fixed_component_membership_does_not_depend_on_arm_input() -> None:
     assert [(row["sample_id"], row["component_id"], row["size_bin"], row["contrast_bin"]) for row in rows_b0] == [
         (row["sample_id"], row["component_id"], row["size_bin"], row["contrast_bin"]) for row in rows_b3
     ]
+    assert all(row["any_overlap"] == 1 for row in rows_b0)
     assert all(row["recall_at_050"] == 1 for row in rows_b0)
+    assert all(row["any_overlap"] == 0 for row in rows_b3)
     assert all(row["completely_missed"] == 1 for row in rows_b3)
     assert all(row["clean_contrast_bin"] == "unknown" for row in rows_b3)
+    assert aggregate_component_rows(rows_b0)["any_overlap_recall"] == 1
+    assert aggregate_component_rows(rows_b3)["any_overlap_recall"] == 0
     changed = _sample("val", "val", offset=1)
     with pytest.raises(ValueError, match="GT component changed"):
         evaluate_fixed_components("val", changed["vessel"], changed["vessel"], changed["valid"], inventory)
