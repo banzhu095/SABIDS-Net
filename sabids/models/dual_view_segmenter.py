@@ -45,6 +45,46 @@ class DualViewFusion(nn.Module):
         return noisy + injection, diagnostics
 
 
+class ResidualAwareDualViewFusion(nn.Module):
+    """Lightweight signed-residual fusion without a third full encoder."""
+
+    def __init__(self, channels: int, scale_init: float = 0.0) -> None:
+        super().__init__()
+        self.residual_stem = nn.Conv2d(1, channels, 3, padding=1)
+        self.adapter = nn.Conv2d(4 * channels, channels, 1)
+        self.gate = nn.Conv2d(4 * channels, channels, 1)
+        self.gamma = nn.Parameter(torch.tensor(float(scale_init)))
+
+    def forward(
+        self, noisy: torch.Tensor, auxiliary: torch.Tensor, residual: torch.Tensor
+    ) -> tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+        residual_scaled = F.interpolate(
+            residual, size=noisy.shape[-2:], mode="bilinear", align_corners=False
+        )
+        residual_features = self.residual_stem(residual_scaled)
+        difference = noisy - auxiliary
+        joined = torch.cat((noisy, auxiliary, residual_features, difference), dim=1)
+        delta = self.adapter(joined)
+        gate = torch.sigmoid(self.gate(joined))
+        injection = self.gamma * gate * delta
+        noisy_rms = noisy.float().square().mean().sqrt()
+        flat_gate = gate.float().flatten()
+        quantiles = torch.quantile(flat_gate, flat_gate.new_tensor((0.25, 0.5, 0.75)))
+        diagnostics = {
+            "dual_gate_mean": gate.float().mean(),
+            "dual_gate_std": gate.float().std(unbiased=False),
+            "dual_gate_q25": quantiles[0], "dual_gate_q50": quantiles[1],
+            "dual_gate_q75": quantiles[2], "dual_gamma": self.gamma.float(),
+            "dual_noisy_feature_rms": noisy_rms,
+            "dual_delta_rms": delta.float().square().mean().sqrt(),
+            "dual_delta_to_noisy_rms": delta.float().square().mean().sqrt() / noisy_rms.clamp_min(1e-12),
+            "dual_injection_rms": injection.float().square().mean().sqrt(),
+            "dual_residual_rms": residual_scaled.float().square().mean().sqrt(),
+            "dual_residual_feature_rms": residual_features.float().square().mean().sqrt(),
+        }
+        return noisy + injection, diagnostics
+
+
 class NoisyMildDualViewSegmenter(SABIDSNet):
     """Shared-weight Siamese segmentation encoder with a noisy identity path.
 
@@ -60,22 +100,26 @@ class NoisyMildDualViewSegmenter(SABIDSNet):
         auxiliary_required: bool = True,
         fusion_levels: Iterable[int] = (3, 2, 1),
         dual_scale_init: float = 0.0,
+        residual_aware: bool = False,
+        residual_enabled: bool = False,
         **kwargs,
     ) -> None:
         super().__init__(*args, **kwargs)
         self.dual_view_enabled = bool(dual_view_enabled)
         self.auxiliary_required = bool(auxiliary_required)
+        self.residual_aware = bool(residual_aware)
+        self.residual_enabled = bool(residual_enabled)
+        if self.residual_enabled and not self.residual_aware:
+            raise ValueError("residual_enabled requires residual_aware architecture")
         levels = tuple(int(level) for level in fusion_levels)
         invalid = [level for level in levels if level < 0 or level >= len(self.channels)]
         if invalid:
             raise ValueError(f"Invalid dual-view fusion levels: {invalid}")
         self.dual_fusion_levels = set(levels)
-        self.dual_fusions = nn.ModuleDict(
-            {
-                str(level): DualViewFusion(self.channels[level], dual_scale_init)
-                for level in levels
-            }
-        )
+        fusion_class = ResidualAwareDualViewFusion if self.residual_aware else DualViewFusion
+        self.dual_fusions = nn.ModuleDict({
+            str(level): fusion_class(self.channels[level], dual_scale_init) for level in levels
+        })
 
     def set_train_stage(self, stage: str, **kwargs) -> None:  # type: ignore[override]
         if stage != "input_segment":
@@ -88,6 +132,7 @@ class NoisyMildDualViewSegmenter(SABIDSNet):
         self,
         image: torch.Tensor,
         auxiliary_image: torch.Tensor | None = None,
+        residual_image: torch.Tensor | None = None,
         disable_auxiliary: bool = False,
         return_features: bool = True,
         return_auxiliary: bool = True,
@@ -104,10 +149,19 @@ class NoisyMildDualViewSegmenter(SABIDSNet):
         fused_features = list(noisy_features)
         if use_auxiliary:
             auxiliary_features = self.encode(auxiliary_image)  # shared weights
+            if self.residual_aware:
+                if residual_image is None:
+                    residual_image = image - auxiliary_image
+                if not self.residual_enabled:
+                    residual_image = torch.zeros_like(image)
             for level in sorted(self.dual_fusion_levels):
-                fused, details = self.dual_fusions[str(level)](
-                    noisy_features[level], auxiliary_features[level]
-                )
+                fusion = self.dual_fusions[str(level)]
+                if self.residual_aware:
+                    fused, details = fusion(
+                        noisy_features[level], auxiliary_features[level], residual_image
+                    )
+                else:
+                    fused, details = fusion(noisy_features[level], auxiliary_features[level])
                 details["level"] = image.new_tensor(level)
                 fused_features[level] = fused
                 diagnostics.append(details)

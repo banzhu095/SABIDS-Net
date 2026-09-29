@@ -1,0 +1,28 @@
+protocol_id: seg_guided_adaptive_v1
+source_protocol_id: pku37_binary_v3
+development_position_count: 16
+fold_count: 4
+fold_assignment_seed: 20260929
+training_seeds: [42, 43, 44]
+sealed_test_policy: metadata_only_never_open
+primary_endpoint:
+  checkpoint: epoch12
+  postprocess: P0
+  threshold: 0.5
+  aggregation: position_equal
+secondary_endpoints: [epoch20, best_validation_vessel_soft_dice]
+arms: [B0, B1, B3, B6, B3R, B6R]
+interventions: [T0, T1, T2, T3, T4a, T4b, T5, T6]
+oracle_arms: [O0, O1, O2, O3, O4, O5, O6, O7]
+oracle_grid:
+  alpha_vessel: [0.0, 0.1]
+  alpha_boundary: [0.0, 0.1]
+  alpha_stroma: [0.25, 0.5]
+  alpha_outside: [0.25, 0.5]
+  boundary_dilation_pixels: [1, 2, 4]
+gates:
+  cv_formal_requires_cv_pilot_audit: true
+  adaptive_requires_oracle_upper_bound: true
+  recall_noninferiority: -0.01
+  boundary_noninferiority: -0.01
+test_assets_opened: 0

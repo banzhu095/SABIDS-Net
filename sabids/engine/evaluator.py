@@ -63,6 +63,7 @@ def evaluate_model(
     d2_diagnostics: bool = False,
     disable_dual_view_auxiliary: bool = False,
     fixed_component_inventory: Optional[Dict[str, Any]] = None,
+    capture_dual_diagnostics: bool = False,
 ) -> Dict[str, object]:
     model.eval()
     dose_metadata = dose_metadata or {}
@@ -123,7 +124,7 @@ def evaluate_model(
                     else {}
                 ),
                 return_features=False,
-                return_auxiliary=False,
+                return_auxiliary=bool(capture_dual_diagnostics),
                 interaction_guidance_image=batch.get("interaction_guidance", batch["image"]).to(device, non_blocking=True),
             )
         )
@@ -175,6 +176,13 @@ def evaluate_model(
                     batch["manifest_group_frames"][index]
                 ),
             }
+            if capture_dual_diagnostics:
+                for item in output.get("auxiliary", []):
+                    level = int(item["level"].detach().cpu().item())
+                    for key, value in item.items():
+                        if key == "level" or not torch.is_tensor(value) or value.numel() != 1:
+                            continue
+                        row[f"level{level}_{key}"] = float(value.detach().cpu().item())
             valid = batch["valid_mask"][index, 0].numpy() > 0.5
             coordinates = np.argwhere(valid)
             if coordinates.size:

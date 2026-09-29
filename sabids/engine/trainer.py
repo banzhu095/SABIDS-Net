@@ -258,6 +258,8 @@ def build_model(config: Dict) -> SABIDSNet:
             "auxiliary_required": bool(dual_cfg.get("auxiliary_required", True)),
             "fusion_levels": tuple(dual_cfg.get("fusion_levels", [3, 2, 1])),
             "dual_scale_init": float(dual_cfg.get("interaction_scale_init", 0.0)),
+            "residual_aware": bool(dual_cfg.get("residual_aware", False)),
+            "residual_enabled": bool(dual_cfg.get("residual_enabled", False)),
         }
         if model_class is NoisyMildDualViewSegmenter else {}
     )
@@ -304,6 +306,13 @@ class Trainer:
             from sabids.experiments.dose_response import validate_dose_config
             validate_dose_config(config)
         self.config = config
+        if config.get("dual_view", {}).get("record_git_commit", False):
+            from sabids.experiments.dose_response import git_commit
+            project_root = Path(
+                config.get("seg_guided", {}).get("project_root")
+                or config.get("data", {}).get("root") or "."
+            ).expanduser().resolve()
+            config.setdefault("runtime", {})["git_commit"] = git_commit(project_root)
         self.device = get_device(config.get("device", "auto"))
         seed_everything(
             int(config.get("seed", 42)),
@@ -2435,6 +2444,22 @@ class Trainer:
                 ema_state,
                 checkpoint_state,
             )
+            fixed_checkpoint_epochs = {
+                int(value) for value in self.config["train"].get(
+                    "fixed_checkpoint_epochs", []
+                )
+            }
+            if epoch_number in fixed_checkpoint_epochs:
+                fixed_path = self.output_dir / f"epoch{epoch_number:03d}.pth"
+                if fixed_path.exists():
+                    raise FileExistsError(
+                        f"Refusing to overwrite fixed endpoint checkpoint: {fixed_path}"
+                    )
+                save_checkpoint(
+                    fixed_path, self.model, self.optimizer, self.scheduler, epoch,
+                    self.best_metric, self.config, self.scaler, ema_state,
+                    checkpoint_state,
+                )
             if self.config.get("d2", {}).get("enabled", False):
                 if "psnr" not in val_metrics or "teacher_task_preservation" not in val_metrics:
                     if self.d2_teacher is not None:
@@ -2535,6 +2560,14 @@ class Trainer:
                 "primary_checkpoint": str(self.output_dir / "last.pth"),
                 "primary_checkpoint_sha256": _sha256_file(self.output_dir / "last.pth"),
                 "secondary_checkpoint": str(self.output_dir / "best.pth"),
+                "fixed_endpoint_checkpoints": {
+                    str(int(epoch)): {
+                        "path": str(self.output_dir / f"epoch{int(epoch):03d}.pth"),
+                        "sha256": _sha256_file(self.output_dir / f"epoch{int(epoch):03d}.pth"),
+                    }
+                    for epoch in self.config["train"].get("fixed_checkpoint_epochs", [])
+                    if (self.output_dir / f"epoch{int(epoch):03d}.pth").is_file()
+                },
                 "selection_rule_primary": "fixed_final",
                 "selection_rule_secondary": "best_validation_vessel_soft_dice",
                 "test_assets_opened": 0,

@@ -79,6 +79,10 @@ def parse_args() -> argparse.Namespace:
         "--fixed-component-inventory",
         help="Train-defined thresholds plus immutable validation sample_id+component_id membership.",
     )
+    parser.add_argument(
+        "--capture-dual-diagnostics", action="store_true",
+        help="Record per-scale gate/gamma/delta/injection diagnostics in frame metrics.",
+    )
     return parser.parse_args()
 
 
@@ -246,6 +250,7 @@ def main() -> None:
         d2_diagnostics=args.d2_diagnostics,
         disable_dual_view_auxiliary=args.disable_dual_view_auxiliary,
         fixed_component_inventory=fixed_component_inventory,
+        capture_dual_diagnostics=args.capture_dual_diagnostics,
     )
     print(summary)
 

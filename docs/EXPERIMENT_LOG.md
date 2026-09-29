@@ -1149,3 +1149,19 @@ Populate one row per independent fold after validation threshold selection.
   blocked; thresholds were not changed.  The launcher now labels this as a
   completed negative pilot rather than an infrastructure failure while
   retaining a nonzero exit that prevents accidental formal automation.
+
+# 2026-09-29 — Segmentation-guided adaptive v1 engineering implementation
+
+- Created `feature/seg-guided-adaptive-denoise-v1` from the verified negative
+  dual-view pilot commit.  The historical pilot gate and conclusion remain
+  unchanged.
+- Added same-checkpoint B3 auxiliary interventions, signed-residual diagnostics,
+  residual-aware B3R/B6R fusion, immutable epoch-12 endpoints, deterministic
+  16-position grouped four-fold protocol construction, development-only spatial
+  oracle controls, position-primary summaries and a lightweight GPT packager.
+- Added a convex noisy/mild/strong controller primitive.  Its cloud entry fails
+  closed until both the oracle gate and cross-fitted S0 guidance evidence are
+  available; no Stage-E performance is claimed.
+- Local formal assets were not available.  Only unit tests and CPU-scale model
+  forwards were run locally; no CUDA CV, oracle evaluation or sealed-test access
+  occurred.  Actual cloud results must be recorded separately.

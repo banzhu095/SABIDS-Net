@@ -1,0 +1,10 @@
+_base_: ../dual_view/common.yaml
+train:
+  epochs: 20
+  fixed_checkpoint_epochs: [12]
+dual_view:
+  arm: B3R
+  residual_aware: true
+  residual_enabled: true
+  protocol_id: seg_guided_adaptive_v1
+  record_git_commit: true
