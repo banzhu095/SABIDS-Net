@@ -1162,6 +1162,9 @@ Populate one row per independent fold after validation threshold selection.
 - Added a convex noisy/mild/strong controller primitive.  Its cloud entry fails
   closed until both the oracle gate and cross-fitted S0 guidance evidence are
   available; no Stage-E performance is claimed.
+- The oracle evaluator implements D1 same-checkpoint validation interventions
+  only.  It refuses to precompute a roughly 80 GiB full-development grid;
+  oracle-aware fold retraining remains a separately gated future implementation.
 - Local formal assets were not available.  Only unit tests and CPU-scale model
   forwards were run locally; no CUDA CV, oracle evaluation or sealed-test access
   occurred.  Actual cloud results must be recorded separately.

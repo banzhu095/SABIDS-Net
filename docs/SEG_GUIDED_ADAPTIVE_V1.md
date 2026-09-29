@@ -53,6 +53,10 @@ contract.  Missing evidence produces `BLOCKED: DUAL-VIEW INPUT EVIDENCE`.
   a fail-closed error.
 - D: O0--O7 spatial-dose controls are explicitly labelled
   `ORACLE / USES VALIDATION GT / NOT A DEPLOYABLE PERFORMANCE ESTIMATE`.
+  The implemented D1 same-checkpoint tool materializes validation rows only;
+  it deliberately does not create an approximately 80 GiB full-development
+  grid.  Oracle-aware retraining (D2) remains unimplemented until a fold-train
+  combination-selection and streaming-cache protocol is separately locked.
 - E: the convex noisy/mild/strong controller is implemented as a constrained
   mixer, but its training entry remains locked unless the oracle gate passes
   and a cross-fitted S0 guidance registry exists.  It never synthesizes pixels.

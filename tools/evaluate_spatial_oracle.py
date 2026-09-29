@@ -97,7 +97,13 @@ def main() -> None:
         raise ValueError(f"Oracle manifest missing columns: {sorted(missing)}")
     if not table["split"].isin(("train", "val")).all():
         raise RuntimeError("BLOCKED: oracle source contains sealed/non-development rows")
-    rows = table.to_dict("records")
+    # Stage D1 is a same-checkpoint validation intervention.  Do not materialize
+    # the full grid for train rows (roughly 80 GiB for the current protocol).
+    # A later D2 oracle-aware training protocol must generate fold-train inputs
+    # on demand after locking a train-selected combination.
+    rows = table[table.split.eq("val")].to_dict("records")
+    if not rows:
+        raise ValueError("Oracle intervention has no validation rows")
     wrong = deterministic_wrong_guides(rows, args.seed, 1)
     wrong_by_id = {item["sample_id"]: item["auxiliary_sample_id"] for item in wrong}
     by_id = {str(row["sample_id"]): row for row in rows}
@@ -152,7 +158,9 @@ def main() -> None:
         manifests[condition] = path
     registry = {"status": "prepared", "warning": WARNING, "manifest": str(manifest),
                 "manifest_sha256": sha256_file(manifest), "grid": grid,
-                "primary_combo": primary, "records_sha256": stable_sha(registry_rows),
+                "primary_combo": primary, "scope": "D1_same_checkpoint_validation_only",
+                "oracle_aware_retraining": "NOT_IMPLEMENTED_USE_STREAMED_FOLD_TRAIN_PROTOCOL",
+                "records_sha256": stable_sha(registry_rows),
                 "records": registry_rows, "test_assets_opened": 0}
     write_strict_json_exclusive(output / "oracle_registry.json", registry)
     if not args.execute:
