@@ -1139,3 +1139,13 @@ Populate one row per independent fold after validation threshold selection.
   complete evaluations are reused and identity conflicts still block.  Focused
   dual-view/D2 tests **23 passed** and the branch's full tracked suite **348
   passed**; compile, shell syntax and diff checks passed.
+- Cloud seed-42 pilot `dual_view_v1_fix_20260928_151220` subsequently completed
+  all B0/B1/B3/B6/C1 training, fixed-final/best validation, C5 ablation, run
+  audits and paired summary.  The immutable gate failed as a scientific result:
+  B3-minus-B0 vessel Dice was `-0.00047944`, B3-minus-B6 `-0.00036210`, and
+  B3-minus-C1 `-0.00222234`; B3-minus-B1 was `+0.00872928` and B3-minus-C5
+  `+0.00176335`.  Safety declines remained within their frozen limits, but the
+  required superiority/content controls did not.  Formal seeds 42/43/44 remain
+  blocked; thresholds were not changed.  The launcher now labels this as a
+  completed negative pilot rather than an infrastructure failure while
+  retaining a nonzero exit that prevents accidental formal automation.

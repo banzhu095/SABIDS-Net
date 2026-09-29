@@ -422,21 +422,44 @@ case "$ACTION" in
     tag="${RUN_ID}_pilot"
     report="$REPORT_BASE/pilot"
     run_matrix pilot "$tag" "$report" 42
-    if [[ -e "$report/gate.json" ]]; then
-      "$PYTHON_BIN" - "$report/gate.json" <<'PY'
+    if [[ ! -e "$report/gate.json" ]]; then
+      # A failed preregistered gate is a completed negative pilot, not an
+      # infrastructure exception.  check_dual_view_gate intentionally returns
+      # 2 for that scientific outcome, so classify the immutable JSON below.
+      if "$PYTHON_BIN" tools/check_dual_view_gate.py \
+        --paired-summary "$report/summary/paired_summary.csv" --output "$report/gate.json"; then
+        :
+      else
+        gate_command_status=$?
+        [[ -e "$report/gate.json" ]] || exit "$gate_command_status"
+      fi
+    fi
+    gate_status=0
+    if "$PYTHON_BIN" - "$report/gate.json" <<'PY'
 import json, sys
 from pathlib import Path
 gate = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
 if gate.get("test_assets_opened") != 0:
     raise SystemExit("BLOCKED: existing pilot gate has invalid test audit")
+if gate.get("status") == "failed" and gate.get("formal_allowed") is False:
+    print("COMPLETE: preregistered seed42 pilot gate failed; formal remains blocked")
+    raise SystemExit(3)
 if gate.get("status") != "passed" or gate.get("formal_allowed") is not True:
-    raise SystemExit("BLOCKED: existing preregistered pilot gate did not pass")
+    raise SystemExit("BLOCKED: pilot gate has an invalid status combination")
 print("PASS: reusing passed preregistered pilot gate")
 PY
+    then
+      gate_status=0
     else
-      "$PYTHON_BIN" tools/check_dual_view_gate.py \
-        --paired-summary "$report/summary/paired_summary.csv" --output "$report/gate.json"
+      gate_status=$?
     fi
+    if [[ "$gate_status" -eq 3 ]]; then
+      echo "COMPLETE: seed42 pilot finished with a negative preregistered result"
+      echo "BLOCKED BY PROTOCOL: do not launch formal seeds 42/43/44"
+      echo "NEXT: run summarize/package to preserve the negative pilot evidence"
+      exit 2
+    fi
+    [[ "$gate_status" -eq 0 ]] || exit "$gate_status"
     echo "PASS: seed42 pilot and preregistered gate completed"
     ;;
   formal)
