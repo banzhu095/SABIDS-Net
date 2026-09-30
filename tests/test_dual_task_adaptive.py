@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 
+import numpy as np
 import pytest
 import torch
 
@@ -11,7 +12,11 @@ from sabids.models.dual_task_adaptive import (
     binary_entropy,
 )
 from sabids.losses import SABIDSLoss
-from sabids.engine.trainer import build_model
+from sabids.engine.trainer import (
+    _allows_float_label_cache,
+    _inspect_label_asset,
+    build_model,
+)
 
 
 def tiny_model() -> DualTaskAdaptiveSegmenter:
@@ -133,6 +138,21 @@ def test_binary_entropy_is_finite_at_probability_extremes() -> None:
     value = binary_entropy(torch.tensor([0.0, 0.5, 1.0]))
     assert torch.isfinite(value).all()
     assert value[1] > value[0]
+
+
+def test_adaptive_protocol_explicitly_allows_float_npy_label_inventory(tmp_path) -> None:
+    path = tmp_path / "layer.npy"
+    np.save(path, np.asarray([[0.0, 1.0]], dtype=np.float32), allow_pickle=False)
+    adaptive = {"dual_task_adaptive": {"enabled": True}}
+    legacy = {"dual_task_adaptive": {"enabled": False}}
+
+    assert _allows_float_label_cache(adaptive)
+    assert not _allows_float_label_cache(legacy)
+    inspection = _inspect_label_asset(
+        path, allow_float_cache=_allows_float_label_cache(adaptive)
+    )
+    assert inspection["dtype"] == "float32"
+    assert inspection["value_counts"] == {"0.0": 1, "1.0": 1}
 
 
 def test_gate_regularizers_ignore_padding() -> None:

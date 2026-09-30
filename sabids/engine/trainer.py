@@ -95,6 +95,15 @@ def _inspect_label_asset(path: Path, allow_float_cache: bool = False) -> Dict[st
     }
 
 
+def _allows_float_label_cache(config: Dict) -> bool:
+    """Return whether an explicitly cache-backed protocol may use NPY labels."""
+    return bool(
+        config.get("dose_response", {}).get("enabled", False)
+        or config.get("dual_view", {}).get("enabled", False)
+        or config.get("dual_task_adaptive", {}).get("enabled", False)
+    )
+
+
 def _make_transform(config: Dict, training: bool) -> JointOCTTransform:
     size = config["data"].get("target_size", [512, 1024])
     augmentation = config["data"].get("augmentation", {})
@@ -1118,10 +1127,10 @@ class Trainer:
                 asset = Path(value).expanduser()
                 if not asset.is_absolute():
                     asset = (root / asset).resolve()
-                inspection = _inspect_label_asset(asset, allow_float_cache=bool(
-                    self.config.get("dose_response", {}).get("enabled", False)
-                    or self.config.get("dual_view", {}).get("enabled", False)
-                )) if asset.is_file() else {}
+                inspection = _inspect_label_asset(
+                    asset,
+                    allow_float_cache=_allows_float_label_cache(self.config),
+                ) if asset.is_file() else {}
                 label_assets.append(
                     {
                         "asset_id": f"{group_id}|{column}|{ordinal}",
