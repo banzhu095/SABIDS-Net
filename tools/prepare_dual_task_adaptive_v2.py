@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import argparse, copy, json, sys
+import argparse, copy, json, sys, tarfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -9,7 +9,25 @@ if str(ROOT) not in sys.path: sys.path.insert(0, str(ROOT))
 from sabids.config import load_config, save_config
 from sabids.experiments.dual_task_adaptive import audit_adaptive_inputs, sha256_file
 from sabids.experiments.dual_task_adaptive_v2 import audit_v2_inputs
-from tools.prepare_dual_task_adaptive import _record_component_inventory, _record_input_inventory
+from tools.prepare_dual_task_adaptive import (
+    _materialize_coarse_binding,
+    _record_component_inventory,
+    _record_input_inventory,
+)
+
+
+def _materialize_bound_coarse_evidence(root: Path, config: dict, registry: Path) -> str | None:
+    """Recover the verified B3 binding into this v2 registry, or return a blocker.
+
+    The historical B3 run is deliberately left untouched.  Recovery is accepted
+    only through the v1 supplement verifier, which matches the configured B3
+    checkpoint SHA and requires one unique binding payload.
+    """
+    try:
+        _materialize_coarse_binding(root, config, registry)
+    except (FileExistsError, RuntimeError, tarfile.TarError, OSError, ValueError) as error:
+        return str(error)
+    return None
 
 
 def main() -> None:
@@ -20,6 +38,9 @@ def main() -> None:
     p.add_argument("--resume", action="store_true")
     a = p.parse_args(); root = Path(a.project_root).resolve()
     cfg = load_config(root / "configs/adaptive_denoising/dual_task_adaptive_v2/seed42.yaml")
+    registry = root / "cache/adaptive_denoising/pku37_binary_v3/dual_task_adaptive_v2" / a.run_id
+    registry.mkdir(parents=True, exist_ok=True)
+    coarse_evidence_issue = _materialize_bound_coarse_evidence(root, cfg, registry)
     cfg["device"] = a.device; cfg["data"]["root"] = str(root)
     for section, keys in (("anchors", ("d2_checkpoint", "coarse_checkpoint", "v1_checkpoint")),):
         for key in keys:
@@ -35,13 +56,16 @@ def main() -> None:
         values = cfg["dual_task_adaptive"][section]
         for key in keys:
             value = Path(values[key]); values[key] = str(value if value.is_absolute() else (root / value).resolve())
-    registry = root / "cache/adaptive_denoising/pku37_binary_v3/dual_task_adaptive_v2" / a.run_id
-    registry.mkdir(parents=True, exist_ok=True)
     report = audit_v2_inputs(cfg, root)
     anchor_report = audit_adaptive_inputs(cfg, root)
     report["bound_anchor_audit"] = anchor_report
     if anchor_report["status"] != "passed":
         report["status"] = "blocked"; report["issues"].extend(anchor_report["issues"])
+    if coarse_evidence_issue is not None:
+        report["status"] = "blocked"
+        report["issues"].append(f"B3 binding recovery failed: {coarse_evidence_issue}")
+    if report["status"] != "passed":
+        report["blocked_message"] = "BLOCKED: DUAL-TASK ADAPTIVE V2 INPUT EVIDENCE"
     report.update({"mode": a.mode, "run_id": a.run_id})
     (registry / f"preflight_{a.mode}.json").write_text(json.dumps(report, indent=2)+"\n")
     if report["status"] != "passed": print(json.dumps(report, indent=2)); raise SystemExit(2)

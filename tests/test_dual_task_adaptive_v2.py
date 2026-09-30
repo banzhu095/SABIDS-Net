@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import io
+import json
 import math
+import tarfile
 import torch
 
 from sabids.experiments.dual_task_adaptive_v2 import (
@@ -10,6 +13,7 @@ from sabids.experiments.dual_task_adaptive_v2 import (
 from sabids.models.dual_task_adaptive_v2 import DualTaskAdaptiveV2Segmenter
 from sabids.engine.trainer import build_model
 from sabids.models import SABIDSNet
+from tools.prepare_dual_task_adaptive_v2 import _materialize_bound_coarse_evidence
 
 
 def tiny_model():
@@ -151,6 +155,52 @@ def test_audit_fails_closed_without_formal_v1_evidence(tmp_path):
          "vessel_strength_cap":.5,"evidence":{"v1_binding":"missing.json"}}}
     report=audit_v2_inputs(cfg,tmp_path)
     assert report["status"]=="blocked" and report["test_assets_opened"]==0
+
+
+def test_v2_materializes_verified_b3_binding_without_mutating_old_run(tmp_path):
+    checkpoint_sha = "a" * 64
+    old_binding = tmp_path / "runs" / "historical" / "checkpoint_binding_best.json"
+    payload = {
+        "status": "passed",
+        "checkpoint_path": "runs/historical/best.pth",
+        "checkpoint_sha256": checkpoint_sha,
+        "selection_rule": "best_validation_vessel_soft_dice",
+        "completed_epochs": 20,
+        "test_assets_opened": 0,
+    }
+    archive_path = tmp_path / "exports" / "best_checkpoint_supplement_test.tar.gz"
+    archive_path.parent.mkdir(parents=True)
+    serialized = json.dumps(payload).encode("utf-8")
+    with tarfile.open(archive_path, "w:gz") as archive:
+        info = tarfile.TarInfo("supplement/b3_checkpoint_binding_best.json")
+        info.size = len(serialized)
+        archive.addfile(info, io.BytesIO(serialized))
+    config = {
+        "dual_task_adaptive": {
+            "anchors": {"coarse_checkpoint_sha256": checkpoint_sha},
+            "evidence": {"coarse_binding": str(old_binding)},
+        }
+    }
+    registry = tmp_path / "cache" / "v2" / "run"
+    issue = _materialize_bound_coarse_evidence(tmp_path, config, registry)
+    recovered = registry / "evidence" / "b3_checkpoint_binding_best.json"
+    assert issue is None
+    assert not old_binding.exists()
+    assert recovered.is_file()
+    assert json.loads(recovered.read_text(encoding="utf-8")) == payload
+    assert config["dual_task_adaptive"]["evidence"]["coarse_binding"] == str(recovered)
+
+
+def test_v2_binding_recovery_fails_closed_without_verified_supplement(tmp_path):
+    config = {
+        "dual_task_adaptive": {
+            "anchors": {"coarse_checkpoint_sha256": "b" * 64},
+            "evidence": {"coarse_binding": "runs/missing/checkpoint_binding_best.json"},
+        }
+    }
+    issue = _materialize_bound_coarse_evidence(tmp_path, config, tmp_path / "registry")
+    assert issue is not None
+    assert "exactly one matching best-checkpoint supplement" in issue.lower()
 
 
 def test_vessel_source_stays_detached_while_receiver_updates():
