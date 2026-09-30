@@ -3,10 +3,13 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import cv2
+import numpy as np
 import pandas as pd
 import yaml
 
 from sabids.experiments.dual_task_adaptive import audit_adaptive_inputs, sha256_file
+from tools.prepare_dual_task_adaptive import _component_rows
 
 
 def write_json(path: Path, value: dict) -> None:
@@ -82,3 +85,26 @@ def test_preflight_rejects_sealed_test_group_in_manifest(tmp_path: Path) -> None
     report = audit_adaptive_inputs(config, tmp_path)
     assert report["status"] == "blocked"
     assert not report["checks"]["manifest_excludes_test_groups"]
+
+
+def test_component_inventory_reads_npy_masks_and_aligns_original_noisy(tmp_path: Path) -> None:
+    noisy = np.linspace(0, 255, 80, dtype=np.uint8).reshape(8, 10)
+    layer = np.ones((4, 5), dtype=np.float32)
+    vessel = np.zeros((4, 5), dtype=np.float32)
+    vessel[1:3, 2:4] = 1.0
+    noisy_path = tmp_path / "noisy.tif"
+    layer_path = tmp_path / "layer.npy"
+    vessel_path = tmp_path / "vessel.npy"
+    assert cv2.imwrite(str(noisy_path), noisy)
+    np.save(layer_path, layer, allow_pickle=False)
+    np.save(vessel_path, vessel, allow_pickle=False)
+
+    rows = _component_rows(tmp_path, {
+        "sample_id": "sample", "group_id": "group", "split": "train",
+        "image_path": str(noisy_path), "layer_mask_path": str(layer_path),
+        "vessel_mask_path": str(vessel_path),
+    })
+
+    assert len(rows) == 1
+    assert rows[0]["area_model_grid_px"] == 4
+    assert 0.0 <= rows[0]["contrast_model_grid"] <= 1.0

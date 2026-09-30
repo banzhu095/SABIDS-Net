@@ -72,3 +72,10 @@ cost outcomes together. A segmentation gain accompanied by reconstruction or
 weak-vessel harm is not an unqualified improvement. A null or negative result
 must be retained without threshold tuning, P1/P2/P3 post-processing, or selective
 sample choice.
+
+The registered dual-view manifests store segmentation masks on the 512x512
+model grid as float NPY caches while retaining the original 640x640 noisy TIFF.
+Fixed component size and local-contrast strata are therefore explicitly defined
+on `model_grid_px`: noisy images are area-resampled to the mask grid, masks use
+nearest/discrete membership, and no fabricated physical or original-pixel scale
+is reported.

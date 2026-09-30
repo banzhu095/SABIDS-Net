@@ -19,6 +19,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from sabids.config import load_config, save_config
+from sabids.data.io import read_gray
 from sabids.experiments.dual_task_adaptive import audit_adaptive_inputs
 from sabids.experiments.dual_task_adaptive import sha256_file
 
@@ -108,25 +109,46 @@ def _asset(root: Path, value: str) -> Path:
 
 
 def _component_rows(root: Path, row: dict) -> list[dict]:
-    vessel = cv2.imread(str(_asset(root, row["vessel_mask_path"])), cv2.IMREAD_GRAYSCALE)
-    layer = cv2.imread(str(_asset(root, row["layer_mask_path"])), cv2.IMREAD_GRAYSCALE)
-    noisy = cv2.imread(str(_asset(root, row["image_path"])), cv2.IMREAD_GRAYSCALE)
-    if vessel is None or layer is None or noisy is None:
-        raise RuntimeError(f"Cannot read train/val component assets for {row['sample_id']}")
-    vessel_mask, layer_mask = vessel > 0, layer > 0
+    assets = {
+        "vessel_mask_path": _asset(root, row["vessel_mask_path"]),
+        "layer_mask_path": _asset(root, row["layer_mask_path"]),
+        "image_path": _asset(root, row["image_path"]),
+    }
+    try:
+        vessel = read_gray(assets["vessel_mask_path"])
+        layer = read_gray(assets["layer_mask_path"])
+        noisy = read_gray(assets["image_path"])
+    except (FileNotFoundError, RuntimeError, ValueError) as error:
+        details = ", ".join(f"{name}={path}" for name, path in assets.items())
+        raise RuntimeError(
+            f"Cannot read train/val component assets for {row['sample_id']}: "
+            f"{details}"
+        ) from error
+    if vessel.shape != layer.shape:
+        raise ValueError(
+            f"Layer/vessel geometry mismatch for {row['sample_id']}: "
+            f"layer={layer.shape}, vessel={vessel.shape}"
+        )
+    if noisy.shape != vessel.shape:
+        noisy = cv2.resize(
+            noisy,
+            (vessel.shape[1], vessel.shape[0]),
+            interpolation=cv2.INTER_AREA,
+        )
+    vessel_mask, layer_mask = vessel > 0.5, layer > 0.5
     count, labels = cv2.connectedComponents(vessel_mask.astype(np.uint8), connectivity=8)
     output = []
     for component_id in range(1, count):
         component = labels == component_id
         stroma = layer_mask & ~vessel_mask
         contrast_value = (
-            abs(float(noisy[component].mean()) - float(noisy[stroma].mean())) / 255.0
+            abs(float(noisy[component].mean()) - float(noisy[stroma].mean()))
             if component.any() and stroma.any() else float("nan")
         )
         output.append({"sample_id": str(row["sample_id"]), "group_id": str(row["group_id"]),
                        "split": str(row["split"]), "component_id": int(component_id),
-                       "area_original_px": int(component.sum()),
-                       "contrast_original": (float(contrast_value) if np.isfinite(contrast_value) else None)})
+                       "area_model_grid_px": int(component.sum()),
+                       "contrast_model_grid": (float(contrast_value) if np.isfinite(contrast_value) else None)})
     return output
 
 
@@ -138,9 +160,9 @@ def _record_component_inventory(root: Path, config: dict, registry: Path) -> Pat
     train = [row for row in rows if row["split"] == "train"]
     if not train:
         raise RuntimeError("Cannot define component strata without train components")
-    areas = np.asarray([row["area_original_px"] for row in train], dtype=np.float64)
-    contrasts = np.asarray([row["contrast_original"] for row in train
-                            if row["contrast_original"] is not None], dtype=np.float64)
+    areas = np.asarray([row["area_model_grid_px"] for row in train], dtype=np.float64)
+    contrasts = np.asarray([row["contrast_model_grid"] for row in train
+                            if row["contrast_model_grid"] is not None], dtype=np.float64)
     if not contrasts.size:
         raise RuntimeError("Cannot define low-contrast stratum from train data")
     small_max = float(np.quantile(areas, 1.0 / 3.0))
@@ -149,16 +171,17 @@ def _record_component_inventory(root: Path, config: dict, registry: Path) -> Pat
     for row in rows:
         if row["split"] != "val":
             continue
-        low_contrast = row["contrast_original"] is not None and row["contrast_original"] <= low_contrast_max
-        validation.append({**row, "small": row["area_original_px"] <= small_max,
+        low_contrast = row["contrast_model_grid"] is not None and row["contrast_model_grid"] <= low_contrast_max
+        validation.append({**row, "small": row["area_model_grid_px"] <= small_max,
                            "low_contrast": low_contrast,
                            "small_low_contrast": (
-                               row["area_original_px"] <= small_max
+                               row["area_model_grid_px"] <= small_max
                                and low_contrast
                            )})
     payload = {"schema_version": "dual-task-adaptive-fixed-components-v1",
-               "threshold_source": "train_only_original_grid",
-               "small_area_max_original_px": small_max,
+               "threshold_source": "train_only_model_grid",
+               "coordinate_system": "model_grid_px",
+               "small_area_max_model_grid_px": small_max,
                "low_contrast_max": low_contrast_max,
                "validation_components": validation, "test_assets_opened": 0}
     destination = registry / "fixed_component_inventory.json"

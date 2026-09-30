@@ -18,6 +18,7 @@ if str(ROOT) not in sys.path:
 
 from sabids.config import load_config
 from sabids.data import OCTManifestDataset
+from sabids.data.io import read_gray
 from sabids.engine.trainer import _make_transform, build_model
 from sabids.experiments.dual_task_adaptive import gate_statistics, sha256_file
 from sabids.metrics import (
@@ -150,12 +151,12 @@ def main() -> None:
                 ))
                 frame_rows.append(row)
 
-                original_vessel = cv2.imread(str(batch["vessel_mask_path"][0]), cv2.IMREAD_GRAYSCALE)
-                if original_vessel is None:
-                    raise RuntimeError(f"Cannot read original validation vessel label: {sample_id}")
-                _, original_labels = cv2.connectedComponents((original_vessel > 0).astype(np.uint8), connectivity=8)
+                component_vessel = read_gray(batch["vessel_mask_path"][0])
+                _, original_labels = cv2.connectedComponents(
+                    (component_vessel > 0.5).astype(np.uint8), connectivity=8
+                )
                 original_probability = cv2.resize(
-                    vessel_prob, (original_vessel.shape[1], original_vessel.shape[0]),
+                    vessel_prob, (component_vessel.shape[1], component_vessel.shape[0]),
                     interpolation=cv2.INTER_LINEAR,
                 )
                 for component in components_by_sample.get(sample_id, []):
