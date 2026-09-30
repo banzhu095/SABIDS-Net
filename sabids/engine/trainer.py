@@ -39,7 +39,12 @@ from ..data.transforms import JointOCTTransform
 from ..losses import SABIDSLoss
 from ..training import PhaseStateMachine
 from ..metrics import binary_metrics, soft_dice_score, vessel_diagnostic_metrics
-from ..models import ModelEMA, NoisyMildDualViewSegmenter, SABIDSNet
+from ..models import (
+    DualTaskAdaptiveSegmenter,
+    ModelEMA,
+    NoisyMildDualViewSegmenter,
+    SABIDSNet,
+)
 from ..utils import (
     CSVLogger,
     count_parameters,
@@ -248,8 +253,58 @@ def build_diagnostic_loader(
     )
 
 
-def build_model(config: Dict) -> SABIDSNet:
+def build_model(config: Dict) -> torch.nn.Module:
     model_cfg = config["model"]
+    common = {
+        "in_channels": int(model_cfg.get("in_channels", 1)),
+        "channels": tuple(model_cfg.get("channels", [32, 64, 128, 256])),
+        "encoder_depths": tuple(model_cfg.get("encoder_depths", [2, 2, 4, 6])),
+        "decoder_depth": int(model_cfg.get("decoder_depth", 2)),
+        "interaction_levels": tuple(model_cfg.get("interaction_levels", [3, 2, 1])),
+        "enable_seg_to_denoise": bool(model_cfg.get("s2d_enabled", model_cfg.get("enable_seg_to_denoise", True))),
+        "enable_denoise_to_seg": bool(model_cfg.get("d2s_enabled", model_cfg.get("enable_denoise_to_seg", True))),
+        "use_uncertainty": bool(model_cfg.get("use_uncertainty", True)),
+        "detach_denoise_to_seg_source": bool(
+            model_cfg.get("detach_d2s_source", model_cfg.get("detach_denoise_to_seg_source", False))
+        ),
+        "dropout": float(model_cfg.get("dropout", 0.0)),
+        "residual_scale": float(model_cfg.get("residual_scale", 0.5)),
+        "causal_interaction_experiment": bool(model_cfg.get("causal_interaction_experiment", False)),
+        "detach_seg_to_denoise_source": bool(model_cfg.get("detach_s2d_source", False)),
+        "interaction_scale_init": float(model_cfg.get("interaction_scale_init", 0.1)),
+        "s2d_source_mode": str(model_cfg.get("s2d_source_mode", "cross")),
+        "d2s_source_mode": str(model_cfg.get("d2s_source_mode", "cross")),
+        "strong_s2d_rho": model_cfg.get("strong_s2d_rho"),
+        "strong_d2s_rho": model_cfg.get("strong_d2s_rho"),
+    }
+    adaptive_cfg = config.get("dual_task_adaptive", {})
+    if adaptive_cfg.get("enabled", False):
+        model = DualTaskAdaptiveSegmenter(
+            model_kwargs=common,
+            fusion_levels=tuple(adaptive_cfg.get("fusion_levels", [3, 2, 1])),
+            layer_strength_init=float(adaptive_cfg.get("layer_strength_init", 1.0)),
+            vessel_strength_init=float(adaptive_cfg.get("vessel_strength_init", 0.5)),
+            coarse_strength=float(adaptive_cfg.get("coarse_strength", 0.25)),
+            context_channels=int(adaptive_cfg.get("context_channels", 24)),
+        )
+        if adaptive_cfg.get("load_bound_checkpoints", True):
+            anchors = adaptive_cfg.get("anchors", {})
+            required = ("d2_checkpoint", "coarse_checkpoint")
+            missing = [name for name in required if not anchors.get(name)]
+            if missing:
+                raise ValueError(f"Missing adaptive checkpoint anchors: {missing}")
+            for name in required:
+                path = Path(anchors[name]).expanduser().resolve()
+                if not path.is_file():
+                    raise FileNotFoundError(f"Missing adaptive anchor {name}: {path}")
+                expected = anchors.get(f"{name}_sha256")
+                if expected and _sha256_file(path) != expected:
+                    raise ValueError(f"Adaptive anchor SHA256 mismatch: {name}")
+            model.load_bound_checkpoints(
+                Path(anchors["d2_checkpoint"]).expanduser().resolve(),
+                Path(anchors["coarse_checkpoint"]).expanduser().resolve(),
+            )
+        return model
     dual_cfg = config.get("dual_view", {})
     model_class = NoisyMildDualViewSegmenter if dual_cfg.get("enabled", False) else SABIDSNet
     extra = (
@@ -263,29 +318,7 @@ def build_model(config: Dict) -> SABIDSNet:
         }
         if model_class is NoisyMildDualViewSegmenter else {}
     )
-    return model_class(
-        in_channels=int(model_cfg.get("in_channels", 1)),
-        channels=tuple(model_cfg.get("channels", [32, 64, 128, 256])),
-        encoder_depths=tuple(model_cfg.get("encoder_depths", [2, 2, 4, 6])),
-        decoder_depth=int(model_cfg.get("decoder_depth", 2)),
-        interaction_levels=tuple(model_cfg.get("interaction_levels", [3, 2, 1])),
-        enable_seg_to_denoise=bool(model_cfg.get("s2d_enabled", model_cfg.get("enable_seg_to_denoise", True))),
-        enable_denoise_to_seg=bool(model_cfg.get("d2s_enabled", model_cfg.get("enable_denoise_to_seg", True))),
-        use_uncertainty=bool(model_cfg.get("use_uncertainty", True)),
-        detach_denoise_to_seg_source=bool(
-            model_cfg.get("detach_d2s_source", model_cfg.get("detach_denoise_to_seg_source", False))
-        ),
-        dropout=float(model_cfg.get("dropout", 0.0)),
-        residual_scale=float(model_cfg.get("residual_scale", 0.5)),
-        causal_interaction_experiment=bool(model_cfg.get("causal_interaction_experiment", False)),
-        detach_seg_to_denoise_source=bool(model_cfg.get("detach_s2d_source", False)),
-        interaction_scale_init=float(model_cfg.get("interaction_scale_init", 0.1)),
-        s2d_source_mode=str(model_cfg.get("s2d_source_mode", "cross")),
-        d2s_source_mode=str(model_cfg.get("d2s_source_mode", "cross")),
-        strong_s2d_rho=model_cfg.get("strong_s2d_rho"),
-        strong_d2s_rho=model_cfg.get("strong_d2s_rho"),
-        **extra,
-    )
+    return model_class(**common, **extra)
 
 
 def _effective_dataset_table(dataset: object) -> pd.DataFrame:
@@ -395,6 +428,9 @@ class Trainer:
         )
         write_json(
             {
+                "model_type": type(self.model).__name__,
+                "has_interactions": hasattr(self.model, "interactions"),
+                "has_task_adapters": hasattr(self.model, "adapters"),
                 "trainable": [
                     name
                     for name, parameter in self.model.named_parameters()
@@ -484,15 +520,17 @@ class Trainer:
         self._write_initialization_audit()
         self._denoise_probe_image: Optional[torch.Tensor] = None
         self._denoise_probe_reference: Optional[torch.Tensor] = None
-        denoising_path_trainable = any(
-            parameter.requires_grad
-            for module in (
-                self.model.adapters["denoise"],
-                self.model.decoders["denoise"],
-                self.model.residual_head,
+        denoising_path_trainable = False
+        if hasattr(self.model, "adapters"):
+            denoising_path_trainable = any(
+                parameter.requires_grad
+                for module in (
+                    self.model.adapters["denoise"],
+                    self.model.decoders["denoise"],
+                    self.model.residual_head,
+                )
+                for parameter in module.parameters()
             )
-            for parameter in module.parameters()
-        )
         requested_denoise_drift_monitor = bool(
             config["train"].get("monitor_denoise_drift", False)
         )
@@ -992,6 +1030,7 @@ class Trainer:
         if (
             self.config.get("dose_response", {}).get("enabled", False)
             or self.config.get("dual_view", {}).get("enabled", False)
+            or self.config.get("dual_task_adaptive", {}).get("enabled", False)
         ):
             from sabids.experiments.dose_response import augmentation_plan_sha, stable_sha, write_strict_json
             audit_path = self.output_dir / "initialization_audit.json"
@@ -1019,6 +1058,8 @@ class Trainer:
             }
             if self.config.get("dose_response", {}).get("enabled", False):
                 data_plan["dose_response"] = self.config["dose_response"]
+            elif self.config.get("dual_task_adaptive", {}).get("enabled", False):
+                data_plan["dual_task_adaptive"] = self.config["dual_task_adaptive"]
             else:
                 data_plan["dual_view"] = self.config["dual_view"]
             write_strict_json(self.output_dir / "data_plan.json", data_plan)
@@ -1224,6 +1265,15 @@ class Trainer:
             metadata.update({
                 "run_id": self.output_dir.name,
                 "selection_rule": f"best_validation_{monitor}",
+            })
+        if self.config.get("dual_task_adaptive", {}).get("enabled", False):
+            metadata.update({
+                "run_id": self.output_dir.name,
+                "selection_rule": "best_validation_joint_soft_dice",
+                "selection_formula": (
+                    "0.5*val_layer_soft_dice+0.5*val_vessel_soft_dice"
+                ),
+                "tie_break": "earliest_epoch",
             })
         write_json(metadata, self.output_dir / "run_metadata.json")
 
@@ -1959,7 +2009,10 @@ class Trainer:
                     for name, initial in starts.items()
                 ]
                 result[f"{direction}_mapping_update_abs_mean"] = float(torch.stack(deltas).mean().item())
-        for level, interaction in sorted(self.model.interactions.items(), key=lambda item: int(item[0])):
+        for level, interaction in sorted(
+            getattr(self.model, "interactions", {}).items(),
+            key=lambda item: int(item[0]),
+        ):
             for name in ("seg_scale", "layer_scale", "vessel_scale"):
                 value = getattr(interaction, name).detach().float()
                 result[f"level{level}_{name}_signed_mean"] = float(value.mean().item())
@@ -2103,6 +2156,49 @@ class Trainer:
                     str(batch["sample_id"][index])
                 )
                 valid = batch["valid_mask"][index, 0].numpy() > 0.5
+                if "layer_strength_map" in output:
+                    layer_gate = output["layer_strength_map"][index, 0].cpu().numpy()
+                    vessel_gate = output["vessel_strength_map"][index, 0].cpu().numpy()
+                    group_values[group_id]["layer_gate_mean"].append(
+                        float(layer_gate[valid].mean())
+                    )
+                    group_values[group_id]["vessel_gate_mean"].append(
+                        float(vessel_gate[valid].mean())
+                    )
+                    gate_tv_weight = float(
+                        self.config.get("loss", {}).get("gate", {}).get("tv_weight", 0.0)
+                    )
+                    gate_tv_value = 0.0
+                    if gate_tv_weight > 0.0:
+                        horizontal_valid = valid[:, 1:] & valid[:, :-1]
+                        vertical_valid = valid[1:, :] & valid[:-1, :]
+                        tv_values = []
+                        for gate in (layer_gate, vessel_gate):
+                            h = float(np.abs(gate[:, 1:] - gate[:, :-1])[horizontal_valid].mean()) if horizontal_valid.any() else 0.0
+                            v = float(np.abs(gate[1:, :] - gate[:-1, :])[vertical_valid].mean()) if vertical_valid.any() else 0.0
+                            tv_values.append(h + v)
+                        gate_tv_value = float(np.mean(tv_values))
+                    group_values[group_id]["gate_tv_loss"].append(gate_tv_value)
+                    gate_reconstruction_weight = float(
+                        self.config.get("loss", {}).get("gate", {}).get(
+                            "reconstruction_weight", 0.0
+                        )
+                    )
+                    if gate_reconstruction_weight > 0.0:
+                        if not bool(batch["has_clean"][index]):
+                            raise RuntimeError(
+                                "Nonzero gate reconstruction requires paired clean validation"
+                            )
+                        target_clean = batch["clean"][index, 0].numpy()
+                        layer_image = output["fine_layer_denoised"][index, 0].cpu().numpy()
+                        vessel_image = output["fine_vessel_denoised"][index, 0].cpu().numpy()
+                        reconstruction = 0.5 * (
+                            np.sqrt((layer_image[valid] - target_clean[valid]) ** 2 + 1e-6).mean()
+                            + np.sqrt((vessel_image[valid] - target_clean[valid]) ** 2 + 1e-6).mean()
+                        )
+                        group_values[group_id]["gate_reconstruction_loss"].append(
+                            float(reconstruction)
+                        )
                 if self.config.get("dose_response", {}).get("enabled", False):
                     valid &= batch["label_valid_mask"][index, 0].numpy() > 0.5
                 if d2s_disabled_vessel_probability is not None:
@@ -2225,6 +2321,16 @@ class Trainer:
             if per_group:
                 metrics[name] = float(np.mean(per_group))
                 metrics[f"n_groups_{name}"] = float(len(per_group))
+        if self.config.get("dual_task_adaptive", {}).get("enabled", False):
+            layer_soft = metrics.get("layer_soft_dice")
+            vessel_soft = metrics.get("vessel_soft_dice")
+            if layer_soft is None or vessel_soft is None:
+                raise RuntimeError(
+                    "Adaptive joint checkpoint selection requires both validation soft Dice metrics"
+                )
+            metrics["joint_soft_dice"] = 0.5 * (
+                float(layer_soft) + float(vessel_soft)
+            )
         if group_output is not None:
             group_output.parent.mkdir(parents=True, exist_ok=True)
             pd.DataFrame(group_rows).to_csv(
@@ -2477,7 +2583,11 @@ class Trainer:
                     self.best_metric, self.config, self.scaler, ema_state, checkpoint_state,
                 )
             if improved:
-                best_path = self.output_dir / "best.pth"
+                best_path = self.output_dir / (
+                    "best_joint.pth"
+                    if self.config.get("dual_task_adaptive", {}).get("enabled", False)
+                    else "best.pth"
+                )
                 save_checkpoint(
                     best_path,
                     self.model,
@@ -2525,6 +2635,110 @@ class Trainer:
                 "notice": self.config["dose_response"].get("notice", "")})
             if changed_frozen or not changed_trainable:
                 raise RuntimeError("Dose path update check failed; see dose_training_metadata.json")
+        if self.config.get("dual_task_adaptive", {}).get("enabled", False):
+            from sabids.experiments.dose_response import tensor_sha, write_strict_json
+            history = pd.read_csv(self.output_dir / "history.csv", low_memory=False)
+            initial = json.loads(
+                (self.output_dir / "initialization_audit.json").read_text(encoding="utf-8")
+            )
+            changed_trainable, changed_frozen = [], []
+            for name, parameter in self.model.named_parameters():
+                changed = tensor_sha(parameter) != initial["tensor_sha256"][name]
+                if changed and parameter.requires_grad:
+                    changed_trainable.append(name)
+                elif changed:
+                    changed_frozen.append(name)
+            anchor_drift = [
+                name for name in changed_frozen
+                if name.startswith(("d2.", "coarse_segmenter.", "fine_backbone."))
+            ]
+            best_path = self.output_dir / "best_joint.pth"
+            joint_values = pd.to_numeric(
+                history.get("val_joint_soft_dice"), errors="coerce"
+            )
+            if joint_values.isna().all():
+                best_epoch = None
+                best_monitor = None
+            else:
+                best_index = joint_values.idxmax()
+                best_epoch = int(history.loc[best_index, "epoch"])
+                best_monitor = float(joint_values.loc[best_index])
+            adaptive_evidence = self.config["dual_task_adaptive"].get("evidence", {})
+            inventory_value = adaptive_evidence.get("training_input_inventory")
+            inventory_path = Path(inventory_value).expanduser().resolve() if inventory_value else None
+            inventory_expected_sha = adaptive_evidence.get("training_input_inventory_sha256")
+            inventory_unchanged = bool(
+                inventory_path and inventory_path.is_file()
+                and inventory_expected_sha
+                and _sha256_file(inventory_path) == inventory_expected_sha
+            )
+            status = "passed" if (
+                completed_epochs == epochs
+                and best_path.is_file()
+                and changed_trainable
+                and not changed_frozen
+                and (
+                    self.config["dual_task_adaptive"].get("run_mode") == "cpu_smoke"
+                    or inventory_unchanged
+                )
+            ) else "failed"
+            metadata = {
+                "schema_version": "dual-task-adaptive-training-v1",
+                "status": status,
+                "completed_epochs": int(completed_epochs),
+                "configured_epochs": int(epochs),
+                "selection_rule": "best_validation_joint_soft_dice",
+                "selection_formula": "0.5*val_layer_soft_dice+0.5*val_vessel_soft_dice",
+                "tie_break": "earliest_epoch",
+                "best_epoch": best_epoch,
+                "best_monitor": best_monitor,
+                "best_checkpoint": str(best_path.resolve()),
+                "best_checkpoint_sha256": _sha256_file(best_path) if best_path.is_file() else None,
+                "last_checkpoint": str((self.output_dir / "last.pth").resolve()),
+                "last_checkpoint_sha256": _sha256_file(self.output_dir / "last.pth"),
+                "changed_trainable_parameter_names": changed_trainable,
+                "changed_frozen_parameter_names": changed_frozen,
+                "anchor_changed_parameter_names": anchor_drift,
+                "training_input_inventory": str(inventory_path) if inventory_path else None,
+                "training_input_inventory_sha256": inventory_expected_sha,
+                "training_input_inventory_unchanged": inventory_unchanged,
+                "optimizer_steps": int(history["train_optimizer_steps"].sum()),
+                "training_validation_seconds": float(history["seconds"].sum()),
+                "peak_cuda_memory_bytes": (
+                    float(history["train_cuda_peak_memory_bytes"].max())
+                    if "train_cuda_peak_memory_bytes" in history else None
+                ),
+                "test_assets_opened": 0,
+            }
+            write_strict_json(
+                self.output_dir / "dual_task_adaptive_training_metadata.json", metadata
+            )
+            write_strict_json(
+                self.output_dir / "checkpoint_binding_best_joint.json",
+                {
+                    "schema_version": "dual-task-adaptive-checkpoint-binding-v1",
+                    "status": status,
+                    "checkpoint_path": str(best_path.resolve()),
+                    "checkpoint_sha256": metadata["best_checkpoint_sha256"],
+                    "selection_rule": metadata["selection_rule"],
+                    "selection_formula": metadata["selection_formula"],
+                    "tie_break": "earliest_epoch",
+                    "best_epoch": best_epoch,
+                    "best_monitor": best_monitor,
+                    "d2_anchor_sha256": self.config["dual_task_adaptive"].get("anchors", {}).get(
+                        "d2_checkpoint_sha256"
+                    ),
+                    "coarse_anchor_sha256": self.config["dual_task_adaptive"].get("anchors", {}).get(
+                        "coarse_checkpoint_sha256"
+                    ),
+                    "test_assets_opened": 0,
+                },
+            )
+            if status != "passed":
+                raise RuntimeError(
+                    "Adaptive fixed-budget/update audit failed; see "
+                    "dual_task_adaptive_training_metadata.json"
+                )
         if self.config.get("dual_view", {}).get("enabled", False):
             from sabids.experiments.dose_response import tensor_sha, write_strict_json
             history = pd.read_csv(self.output_dir / "history.csv")

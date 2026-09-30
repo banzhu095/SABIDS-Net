@@ -1,5 +1,18 @@
 # SABIDS-Net project context
 
+## Opt-in dual-task adaptive denoising (2026-09-30)
+
+The `feature/seg-guided-adaptive-denoise-v1` branch contains an opt-in seed-42,
+validation-only experiment that freezes the registered D2 denoiser and B3
+coarse segmenter, then learns separate bounded layer/vessel residual doses from
+deployable coarse predictions. It adds gate TV and a small paired-clean
+regularizer only when `dual_task_adaptive.enabled=true`; legacy losses and
+model construction are unchanged. The primary checkpoint is one joint
+validation-soft-Dice endpoint, never separately selected task checkpoints.
+This is an engineering implementation, not evidence of benefit; three reused
+validation positions and anchor selection on the same cohort make subsequent
+results exploratory. See `docs/DUAL_TASK_ADAPTIVE_V1.md`.
+
 ## Opt-in noisy-backed dual-view segmentation (2026-09-28)
 
 The `feature/noisy-mild-dual-view-v1` branch adds a validation-only causal

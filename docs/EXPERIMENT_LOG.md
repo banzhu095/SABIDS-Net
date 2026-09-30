@@ -1168,3 +1168,26 @@ Populate one row per independent fold after validation threshold selection.
 - Local formal assets were not available.  Only unit tests and CPU-scale model
   forwards were run locally; no CUDA CV, oracle evaluation or sealed-test access
   occurred.  Actual cloud results must be recorded separately.
+# 2026-09-30 — Dual-task adaptive denoising engineering implementation
+
+- Branch `feature/seg-guided-adaptive-denoise-v1`, base HEAD
+  `b750d1663b13479782424355537001a07f6dcb10`. No commit, push, cloud operation,
+  formal CUDA training or sealed-test access was performed in this local turn.
+- Verified the supplied metadata-only evidence supplement for D2
+  `best_task_preserving` and the completed B3 best-validation checkpoint. Added
+  fail-closed SHA/binding/protocol/split audits and immutable train/validation
+  asset plus train-defined fixed-component inventories.
+- Added C0 coarse and C1 learned layer/vessel dose paths. D2, B3 and the frozen
+  fine backbone are audited as unchanged; only the shared controller,
+  task-specific auxiliary fusions and zero-initialized logit corrections train.
+  Clean/GT inputs are rejected by prediction. P0 threshold 0.5 is fixed.
+- Primary selection is the earliest maximum of
+  `0.5*val_layer_soft_dice + 0.5*val_vessel_soft_dice`, saved once as
+  `best_joint.pth`. Evaluation reports paired frame/position segmentation,
+  denoising, fixed-component and gate-region tables plus fixed validation atlas
+  examples. Statistical interpretation is limited to three anatomical
+  positions and one seed.
+- A synthetic non-square 24x32, one-epoch CPU Trainer smoke completed and wrote
+  a valid `best_joint.pth` and frozen/update audit. Focused tests passed; the
+  full tracked test suite passed after the changes. This smoke is not scientific
+  evidence.

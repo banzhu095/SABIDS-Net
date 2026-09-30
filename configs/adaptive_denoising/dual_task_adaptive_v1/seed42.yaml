@@ -1,0 +1,105 @@
+_base_: ../dual_view/common.yaml
+
+seed: 42
+deterministic: true
+device: cuda
+protocol_id: pku37_binary_v3
+
+data:
+  manifest: cache/adaptive_denoising/pku37_binary_v3/dual_view_v1/dual_view_v1_fix_20260928_151220_pilot/manifest_b3.csv
+  root: .
+  input_column: primary_path
+  auxiliary_image_column: null
+  auxiliary_mode: none
+  train_split: train
+  val_split: val
+  target_size: [512, 512]
+  normalization: fixed
+  pretransformed_model_grid: true
+  deterministic_augmentation: true
+  load_segmentation_labels: true
+  vessel_oversample_fraction: 0.0
+
+train:
+  stage: input_segment
+  output_dir: runs/adaptive_denoising/pku37_binary_v3/dual_task_adaptive_v1/REPLACE_RUN_ID/seed42
+  epochs: 20
+  early_stopping_patience: 21
+  batch_size: 1
+  gradient_accumulation_steps: 2
+  num_workers: 0
+  learning_rate: 0.00005
+  minimum_learning_rate: 0.000001
+  weight_decay: 0.0001
+  gradient_clip: 1.0
+  amp: false
+  monitor: joint_soft_dice
+  evaluate_epoch0: true
+  pretrained: null
+  resume: null
+  use_ema: false
+  fixed_checkpoint_epochs: [20]
+
+loss:
+  definition_version: dual-task-adaptive-e3b-valid-v1
+  auxiliary_weight: 0.0
+  zero_source: final_segmentation
+  exclude_annotation_invalid_containment: true
+  exclude_annotation_invalid_boundary: true
+  vessel_supervision_mode: roi_bce_dice_outside
+  gate:
+    tv_weight: 0.001
+    reconstruction_weight: 0.02
+  weights:
+    reconstruction: 0.0
+    residual: 0.0
+    identity: 0.0
+    rmac: 0.0
+    pseudo: 0.0
+    vessel_stroma: 0.0
+    vessel_area: 0.0
+    layer: 1.0
+    vessel: 1.0
+    vessel_outside: 0.5
+    containment: 0.1
+
+evaluation:
+  batch_size: 1
+  num_workers: 0
+  threshold: 0.5
+  layer_threshold: 0.5
+  vessel_threshold: 0.5
+  restore_original_geometry: false
+  coordinate_system: model_grid_px
+
+dual_view:
+  enabled: false
+
+dual_task_adaptive:
+  enabled: true
+  version: dual-task-adaptive-v1
+  validation_only: true
+  load_bound_checkpoints: true
+  coarse_strength: 0.25
+  layer_strength_init: 1.0
+  vessel_strength_init: 0.5
+  maximum_strength: 1.25
+  context_channels: 24
+  fusion_levels: [3, 2, 1]
+  anchors:
+    d2_checkpoint: runs/adaptive_denoising/pku37_binary_v3/d2_v1/pilot_pilot_teacher_v2/d25_seed42/best_task_preserving.pth
+    d2_checkpoint_sha256: edc5b1987f189566666d1eb0b9f03701b9ff28409c2a30ad0d34c8eb5758e343
+    coarse_checkpoint: runs/adaptive_denoising/pku37_binary_v3/dual_view_v1/dual_view_v1_fix_20260928_151220_pilot/b3_seed42/best.pth
+    coarse_checkpoint_sha256: c26016890ab50b5a148873d9b868a4aa58a4228c98a82a50b7411027e134ae71
+  evidence:
+    d2_binding: runs/adaptive_denoising/pku37_binary_v3/d2_v1/pilot_pilot_teacher_v2/d25_seed42/checkpoint_binding_best_task_preserving.json
+    d2_binding_sha256: e51e4854b694c24cfcaac86d34545033fba9081089246effed2ee28f0da3ebb4
+    d2_inventory: runs/adaptive_denoising/pku37_binary_v3/d2_v1/pilot_pilot_teacher_v2/d25_seed42/training_asset_inventory_initial.json
+    d2_inventory_sha256: b9573e73b73dd1b28c334a2dd4d8af3486819f93f0014838e9440ae3f4541b62
+    coarse_binding: runs/adaptive_denoising/pku37_binary_v3/dual_view_v1/dual_view_v1_fix_20260928_151220_pilot/b3_seed42/checkpoint_binding_best.json
+    protocol_lock: Manifests/pku37_binary_v3/active_protocol_lock.json
+    protocol_lock_sha256: 61c0f2cdea779255843e4a85cea21c697a33a741d7539c4b2a616cc553c1d998
+    split_contract: configs/data/pku37_binary_v3_split.yaml
+    split_contract_sha256: cc2aee3eb6a6cf7566768a6dadb8abd609b5af7b3e7d8887ed0424e36716d90e
+    manifest_sha256: bc6a19826bd7c3849ab6d7cb72e7621b444945e031f7a00297c24754878038e4
+  test_assets_opened: 0

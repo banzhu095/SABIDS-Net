@@ -32,6 +32,7 @@ class SABIDSLoss(nn.Module):
         super().__init__()
         self.config = config
         self.weights = config.get("weights", {})
+        self.gate_config = config.get("gate", {})
         self.vessel_supervision_mode = str(
             config.get("vessel_supervision_mode", "composite")
         )
@@ -68,6 +69,10 @@ class SABIDSLoss(nn.Module):
         )
 
     def _weight(self, name: str, default: float = 0.0) -> float:
+        if name == "gate_tv_loss":
+            return float(self.gate_config.get("tv_weight", 0.0))
+        if name == "gate_reconstruction_loss":
+            return float(self.gate_config.get("reconstruction_weight", 0.0))
         return float(self.weights.get(name, default))
 
     def _restoration(
@@ -377,6 +382,56 @@ class SABIDSLoss(nn.Module):
             ).sum() / valid_mask.sum().clamp_min(1.0)
         losses["containment"] = containment
 
+        adaptive_gate_output = (
+            stage == "input_segment"
+            and "layer_strength_map" in output
+            and "vessel_strength_map" in output
+        )
+        if adaptive_gate_output:
+            gate_tv = zero
+            gate_reconstruction = zero
+            losses["layer_gate_mean"] = output["layer_strength_map"].float().mean()
+            losses["vessel_gate_mean"] = output["vessel_strength_map"].float().mean()
+            spatial_valid = batch["valid_mask"].float()
+
+            def total_variation(value: torch.Tensor) -> torch.Tensor:
+                horizontal_valid = spatial_valid[..., :, 1:] * spatial_valid[..., :, :-1]
+                vertical_valid = spatial_valid[..., 1:, :] * spatial_valid[..., :-1, :]
+                horizontal = (
+                    (value[..., :, 1:] - value[..., :, :-1]).abs() * horizontal_valid
+                ).sum() / horizontal_valid.sum().clamp_min(1.0)
+                vertical = (
+                    (value[..., 1:, :] - value[..., :-1, :]).abs() * vertical_valid
+                ).sum() / vertical_valid.sum().clamp_min(1.0)
+                return horizontal + vertical
+
+            if self._weight("gate_tv_loss") > 0.0:
+                gate_tv = 0.5 * (
+                    total_variation(output["layer_strength_map"].float())
+                    + total_variation(output["vessel_strength_map"].float())
+                )
+            if self._weight("gate_reconstruction_loss") > 0.0:
+                clean_valid = batch["has_clean"].bool()
+                if not bool(clean_valid.all()):
+                    raise ValueError(
+                        "Nonzero gate reconstruction requires paired clean for every sample"
+                    )
+                spatial = batch["valid_mask"][clean_valid].float()
+                clean = batch["clean"][clean_valid].float()
+                def masked_charbonnier(prediction: torch.Tensor) -> torch.Tensor:
+                    error = torch.sqrt((prediction - clean).square() + 1e-6)
+                    return (error * spatial).sum() / spatial.sum().clamp_min(1.0)
+
+                layer_error = masked_charbonnier(
+                    output["fine_layer_denoised"][clean_valid].float()
+                )
+                vessel_error = masked_charbonnier(
+                    output["fine_vessel_denoised"][clean_valid].float()
+                )
+                gate_reconstruction = 0.5 * (layer_error + vessel_error)
+            losses["gate_tv_loss"] = gate_tv
+            losses["gate_reconstruction_loss"] = gate_reconstruction
+
         identity = _zero(output)
         identity_valid = batch["has_clean"].bool() | batch["is_clean"].bool()
         if (
@@ -485,6 +540,8 @@ class SABIDSLoss(nn.Module):
                 "pseudo"
             },
         }[stage]
+        if adaptive_gate_output:
+            active = active | {"gate_tv_loss", "gate_reconstruction_loss"}
         total = _zero(output)
         for name in active:
             multiplier = ramp if name in {"rmac", "pseudo"} else 1.0
