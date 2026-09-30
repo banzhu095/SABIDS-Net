@@ -432,6 +432,27 @@ class SABIDSLoss(nn.Module):
             losses["gate_tv_loss"] = gate_tv
             losses["gate_reconstruction_loss"] = gate_reconstruction
 
+        if stage == "input_segment" and "vessel_logit_delta" in output:
+            from sabids.experiments.dual_task_adaptive_v2 import frozen_weak_mask, vessel_protection_losses
+            strata = self.config.get("vessel_protect", {}).get("strata", {})
+            protect_valid = (batch["valid_mask"].float()
+                             * batch.get("vessel_valid_mask", batch["valid_mask"]).float()
+                             * batch.get("label_valid_mask", batch["valid_mask"]).float())
+            weak = (frozen_weak_mask(
+                batch["vessel_mask"], batch["layer_mask"], protect_valid, batch["image"],
+                float(strata["small_area_max_model_grid_px"]), float(strata["low_contrast_max"])
+            ) if strata else batch.get("weak_vessel_mask", batch["vessel_mask"]))
+            protected = vessel_protection_losses(
+                output["vessel_strength_map"], batch["vessel_mask"],
+                batch["layer_mask"], protect_valid,
+                weak,
+                margin=float(self.config.get("vessel_protect", {}).get("margin", .10)),
+            )
+            losses.update(protected)
+            for key, value in output.items():
+                if key.startswith("vessel_increment_rms_level"):
+                    losses[f"v2_{key}"] = value
+
         identity = _zero(output)
         identity_valid = batch["has_clean"].bool() | batch["is_clean"].bool()
         if (
@@ -542,6 +563,8 @@ class SABIDSLoss(nn.Module):
         }[stage]
         if adaptive_gate_output:
             active = active | {"gate_tv_loss", "gate_reconstruction_loss"}
+        if stage == "input_segment" and "vessel_logit_delta" in output:
+            active = active | {"vessel_protect"}
         total = _zero(output)
         for name in active:
             multiplier = ramp if name in {"rmac", "pseudo"} else 1.0

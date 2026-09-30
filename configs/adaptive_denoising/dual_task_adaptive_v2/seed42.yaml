@@ -1,0 +1,52 @@
+_base_: ../dual_task_adaptive_v1/seed42.yaml
+
+train:
+  output_dir: runs/adaptive_denoising/pku37_binary_v3/dual_task_adaptive_v2/REPLACE_RUN_ID/seed42
+  epochs: 20
+  early_stopping_patience: 21
+  monitor: vessel_safe_q
+
+loss:
+  gate:
+    tv_weight: 0.001
+    reconstruction_weight: 0.0
+  vessel_protect:
+    margin: 0.10
+  weights:
+    vessel_protect: 0.05
+
+dual_task_adaptive:
+  enabled: false
+
+dual_task_adaptive_v2:
+  enabled: true
+  version: dual-task-adaptive-v2
+  validation_only: true
+  load_bound_checkpoints: true
+  v1_best_epoch: 17
+  v1_checkpoint: runs/adaptive_denoising/pku37_binary_v3/dual_task_adaptive_v1/dual_task_adaptive_v1_20260930_154527/seed42/best_joint.pth
+  v1_checkpoint_sha256: cb15653d26aa117f890e30dc4c73a7cb6b6fd96440c4f882b5c39c8a69ae6ab7
+  coarse_strength: 0.25
+  vessel_strength_cap: 0.5
+  vessel_strength_init: 0.25
+  context_channels: 24
+  fusion_levels: [3, 2, 1]
+  anchors:
+    d2_checkpoint: runs/adaptive_denoising/pku37_binary_v3/d2_v1/pilot_pilot_teacher_v2/d25_seed42/best_task_preserving.pth
+    d2_checkpoint_sha256: edc5b1987f189566666d1eb0b9f03701b9ff28409c2a30ad0d34c8eb5758e343
+    coarse_checkpoint: runs/adaptive_denoising/pku37_binary_v3/dual_view_v1/dual_view_v1_fix_20260928_151220_pilot/b3_seed42/best.pth
+    coarse_checkpoint_sha256: c26016890ab50b5a148873d9b868a4aa58a4228c98a82a50b7411027e134ae71
+    v1_checkpoint: runs/adaptive_denoising/pku37_binary_v3/dual_task_adaptive_v1/dual_task_adaptive_v1_20260930_154527/seed42/best_joint.pth
+    v1_checkpoint_sha256: cb15653d26aa117f890e30dc4c73a7cb6b6fd96440c4f882b5c39c8a69ae6ab7
+  checkpoint_gate:
+    layer_dice_reference: 0.95337
+    layer_surface_dice_reference: 0.77921
+    vessel_dice_reference: 0.74276
+    vessel_roi_dice_reference: 0.74551
+    vessel_recall_reference: 0.77886
+    small_recall_reference: 0.56379
+    low_contrast_recall_reference: 0.63901
+    vessel_boundary_band_dice_reference: 0.67584
+  evidence:
+    v1_binding: runs/adaptive_denoising/pku37_binary_v3/dual_task_adaptive_v1/dual_task_adaptive_v1_20260930_154527/seed42/checkpoint_binding_best_joint.json
+  test_assets_opened: 0

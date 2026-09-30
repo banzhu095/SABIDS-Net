@@ -38,9 +38,10 @@ from ..data import GroupUniformSampler, OCTManifestDataset, SparseAnnotationSamp
 from ..data.transforms import JointOCTTransform
 from ..losses import SABIDSLoss
 from ..training import PhaseStateMachine
-from ..metrics import binary_metrics, soft_dice_score, vessel_diagnostic_metrics
+from ..metrics import binary_metrics, layer_shape_metrics, soft_dice_score, vessel_diagnostic_metrics
 from ..models import (
     DualTaskAdaptiveSegmenter,
+    DualTaskAdaptiveV2Segmenter,
     ModelEMA,
     NoisyMildDualViewSegmenter,
     SABIDSNet,
@@ -101,6 +102,7 @@ def _allows_float_label_cache(config: Dict) -> bool:
         config.get("dose_response", {}).get("enabled", False)
         or config.get("dual_view", {}).get("enabled", False)
         or config.get("dual_task_adaptive", {}).get("enabled", False)
+        or config.get("dual_task_adaptive_v2", {}).get("enabled", False)
     )
 
 
@@ -286,6 +288,30 @@ def build_model(config: Dict) -> torch.nn.Module:
         "strong_s2d_rho": model_cfg.get("strong_s2d_rho"),
         "strong_d2s_rho": model_cfg.get("strong_d2s_rho"),
     }
+    adaptive_v2_cfg = config.get("dual_task_adaptive_v2", {})
+    if adaptive_v2_cfg.get("enabled", False):
+        model = DualTaskAdaptiveV2Segmenter(
+            model_kwargs=common,
+            fusion_levels=tuple(adaptive_v2_cfg.get("fusion_levels", [3, 2, 1])),
+            coarse_strength=float(adaptive_v2_cfg.get("coarse_strength", 0.25)),
+            context_channels=int(adaptive_v2_cfg.get("context_channels", 24)),
+            vessel_strength_init=float(adaptive_v2_cfg.get("vessel_strength_init", 0.25)),
+        )
+        if adaptive_v2_cfg.get("load_bound_checkpoints", True):
+            anchors = adaptive_v2_cfg.get("anchors", {})
+            required = ("d2_checkpoint", "coarse_checkpoint", "v1_checkpoint")
+            missing = [name for name in required if not anchors.get(name)]
+            if missing:
+                raise ValueError(f"Missing adaptive-v2 checkpoint anchors: {missing}")
+            for name in required:
+                path = Path(anchors[name]).expanduser().resolve()
+                if not path.is_file():
+                    raise FileNotFoundError(f"Missing adaptive-v2 anchor {name}: {path}")
+                expected = anchors.get(f"{name}_sha256")
+                if expected and _sha256_file(path) != expected:
+                    raise ValueError(f"Adaptive-v2 anchor SHA256 mismatch: {name}")
+            model.load_bound_checkpoints(*(anchors[name] for name in required))
+        return model
     adaptive_cfg = config.get("dual_task_adaptive", {})
     if adaptive_cfg.get("enabled", False):
         model = DualTaskAdaptiveSegmenter(
@@ -1040,6 +1066,7 @@ class Trainer:
             self.config.get("dose_response", {}).get("enabled", False)
             or self.config.get("dual_view", {}).get("enabled", False)
             or self.config.get("dual_task_adaptive", {}).get("enabled", False)
+            or self.config.get("dual_task_adaptive_v2", {}).get("enabled", False)
         ):
             from sabids.experiments.dose_response import augmentation_plan_sha, stable_sha, write_strict_json
             audit_path = self.output_dir / "initialization_audit.json"
@@ -1069,6 +1096,8 @@ class Trainer:
                 data_plan["dose_response"] = self.config["dose_response"]
             elif self.config.get("dual_task_adaptive", {}).get("enabled", False):
                 data_plan["dual_task_adaptive"] = self.config["dual_task_adaptive"]
+            elif self.config.get("dual_task_adaptive_v2", {}).get("enabled", False):
+                data_plan["dual_task_adaptive_v2"] = self.config["dual_task_adaptive_v2"]
             else:
                 data_plan["dual_view"] = self.config["dual_view"]
             write_strict_json(self.output_dir / "data_plan.json", data_plan)
@@ -1284,6 +1313,10 @@ class Trainer:
                 ),
                 "tie_break": "earliest_epoch",
             })
+        if self.config.get("dual_task_adaptive_v2", {}).get("enabled", False):
+            metadata.update({"run_id": self.output_dir.name,
+                             "selection_rule": "vessel_safe_q_earliest_tie",
+                             "formal_checkpoint": "best_vessel_safe.pth"})
         write_json(metadata, self.output_dir / "run_metadata.json")
 
     @torch.no_grad()
@@ -1515,6 +1548,12 @@ class Trainer:
             for name, parameter in self.model.named_parameters()
             if name.startswith("dual_fusions.")
         }
+        v2_parameter_start = {
+            name: parameter.detach().clone() for name, parameter in self.model.named_parameters()
+            if parameter.requires_grad and name.startswith(("vessel_private_adapter.", "vessel_strength_head.",
+                                                            "vessel_increments.", "vessel_delta_head.", "vessel_logit_scale"))
+        }
+        v2_gradient_totals = defaultdict(float)
         dual_gradient_totals = defaultdict(float)
         d2s_gradient_norm_total = 0.0
         s2d_gradient_norm_total = 0.0
@@ -1809,6 +1848,10 @@ class Trainer:
                     gradient_group_fraction_totals[group] += (
                         value * value / max(squared_norm_sum, 1e-24)
                     )
+                for name, parameter in self.model.named_parameters():
+                    if parameter.grad is not None and name in v2_parameter_start:
+                        key = ".".join(name.split(".")[:2]) if name.startswith("vessel_increments.") else name.split(".")[0]
+                        v2_gradient_totals[key] += float(torch.linalg.vector_norm(parameter.grad.detach().float()).item())
                 gradient_norm = clip_grad_norm_(
                     self.model.parameters(),
                     float(self.config["train"].get("gradient_clip", 1.0)),
@@ -1982,6 +2025,14 @@ class Trainer:
             ]
             result["s2d_scale_update_abs_mean"] = float(torch.stack(deltas).mean().item())
         named_parameters = dict(self.model.named_parameters())
+        if v2_parameter_start:
+            for name, initial in v2_parameter_start.items():
+                key = ".".join(name.split(".")[:2]) if name.startswith("vessel_increments.") else name.split(".")[0]
+                result[f"v2_{key}_update_abs_mean"] = result.get(f"v2_{key}_update_abs_mean", 0.0) + float((named_parameters[name].detach()-initial).float().abs().mean().item())
+            for key, value in v2_gradient_totals.items(): result[f"v2_{key}_gradient_norm"] = value / max(optimizer_steps, 1)
+            result["v2_vessel_logit_scale"] = float(getattr(self.model,"vessel_logit_scale").detach().item())
+            for level, module in getattr(self.model,"vessel_increments",{}).items():
+                result[f"v2_level{level}_gamma"] = float(module.gamma.detach().item())
         for level in sorted(getattr(self.model, "dual_fusions", {}).keys(), key=int):
             fusion = self.model.dual_fusions[level]
             result[f"dual_level{level}_gamma"] = float(fusion.gamma.detach().item())
@@ -2235,6 +2286,10 @@ class Trainer:
                             layer_probability[index, 0], target, valid
                         )
                     )
+                    if self.config.get("dual_task_adaptive_v2", {}).get("enabled", False):
+                        shape = layer_shape_metrics(layer[index, 0] & valid, target & valid)
+                        if math.isfinite(shape["layer_surface_dice"]):
+                            group_values[group_id]["layer_surface_dice"].append(shape["layer_surface_dice"])
                     if d2_teacher_layer_probability is not None:
                         d2_task_scores.append(soft_dice_score(
                             d2_teacher_layer_probability[index, 0], target, valid
@@ -2281,6 +2336,22 @@ class Trainer:
                         )
                         for name, value in diagnostics.items():
                             group_values[group_id][name].append(value)
+                        v2cfg = self.config.get("dual_task_adaptive_v2", {})
+                        strata = v2cfg.get("strata", {})
+                        if v2cfg.get("enabled", False) and strata:
+                            count, labels = cv2.connectedComponents((target & vessel_valid).astype(np.uint8), connectivity=8)
+                            image_np = batch["image"][index, 0].numpy()
+                            stroma = (batch["layer_mask"][index, 0].numpy() > .5) & ~target & vessel_valid
+                            detected = {"small_recall": [], "low_contrast_recall": []}
+                            for component_id in range(1, count):
+                                component = labels == component_id
+                                area = int(component.sum())
+                                contrast = abs(float(image_np[component].mean()) - float(image_np[stroma].mean())) if component.any() and stroma.any() else math.inf
+                                hit = float((vessel[index, 0] & component).sum() / max(area, 1))
+                                if area <= float(strata["small_area_max_model_grid_px"]): detected["small_recall"].append(hit)
+                                if contrast <= float(strata["low_contrast_max"]): detected["low_contrast_recall"].append(hit)
+                            for key, values in detected.items():
+                                if values: group_values[group_id][key].append(float(np.mean(values)))
                     else:
                         vessel_metrics = binary_metrics(
                             vessel[index, 0][vessel_valid], target[vessel_valid]
@@ -2330,7 +2401,8 @@ class Trainer:
             if per_group:
                 metrics[name] = float(np.mean(per_group))
                 metrics[f"n_groups_{name}"] = float(len(per_group))
-        if self.config.get("dual_task_adaptive", {}).get("enabled", False):
+        if (self.config.get("dual_task_adaptive", {}).get("enabled", False)
+                or self.config.get("dual_task_adaptive_v2", {}).get("enabled", False)):
             layer_soft = metrics.get("layer_soft_dice")
             vessel_soft = metrics.get("vessel_soft_dice")
             if layer_soft is None or vessel_soft is None:
@@ -2388,6 +2460,8 @@ class Trainer:
         )
         diagnostics_dir = self.output_dir / "diagnostics"
         d2_selection_rows: list[dict] = []
+        v2_eligibility_rows: list[dict] = []
+        v2_best_safe_q = -math.inf
 
         d2_global_optimizer_step = 0
         formal_teacher = bool(
@@ -2472,6 +2546,21 @@ class Trainer:
                 group_output=diagnostics_dir
                 / f"val_groups_epoch{epoch_number:03d}.csv"
             )
+            v2_selection = None
+            if self.config.get("dual_task_adaptive_v2", {}).get("enabled", False):
+                from sabids.experiments.dual_task_adaptive_v2 import checkpoint_eligibility
+                aliases = {
+                    "layer_dice": val_metrics.get("layer_dice"),
+                    "layer_surface_dice": val_metrics.get("layer_surface_dice"),
+                    "vessel_dice": val_metrics.get("vessel_dice"),
+                    "vessel_roi_dice": val_metrics.get("vessel_roi_dice"),
+                    "vessel_recall": val_metrics.get("vessel_recall"),
+                    "small_recall": val_metrics.get("small_recall"),
+                    "low_contrast_recall": val_metrics.get("low_contrast_recall"),
+                    "vessel_boundary_band_dice": val_metrics.get("vessel_boundary_band_dice"),
+                }
+                v2_selection = checkpoint_eligibility(aliases)
+                val_metrics["vessel_safe_q"] = v2_selection["q"]
             train_eval_metrics = {}
             if (
                 self.train_eval_loader is not None
@@ -2559,6 +2648,17 @@ class Trainer:
                 ema_state,
                 checkpoint_state,
             )
+            if v2_selection is not None:
+                eligibility_row = {"epoch": epoch_number, "eligible": v2_selection["eligible"],
+                                   "q": v2_selection["q"],
+                                   "failed_checks": ";".join(v2_selection["failed_checks"])}
+                v2_eligibility_rows.append(eligibility_row)
+                pd.DataFrame(v2_eligibility_rows).to_csv(self.output_dir / "checkpoint_eligibility.csv", index=False)
+                if v2_selection["eligible"] and v2_selection["q"] > v2_best_safe_q:
+                    v2_best_safe_q = v2_selection["q"]
+                    save_checkpoint(self.output_dir / "best_vessel_safe.pth", self.model,
+                                    self.optimizer, self.scheduler, epoch, v2_best_safe_q,
+                                    self.config, self.scaler, ema_state, checkpoint_state)
             fixed_checkpoint_epochs = {
                 int(value) for value in self.config["train"].get(
                     "fixed_checkpoint_epochs", []
@@ -2593,10 +2693,9 @@ class Trainer:
                 )
             if improved:
                 best_path = self.output_dir / (
-                    "best_joint.pth"
-                    if self.config.get("dual_task_adaptive", {}).get("enabled", False)
-                    else "best.pth"
-                )
+                    "best_unconstrained.pth" if self.config.get("dual_task_adaptive_v2", {}).get("enabled", False)
+                    else "best_joint.pth" if self.config.get("dual_task_adaptive", {}).get("enabled", False)
+                    else "best.pth")
                 save_checkpoint(
                     best_path,
                     self.model,

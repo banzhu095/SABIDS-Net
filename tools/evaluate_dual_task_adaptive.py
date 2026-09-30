@@ -70,8 +70,9 @@ def main() -> None:
     args = parser.parse_args()
 
     config = load_config(args.config)
-    if not config.get("dual_task_adaptive", {}).get("enabled", False):
-        raise ValueError("Evaluation requires dual_task_adaptive.enabled=true")
+    is_v2 = bool(config.get("dual_task_adaptive_v2", {}).get("enabled", False))
+    if not config.get("dual_task_adaptive", {}).get("enabled", False) and not is_v2:
+        raise ValueError("Evaluation requires an adaptive model")
     if args.device:
         config["device"] = args.device
     output_dir = Path(args.output).expanduser().resolve()
@@ -83,8 +84,9 @@ def main() -> None:
     checkpoint = Path(args.checkpoint).expanduser().resolve()
     checkpoint_sha = sha256_file(checkpoint)
     loaded = load_checkpoint(checkpoint, model, strict=True, map_location=device)
-    if checkpoint.name != "best_joint.pth":
-        raise ValueError("Primary adaptive evaluation requires best_joint.pth")
+    expected_name = "best_vessel_safe.pth" if is_v2 else "best_joint.pth"
+    if checkpoint.name != expected_name:
+        raise ValueError(f"Primary adaptive evaluation requires {expected_name}")
     model.eval()
 
     data = config["data"]
@@ -105,7 +107,8 @@ def main() -> None:
     gate_rows: list[dict] = []
     atlas_groups: set[str] = set()
     component_rows: list[dict] = []
-    component_path = config["dual_task_adaptive"].get("evidence", {}).get(
+    adaptive_section = config["dual_task_adaptive_v2"] if is_v2 else config["dual_task_adaptive"]
+    component_path = adaptive_section.get("evidence", {}).get(
         "fixed_component_inventory"
     )
     if not component_path or not Path(component_path).is_file():
@@ -130,14 +133,23 @@ def main() -> None:
                 "C0_coarse": (
                     prediction["coarse_layer_prob"], prediction["coarse_vessel_prob"]
                 ),
-                "C1_adaptive": (prediction["layer_prob"], prediction["vessel_prob"]),
+                "C1_adaptive": (prediction["layer_prob"], prediction.get("v1_vessel_prob", prediction["vessel_prob"])),
             }
+            if is_v2:
+                off = model(image, return_features=False, return_auxiliary=False, vessel_adaptive_off=True)
+                variants.update({"C2_off": (off["layer_prob"], off["vessel_prob"]),
+                                 "C2_on": (prediction["layer_prob"], prediction["vessel_prob"])})
             for variant, (layer_tensor, vessel_tensor) in variants.items():
                 layer_prob = layer_tensor[0, 0].cpu().numpy()
                 vessel_prob = vessel_tensor[0, 0].cpu().numpy()
                 layer_pred = layer_prob >= float(thresholds.get("layer_threshold", 0.5))
                 vessel_pred = vessel_prob >= float(thresholds.get("vessel_threshold", 0.5))
                 row = {"sample_id": sample_id, "group_id": group_id, "variant": variant}
+                if is_v2:
+                    row["v1_layer_probability_max_abs_error"] = float(
+                        (prediction["layer_prob"] - prediction["v1_layer_prob"]).abs().max().item())
+                    row["v1_layer_logits_max_abs_error"] = float(
+                        (prediction["layer_logits"] - prediction["v1_layer_logits"]).abs().max().item())
                 for key, value in binary_metrics(layer_pred[layer_valid], layer_gt[layer_valid]).items():
                     row[f"layer_{key}"] = value
                 row["layer_soft_dice"] = soft_dice_score(layer_prob, layer_gt, layer_valid)
@@ -169,11 +181,12 @@ def main() -> None:
                         "component_missed": float(not bool((original_probability[component_mask] >= 0.5).any())),
                     })
 
+            vessel_array_name = "C2_vessel" if is_v2 else "C1_vessel"
             arrays = {
                 "noisy": image[0, 0].cpu().numpy(),
                 "C0_coarse": prediction["coarse_denoised"][0, 0].cpu().numpy(),
                 "C1_layer": prediction["fine_layer_denoised"][0, 0].cpu().numpy(),
-                "C1_vessel": prediction["fine_vessel_denoised"][0, 0].cpu().numpy(),
+                vessel_array_name: prediction["fine_vessel_denoised"][0, 0].cpu().numpy(),
             }
             model_component_labels = cv2.resize(
                 original_labels.astype(np.float32),
@@ -247,6 +260,11 @@ def main() -> None:
             for task, value in (("layer", layer_strength), ("vessel", vessel_strength),
                                 ("layer_minus_vessel", layer_strength - vessel_strength)):
                 for row in gate_statistics(value, masks):
+                    if is_v2:
+                        selected = value[masks[row["region"]]]
+                        row["fraction_lt_005"] = float((selected < .05).mean())
+                        row["fraction_gt_045"] = float((selected > .45).mean())
+                        row["fraction_at_cap"] = float((selected >= (.5 - 1e-4)).mean()) if task == "vessel" else float((selected >= (1.25 - 1e-4)).mean())
                     gate_rows.append({"sample_id": sample_id, "group_id": group_id,
                                       "task": task, **row})
 
@@ -260,24 +278,25 @@ def main() -> None:
                 coarse_vessel = prediction["coarse_vessel_prob"][0, 0].cpu().numpy()
                 fine_layer = prediction["layer_prob"][0, 0].cpu().numpy()
                 fine_vessel = prediction["vessel_prob"][0, 0].cpu().numpy()
+                off_vessel = off["vessel_prob"][0, 0].cpu().numpy() if is_v2 else coarse_vessel
                 residual_scale = 0.625
                 residual_images = {
                     "coarse_residual": arrays["noisy"] - arrays["C0_coarse"],
                     "fine_layer_residual": arrays["noisy"] - arrays["C1_layer"],
-                    "fine_vessel_residual": arrays["noisy"] - arrays["C1_vessel"],
+                    "fine_vessel_residual": arrays["noisy"] - arrays[vessel_array_name],
                 }
                 tiles = {
                     "noisy": cv2.cvtColor(_u8(arrays["noisy"]), cv2.COLOR_GRAY2BGR),
                     "clean": cv2.cvtColor(_u8(batch["clean"][0, 0].numpy()), cv2.COLOR_GRAY2BGR),
                     "coarse_denoised": cv2.cvtColor(_u8(arrays["C0_coarse"]), cv2.COLOR_GRAY2BGR),
                     "fine_layer_denoised": cv2.cvtColor(_u8(arrays["C1_layer"]), cv2.COLOR_GRAY2BGR),
-                    "fine_vessel_denoised": cv2.cvtColor(_u8(arrays["C1_vessel"]), cv2.COLOR_GRAY2BGR),
+                    "fine_vessel_denoised": cv2.cvtColor(_u8(arrays[vessel_array_name]), cv2.COLOR_GRAY2BGR),
                     "coarse_layer_probability": _color_probability(coarse_layer),
                     "coarse_vessel_probability": _color_probability(coarse_vessel),
                     "fine_layer_probability": _color_probability(fine_layer),
                     "fine_vessel_probability": _color_probability(fine_vessel),
                     "layer_strength": _color_probability(layer_strength / 1.25),
-                    "vessel_strength": _color_probability(vessel_strength / 1.25),
+                    "vessel_strength": _color_probability(vessel_strength / (.5 if is_v2 else 1.25)),
                     "strength_difference": _color_probability((layer_strength - vessel_strength + 1.25) / 2.5),
                     "coarse_layer_mask": cv2.cvtColor(_u8(coarse_layer >= 0.5), cv2.COLOR_GRAY2BGR),
                     "coarse_vessel_mask": cv2.cvtColor(_u8(coarse_vessel >= 0.5), cv2.COLOR_GRAY2BGR),
@@ -289,6 +308,15 @@ def main() -> None:
                     "fine_vessel_overlay": _overlay(arrays["noisy"], fine_vessel >= 0.5, (0, 0, 255)),
                     "coarse_vs_fine_error": _color_probability(np.abs(fine_vessel - coarse_vessel)),
                 }
+                if is_v2:
+                    residual_images["full_D2_residual"] = prediction["full_d2_residual"][0,0].cpu().numpy()
+                    tiles.update({
+                        "C2_off_vessel_probability": _color_probability(off_vessel),
+                        "C2_off_vessel_mask": cv2.cvtColor(_u8(off_vessel >= .5),cv2.COLOR_GRAY2BGR),
+                        "C2_off_vessel_overlay": _overlay(arrays["noisy"],off_vessel >= .5,(0,0,255)),
+                        "layer_gt": cv2.cvtColor(_u8(layer_gt),cv2.COLOR_GRAY2BGR),
+                        "vessel_gt": cv2.cvtColor(_u8(vessel_gt),cv2.COLOR_GRAY2BGR),
+                    })
                 for name, residual in residual_images.items():
                     tiles[name] = _color_probability((np.clip(residual, -residual_scale, residual_scale) + residual_scale) / (2 * residual_scale))
                 method_noise_boundary = tiles["fine_vessel_residual"].copy()
@@ -357,10 +385,25 @@ def main() -> None:
         gain_rows.append(row)
     gain_table = pd.DataFrame(gain_rows)
     gain_table.to_csv(output_dir / "coarse_vs_fine_deltas.csv", index=False, encoding="utf-8-sig")
-    gate_positions = gates.groupby(["task", "region", "group_id"], as_index=False).agg(
-        mean=("mean", "mean"), std=("std", "mean"), p10=("p10", "mean"),
-        p50=("p50", "mean"), p90=("p90", "mean"), count=("count", "sum"),
-    )
+    if is_v2:
+        v2_rows=[]
+        for group_id in gains.index:
+            for comparison, left, right in (("C2_on-C0","C2_on","C0_coarse"),
+                                             ("C2_off-C0","C2_off","C0_coarse"),
+                                             ("C2_on-C2_off","C2_on","C2_off")):
+                row={"group_id":group_id,"comparison":comparison}
+                for metric in metric_columns: row[metric]=float(gains.loc[group_id,(metric,left)]-gains.loc[group_id,(metric,right)])
+                v2_rows.append(row)
+        pd.DataFrame(v2_rows).to_csv(output_dir / "coarse_vs_v2_deltas.csv", index=False, encoding="utf-8-sig")
+        failures=pd.DataFrame(v2_rows)
+        failures=failures[failures["comparison"].eq("C2_on-C0")].sort_values("vessel_dice")
+        failures.to_csv(output_dir / "failure_cases.csv",index=False,encoding="utf-8-sig")
+    gate_aggregations={"mean":("mean","mean"),"std":("std","mean"),"p10":("p10","mean"),
+                       "p50":("p50","mean"),"p90":("p90","mean"),"count":("count","sum")}
+    if is_v2: gate_aggregations.update(fraction_lt_005=("fraction_lt_005","mean"),
+                                       fraction_gt_045=("fraction_gt_045","mean"),
+                                       fraction_at_cap=("fraction_at_cap","mean"))
+    gate_positions = gates.groupby(["task", "region", "group_id"], as_index=False).agg(**gate_aggregations)
     gate_positions.to_csv(output_dir / "gate_metrics_by_position.csv", index=False, encoding="utf-8-sig")
     gate_summary = gate_positions.groupby(["task", "region"], as_index=False).mean(numeric_only=True)
     gate_summary.to_csv(output_dir / "gate_region_summary.csv", index=False, encoding="utf-8-sig")
@@ -369,6 +412,36 @@ def main() -> None:
     )
     results_table = positions.groupby("variant", as_index=False).mean(numeric_only=True)
     results_table.to_csv(output_dir / "RESULTS_TABLE.csv", index=False, encoding="utf-8-sig")
+    scientific_gate = None
+    if is_v2:
+        indexed=results_table.set_index("variant")
+        c0=indexed.loc["C0_coarse"]; c1=indexed.loc["C1_adaptive"]; on=indexed.loc["C2_on"]; off=indexed.loc["C2_off"]
+        q=lambda r: .35*r["vessel_roi_dice"]+.25*r["vessel_dice"]+.15*r["vessel_recall"]+.10*r["vessel_boundary_band_dice"]+.075*r["small_vessel_recall"]+.075*r["low_contrast_vessel_recall"]
+        pos=positions.set_index(["variant","group_id"])
+        groups=sorted(positions.group_id.unique())
+        dice_improved=sum(float(pos.loc[("C2_on",g),"vessel_dice"]-pos.loc[("C0_coarse",g),"vessel_dice"])>0 for g in groups)
+        recall_safe=sum(float(pos.loc[("C2_on",g),"vessel_recall"]-pos.loc[("C0_coarse",g),"vessel_recall"])>=-.005 for g in groups)
+        vessel_gate=float(gate_summary[(gate_summary.task=="vessel")&(gate_summary.region=="vessel")]["mean"].iloc[0])
+        stroma_gate=float(gate_summary[(gate_summary.task=="vessel")&(gate_summary.region=="stroma")]["mean"].iloc[0])
+        checks={
+          "layer_preserved": abs(float(on["layer_dice"]-c1["layer_dice"]))<=1e-4 and abs(float(on["layer_surface_dice"]-c1["layer_surface_dice"]))<=1e-4,
+          "vessel_dice_noninferior": float(on["vessel_dice"])>=float(c0["vessel_dice"]),
+          "vessel_roi_dice_noninferior": float(on["vessel_roi_dice"])>=float(c0["vessel_roi_dice"]),
+          "recall_safe": float(on["vessel_recall"]-c0["vessel_recall"])>=-.005,
+          "small_safe": float(on["small_vessel_recall"]-c0["small_vessel_recall"])>=-.005,
+          "low_contrast_safe": float(on["low_contrast_vessel_recall"]-c0["low_contrast_vessel_recall"])>=-.005,
+          "adaptive_beats_off": float(q(on)-q(off))>0,
+          "position_dice_majority": dice_improved>=2,
+          "position_recall_all_safe": recall_safe==len(groups),
+          "vessel_gate_below_stroma": stroma_gate-vessel_gate>=.05,
+          "test_sealed": True,
+        }
+        scientific_gate={"status":"passed" if all(checks.values()) else "failed","checks":checks,
+          "q_c2_on":float(q(on)),"q_c2_off":float(q(off)),"dice_improved_positions":dice_improved,
+          "recall_safe_positions":recall_safe,"position_count":len(groups),"vessel_gate_mean":vessel_gate,
+          "stroma_gate_mean":stroma_gate,"test_assets_opened":0,
+          "failure_conclusion":None if all(checks.values()) else "当前 Vessel 自适应降噪仍未证明优于 coarse/noisy 保底路径，停止 seed 43/44。"}
+        (output_dir/"preregistered_success_gate.json").write_text(json.dumps(scientific_gate,indent=2,ensure_ascii=False)+"\n",encoding="utf-8")
     if args.save_atlas:
         pd.DataFrame([
             {"group_id": group, "selection_rule": "lexicographically_first_sample_id",
@@ -376,7 +449,7 @@ def main() -> None:
             for group in sorted(atlas_groups)
         ]).to_csv(output_dir / "atlas_selection_manifest.csv", index=False, encoding="utf-8-sig")
     summary = {
-        "schema_version": "dual-task-adaptive-evaluation-v1",
+        "schema_version": "dual-task-adaptive-evaluation-v2" if is_v2 else "dual-task-adaptive-evaluation-v1",
         "status": "passed",
         "checkpoint": str(checkpoint),
         "checkpoint_sha256": checkpoint_sha,
@@ -393,7 +466,14 @@ def main() -> None:
         ),
         "test_assets_opened": 0,
     }
+    if scientific_gate is not None: summary["preregistered_success_gate"] = scientific_gate
     (output_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+    if is_v2:
+        cost={"total_parameters":sum(p.numel() for p in model.parameters()),
+              "trainable_parameters":sum(p.numel() for p in model.parameters() if p.requires_grad),
+              "peak_cuda_memory_bytes":int(torch.cuda.max_memory_allocated(device)) if device.type=="cuda" else 0,
+              "validation_frames":int(len(dataset)),"test_assets_opened":0}
+        (output_dir / "cost_profile.json").write_text(json.dumps(cost,indent=2)+"\n",encoding="utf-8")
     print(json.dumps(summary, indent=2))
 
 
