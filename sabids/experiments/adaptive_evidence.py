@@ -216,7 +216,12 @@ def _copy(source: Path, target: Path) -> dict:
     }
 
 
-def export_snapshot(root: Path, output: Path, selected: dict[str, Path]) -> dict:
+def export_snapshot(
+    root: Path,
+    output: Path,
+    selected: dict[str, Path],
+    supplemental_dose_registries: tuple[Path, ...] = (),
+) -> dict:
     root, output = root.resolve(), output.resolve()
     if output.exists():
         raise FileExistsError(f"Refusing to overwrite evidence snapshot: {output}")
@@ -227,6 +232,12 @@ def export_snapshot(root: Path, output: Path, selected: dict[str, Path]) -> dict
         lowered = {part.lower() for part in path.parts}
         if "test_results" in lowered or "test" in lowered:
             issues.append(f"refusing possible test path for {key}: {path}")
+    for index, path in enumerate(supplemental_dose_registries, start=1):
+        if not path.is_file():
+            issues.append(f"missing supplemental dose registry {index}: {path}")
+        lowered = {part.lower() for part in path.parts}
+        if "test_results" in lowered or "test" in lowered:
+            issues.append(f"refusing possible test path for supplemental dose registry {index}: {path}")
     output.mkdir(parents=True)
     manifest: list[dict] = []
 
@@ -238,6 +249,8 @@ def export_snapshot(root: Path, output: Path, selected: dict[str, Path]) -> dict
         # Registries intentionally share the same basename.  Keep each source
         # in its own category so one cannot overwrite another in the snapshot.
         copy_file(selected[key], key)
+    for index, path in enumerate(supplemental_dose_registries, start=1):
+        copy_file(path, f"dose_registry_supplemental_{index:02d}")
     for name in METADATA_NAMES:
         copy_file(selected["b3_run"] / name, "b3_run")
         copy_file(selected["d2_binding"].parent / name, "d2_run")
@@ -275,7 +288,11 @@ def export_snapshot(root: Path, output: Path, selected: dict[str, Path]) -> dict
     else:
         issues.append(f"missing dose position table: {dose_csv}")
 
-    for path in (selected["dose_registry"], selected["dual_registry"]):
+    for path in (
+        selected["dose_registry"],
+        *supplemental_dose_registries,
+        selected["dual_registry"],
+    ):
         if path.is_file():
             payload = _load_structured(path)
             test_counts = [value for key, value in _walk(payload) if key.endswith("test_assets_opened")]
@@ -288,6 +305,9 @@ def export_snapshot(root: Path, output: Path, selected: dict[str, Path]) -> dict
         "blocked_message": None if not issues else "BLOCKED: BEST CHECKPOINT EVIDENCE",
         "issues": issues,
         "selected": {key: _relative(root, value) for key, value in selected.items()},
+        "supplemental_dose_registries": [
+            _relative(root, value) for value in supplemental_dose_registries
+        ],
         "d2_checkpoint": checkpoint_audit,
         "dose_position_equal_audit": dose_audit,
         "metadata_files": manifest,

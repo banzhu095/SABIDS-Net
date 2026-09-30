@@ -24,6 +24,12 @@ def main() -> None:
     parser.add_argument("--project-root", default=".")
     parser.add_argument("--mode", choices=("discover", "export"), required=True)
     parser.add_argument("--output")
+    parser.add_argument(
+        "--supplemental-dose-registry",
+        action="append",
+        default=[],
+        help="Additional registry belonging to a recovery shard; repeat as needed.",
+    )
     for name in (
         "dose-report", "dual-summary", "b3-run", "d2-binding",
         "dose-registry", "dual-registry", "protocol-lock", "split-contract",
@@ -65,7 +71,11 @@ def main() -> None:
     output = Path(args.output).expanduser()
     if not output.is_absolute():
         output = root / output
-    result = export_snapshot(root, output, selected)
+    supplemental = []
+    for value in args.supplemental_dose_registry:
+        path = Path(value).expanduser()
+        supplemental.append(path.resolve() if path.is_absolute() else (root / path).resolve())
+    result = export_snapshot(root, output, selected, tuple(supplemental))
     print(json.dumps(result, ensure_ascii=False, indent=2))
     if result["status"] != "passed":
         raise SystemExit(2)

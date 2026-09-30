@@ -71,6 +71,8 @@ def test_export_hashes_opaque_checkpoint_and_never_copies_it(tmp_path: Path) -> 
     dual_registry = root / "dual_registry.json"
     _json(dose_registry, {"test_assets_opened": 0})
     _json(dual_registry, {"test_assets_opened": 0})
+    recovery_registry = root / "recovery/preparation_registry.json"
+    _json(recovery_registry, {"test_assets_opened": 0, "alphas": [1.25]})
     output = root / "snapshot"
     result = export_snapshot(root, output, {
         "dose_report": dose,
@@ -81,11 +83,13 @@ def test_export_hashes_opaque_checkpoint_and_never_copies_it(tmp_path: Path) -> 
         "dual_registry": dual_registry,
         "protocol_lock": protocol,
         "split_contract": split,
-    })
+    }, (recovery_registry,))
     assert result["status"] == "passed"
     assert result["d2_checkpoint"]["sha256_matches"] is True
     assert result["checkpoint_bytes_copied"] is False
     assert not list(output.rglob("*.pth"))
+    assert (output / "dose_registry_supplemental_01/preparation_registry.json").is_file()
+    assert result["supplemental_dose_registries"] == ["recovery/preparation_registry.json"]
     assert result["image_assets_opened"] == result["test_assets_opened"] == 0
 
 
