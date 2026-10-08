@@ -188,7 +188,8 @@ def materialize(root, run, source=None, methods=FORMAL, resume=False, reinfer=Fa
                 actual=sha(zipped)
                 rows.append({**row,'local_image_path':str(zipped),'materialized_sha256':actual,
                     'historical_output_sha256':expected,'asset_origin':'manifest_keyed_downloaded_zip','materialization_status':'verified'})
-                write_csv(target,rows);continue
+                if len(rows)%50==0:write_csv(target,rows)
+                continue
             require(reinfer,'Missing cloud output: '+str(key)+'; use --reinfer only with exact sealed checkpoint/config')
             require(row['method_id'] not in {'clean_oracle','noisy_identity'},'Original/reference input must exist')
             config,checkpoint,config_source=locked_entry(root,source,row['method_id'],row)
@@ -209,8 +210,12 @@ def materialize(root, run, source=None, methods=FORMAL, resume=False, reinfer=Fa
         require(not expected or actual==expected,'Historical output SHA conflict for '+str(key))
         rows.append({**row,'local_image_path':str(p),'materialized_sha256':actual,
                      'historical_output_sha256':expected,'asset_origin':origin,'materialization_status':'verified'})
-        write_csv(target,rows)
+        # Cloud-backed /mnt filesystems can be slow. Atomic checkpoints every 50
+        # assets avoid quadratic rewrite I/O; unrecorded assets are hash-checked
+        # again on resume and original formal outputs are never modified.
+        if len(rows)%50==0:write_csv(target,rows)
         if index%20==0:print(f'materialize {index+1}/{len(frame)} {key}',flush=True)
+    write_csv(target,rows)
     verify(run)
     return target
 
