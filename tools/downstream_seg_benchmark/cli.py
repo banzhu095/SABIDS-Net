@@ -19,11 +19,12 @@ from .report import atlas, build_report, package, workbook
 def main(argv=None):
     parser=argparse.ArgumentParser(description='Unified denoised-only segmentation; no Joint training')
     parser.add_argument('command',choices=['audit','build-plan','train','lock','evaluate','build-atlas','build-report','package-light','run-pilot','run-formal',
-        'materialize-inputs','verify-materialized-inputs','export-input-assets','evaluate-incremental','smoke','status'])
+        'materialize-inputs','verify-materialized-inputs','export-input-assets','evaluate-incremental','smoke','status','recover-unstarted-plan'])
     parser.add_argument('--project-root',type=Path,default=Path.cwd())
     parser.add_argument('--run-dir',type=Path)
     parser.add_argument('--manifest',type=Path)
     parser.add_argument('--source-denoise-run',type=Path)
+    parser.add_argument('--source-run',type=Path,help='Zero-checkpoint failed segmentation run for audited recovery')
     parser.add_argument('--output-dir',type=Path)
     parser.add_argument('--incremental-audit-dir',type=Path)
     parser.add_argument('--reinfer',action='store_true',help='Exact sealed denoiser replay only; historical SHA must match')
@@ -37,6 +38,11 @@ def main(argv=None):
     parser.add_argument('--resume',action='store_true')
     parser.add_argument('--num-workers',type=int,default=4)
     args=parser.parse_args(argv)
+    if args.command=='recover-unstarted-plan':
+        from .protocol import recover_unstarted_plan
+        require(args.source_run is not None and args.run_dir is not None, 'Explicit --source-run and new --run-dir required')
+        print(json.dumps(recover_unstarted_plan(args.source_run,args.run_dir),indent=2))
+        return
     root=args.project_root.resolve()
     mode='formal' if args.command=='run-formal' else args.mode
     run=(args.run_dir or root/'runs'/('downstream_seg_'+mode+'_'+datetime.now().strftime('%Y%m%d_%H%M%S'))).resolve()

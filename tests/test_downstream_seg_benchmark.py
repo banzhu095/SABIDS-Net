@@ -159,3 +159,90 @@ def test_atomic_stage_resume_checks_output_hash(tmp_path):
     stage(tmp_path,'fixture','same',action,True);assert len(calls)==1
     write_csv(output,[{'value':2}])
     with pytest.raises(ValueError,match='output changed'):stage(tmp_path,'fixture','same',action,True)
+
+
+def test_amp_overflow_replays_same_window_without_losing_update(monkeypatch):
+    from tools.downstream_seg_benchmark import engine
+
+    class Toy(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.tensor(1.))
+            self.register_buffer('calls', torch.tensor(0))
+            self.draws = []
+
+        def forward(self, x):
+            self.calls.add_(1)
+            draw = torch.rand(())
+            self.draws.append(float(draw))
+            return self.weight * x + draw
+
+    class Scaler:
+        def __init__(self):
+            self.attempts, self.steps, self.value = 0, 0, 65536.
+
+        def scale(self, loss): return loss
+        def is_enabled(self): return True
+        def get_scale(self): return self.value
+
+        def unscale_(self, optimizer):
+            self.attempts += 1
+            if self.attempts == 1:
+                for group in optimizer.param_groups:
+                    for p in group['params']: p.grad.fill_(float('inf'))
+
+        def step(self, optimizer):
+            self.steps += 1
+            optimizer.step()
+
+        def update(self, new_scale=None):
+            if new_scale is not None: self.value = new_scale
+
+    monkeypatch.setattr(engine, 'objective', lambda out, *targets: out.square().mean())
+    model = Toy()
+    optimizer = torch.optim.SGD(model.parameters(), lr=.1)
+    scaler = Scaler()
+    batches = [(torch.tensor([value]),) * 5 for value in [1., 2.]]
+    _, retries = engine.optimizer_window(model, optimizer, scaler, batches, 'cpu', False)
+    assert retries == 1 and scaler.steps == 1 and scaler.value == 32768.
+    assert model.draws[:2] == model.draws[2:]
+    assert model.calls.item() == 2 and model.weight.item() < 1.
+    assert model.weight.grad is None
+
+
+def test_non_amp_nonfinite_gradient_fails_without_optimizer_step(monkeypatch):
+    from tools.downstream_seg_benchmark import engine
+    model = torch.nn.Linear(1, 1)
+    before = {k: t.clone() for k, t in model.state_dict().items()}
+    optimizer = torch.optim.AdamW(model.parameters(), lr=.1)
+    model.weight.register_hook(lambda gradient: gradient * float('inf'))
+    monkeypatch.setattr(engine, 'objective', lambda out, *targets: out.square().mean())
+    batch = (torch.ones(1, 1),) * 5
+    with pytest.raises(ValueError, match='optimizer update not counted'):
+        engine.optimizer_window(model, optimizer, torch.cuda.amp.GradScaler(enabled=False), [batch], 'cpu', False)
+    assert not optimizer.state
+    assert all(torch.equal(before[k], t) for k, t in model.state_dict().items())
+
+
+def test_unstarted_recovery_preserves_seals_and_refuses_trained_run(tmp_path):
+    from tools.downstream_seg_benchmark.protocol import recover_unstarted_plan, verify_plan
+    source = tmp_path/'old'; source.mkdir()
+    _, config = fixture_run(source, True)
+    build_plan(source, config)
+    before = sha(source/'plan_lock.json')
+    destination = tmp_path/'recovered'
+    recovery = recover_unstarted_plan(source, destination)
+    new = verify_plan(destination)
+    assert new['config'] == config and recovery['source_plan_sha256'] == before
+    assert sha(source/'plan_lock.json') == before
+    assert sha(destination/'cohort.csv') == sha(source/'cohort.csv')
+    for seed in ['42','123','2026']:
+        for name in ['initialization.pth', 'data_plan.json', 'sampler_plan.json', 'augmentation_plan.json']:
+            assert sha(source/'plans'/seed/name) == sha(destination/'plans'/seed/name)
+    with pytest.raises(ValueError, match='already exists'):
+        recover_unstarted_plan(source, destination)
+    track = source/'tracks/noisy_identity/42'; track.mkdir(parents=True)
+    (track/'last.pth').write_bytes(b'saved')
+    with pytest.raises(ValueError, match='saved training'):
+        recover_unstarted_plan(source, tmp_path/'forbidden')
+    assert not (tmp_path/'forbidden').exists()

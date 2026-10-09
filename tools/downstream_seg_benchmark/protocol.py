@@ -123,10 +123,62 @@ def verify_plan(run):
     run = Path(run)
     lock = read_json(run / 'plan_lock.json')
     require(lock['source_sha256'] == source_hash(), 'Runtime source differs from sealed plan')
+    _verify_sealed_assets(run, lock)
+    return lock
+
+
+def _verify_sealed_assets(run, lock):
     for key, file in [('cohort_sha256', 'cohort.csv'), ('training_samples_sha256', 'training_samples.csv'),
                       ('fixed_atlas_sha256', 'fixed_atlas_samples.csv'), ('assets_sha256', 'input_asset_audit.csv')]:
         require(sha(run / file) == lock[key], 'Sealed file changed: ' + file)
     for seed, files in lock['seeds'].items():
         for name, expected in files.items():
             require(sha(run / 'plans' / seed / name) == expected, 'Shared randomness artifact changed')
-    return lock
+
+
+def recover_unstarted_plan(source, destination):
+    """Copy immutable randomness/assets into a new seal; never migrate weights."""
+    import shutil
+    from datetime import datetime, timezone
+
+    source, destination = Path(source).resolve(), Path(destination).resolve()
+    require(not destination.exists(), 'Recovery destination already exists')
+    old = read_json(source/'plan_lock.json')
+    _verify_sealed_assets(source, old)
+    require(not any((source/name).exists() for name in
+                    ['test_opened.json', 'checkpoint_lock.json', 'checkpoint_registry.csv', 'per_frame_metrics.csv']),
+            'Recovery forbidden after checkpoint seal/test access')
+    require(not list((source/'tracks').glob('*/*/*.pth')) and
+            not list((source/'tracks').glob('*/*/complete.json')) and
+            not list((source/'tracks').glob('*/*/training_curve.csv')),
+            'Recovery forbidden after any saved training checkpoint/history')
+    status = read_json(source/'formal_config_lock.json')
+    require(status['status'] == 'training_protocol_locked_test_closed' and
+            status['plan_sha256'] == sha(source/'plan_lock.json'), 'Old formal lock mismatch')
+    for seed in old['seeds']:
+        require(sha(source/'shared_initializations'/f'seed_{seed}.pth') ==
+                old['seeds'][seed]['initialization.pth'], 'Shared initialization mismatch')
+    destination.mkdir(parents=True)
+    provenance = destination/'recovery_source_audit'
+    provenance.mkdir()
+    for path in source.iterdir():
+        if path.is_file() and path.suffix in ['.csv', '.json', '.yaml', '.md']:
+            shutil.copy2(path, provenance/path.name)
+            if path.name not in ['plan_lock.json', 'formal_config_lock.json', 'failure.json', 'failures.csv', 'completion_matrix.csv']:
+                shutil.copy2(path, destination/path.name)
+    for name in ['plans', 'shared_initializations', 'data_plans']:
+        shutil.copytree(source/name, destination/name)
+    for name in ['stages', 'logs', 'a30_resume_20261009']:
+        if (source/name).is_dir():
+            shutil.copytree(source/name, provenance/name)
+    recovery = dict(reason='uniform AMP overflow window replay before any saved epoch',
+                    source_run=str(source), source_plan_sha256=sha(source/'plan_lock.json'),
+                    previous_source_sha256=old['source_sha256'], new_source_sha256=source_hash(),
+                    copied_randomness_byte_identical=True, original_results_modified=False,
+                    created_at_utc=datetime.now(timezone.utc).isoformat())
+    lock = dict(old, source_sha256=source_hash(), recovery=recovery)
+    write_json(destination/'plan_lock.json', lock)
+    write_json(destination/'formal_config_lock.json', dict(status, plan_sha256=sha(destination/'plan_lock.json')))
+    write_json(destination/'recovery_provenance.json', recovery)
+    verify_plan(destination)
+    return recovery

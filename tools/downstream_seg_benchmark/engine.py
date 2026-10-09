@@ -28,6 +28,48 @@ def save(path, payload):
     os.replace(temporary, path)
 
 
+def optimizer_window(model, optimizer, scaler, batches, device, amp, max_retries=16):
+    """Replay an overflowing AMP window, never skip a planned optimizer update."""
+    require(bool(batches), 'Empty optimizer window')
+    cpu_rng = torch.get_rng_state()
+    cuda_rng = torch.cuda.get_rng_state_all() if device.startswith('cuda') else []
+    buffers = {name: value.detach().clone() for name, value in model.named_buffers()}
+    for retry in range(max_retries + 1):
+        if retry:
+            torch.set_rng_state(cpu_rng)
+            if cuda_rng:
+                torch.cuda.set_rng_state_all(cuda_rng)
+            with torch.no_grad():
+                for name, value in model.named_buffers():
+                    value.copy_(buffers[name])
+        optimizer.zero_grad(set_to_none=True)
+        loss_sum = 0.
+        for batch in batches:
+            x, l, v, valid, vv = [t.to(device) for t in batch[:5]]
+            with torch.autocast(device_type='cuda', enabled=amp and device.startswith('cuda')):
+                output = model(x)
+            loss = objective(output, l, v, valid, vv)
+            require(bool(torch.isfinite(loss)), 'Nonfinite loss')
+            scaler.scale(loss / len(batches)).backward()
+            loss_sum += float(loss.detach())
+        scaler.unscale_(optimizer)
+        norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.)
+        if bool(torch.isfinite(norm)):
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer.zero_grad(set_to_none=True)
+            return loss_sum, retry
+        optimizer.zero_grad(set_to_none=True)
+        require(scaler.is_enabled() and retry < max_retries,
+                'Nonfinite gradient persists; optimizer update not counted')
+        # Explicit update also resets GradScaler's per-optimizer unscale state.
+        # No optimizer.step occurred: the same samples/randomness are replayed.
+        old_scale = scaler.get_scale()
+        scaler.update(new_scale=old_scale * .5)
+        print(dict(event='amp_window_replay', retry=retry + 1,
+                   old_scale=old_scale, new_scale=scaler.get_scale()), flush=True)
+
+
 def evaluate_rows(model, rows, size, device, method, seed, allow_test=False, prediction_dir=None):
     dataset = Inputs(rows, size, allow_test=allow_test)
     loader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=0)
@@ -176,20 +218,15 @@ def train(run, device, resume=False, methods=None, seeds=None):
                 epoch_start, loss_sum, last_log = time.monotonic(), 0., time.monotonic()
                 optimizer.zero_grad(set_to_none=True)
                 accumulation=config.get('gradient_accumulation',1)
+                pending, amp_retries = [], 0
                 for batch_index,batch in enumerate(loader):
-                    x,l,v,valid,vv = [t.to(device) for t in batch[:5]]
-                    with torch.autocast(device_type='cuda', enabled=config['amp'] and device.startswith('cuda')):
-                        output = model(x)
-                    loss = objective(output,l,v,valid,vv)
-                    require(bool(torch.isfinite(loss)), 'Nonfinite loss')
-                    window=min(accumulation,len(loader)-(batch_index//accumulation)*accumulation)
-                    scaler.scale(loss/window).backward()
+                    pending.append(batch)
                     if (batch_index+1)%accumulation==0 or batch_index+1==len(loader):
-                        scaler.unscale_(optimizer)
-                        norm=torch.nn.utils.clip_grad_norm_(model.parameters(),1.)
-                        require(bool(torch.isfinite(norm)),'Nonfinite gradient; optimizer update not counted')
-                        scaler.step(optimizer);scaler.update();optimizer.zero_grad(set_to_none=True);updates+=1
-                    loss_sum += float(loss.detach())
+                        window_loss, retries = optimizer_window(model, optimizer, scaler, pending, device, config['amp'])
+                        loss_sum += window_loss
+                        amp_retries += retries
+                        pending = []
+                        updates += 1
                     if time.monotonic()-last_log >= 600:
                         print(dict(method=method, epoch=epoch+1, updates=updates, validation='pending',
                                    eta_seconds=(time.monotonic()-epoch_start)/max(1,updates-epoch*len(loader))*(lock['updates_per_method']-updates),
@@ -209,7 +246,8 @@ def train(run, device, resume=False, methods=None, seeds=None):
                         save(dest/'best.pth',dict(model=model.state_dict(),epoch=epoch+1,updates=updates,validation_score=score,**metadata))
                 scheduler.step()
                 history.append(dict(epoch=epoch+1,updates=updates,loss=loss_sum/len(loader),val_vessel_roi_dice=score[0],
-                                    val_layer_dice=score[1],seconds=time.monotonic()-epoch_start,learning_rate=optimizer.param_groups[0]['lr']))
+                                    val_layer_dice=score[1],seconds=time.monotonic()-epoch_start,learning_rate=optimizer.param_groups[0]['lr'],
+                                    amp_window_retries=amp_retries,amp_scale=scaler.get_scale()))
                 save(dest/'last.pth',dict(model=model.state_dict(),optimizer=optimizer.state_dict(),scaler=scaler.state_dict(),
                      scheduler=scheduler.state_dict(),epoch=epoch+1,updates=updates,history=history,best=best,rng=torch.get_rng_state(),
                      cuda_rng=torch.cuda.get_rng_state_all() if device.startswith('cuda') else [],plan_sha256=sha(run/'plan_lock.json')))

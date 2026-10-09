@@ -219,3 +219,33 @@ formal stages, full metrics, cluster bootstrap, preregistered atlas roles and
 evaluate-only label expansion. CPU engineering smoke is not a scientific
 result. Runtime experiment evidence, commit/hardware/config hashes and actual
 completion status are recorded inside each new run, not in original runs.
+
+## AMP recovery (2026-10-09)
+
+The first formal launch failed with a nonfinite scaled gradient before an
+epoch checkpoint was saved, on both P100 and A30. Three initial real patches
+were finite on A30; that limited probe did not establish epoch stability.
+The training engine now buffers each accumulation window and, upon a nonfinite
+gradient, halves the AMP scale and replays the exact same samples, CPU/CUDA RNG
+and model buffers. Only a successful finite clipped-gradient optimizer step
+counts toward the fixed budget. At most 16 retries are allowed; nonfinite loss,
+unscaled/non-AMP failures and persistent overflow still fail closed. Retry counts
+and scales are saved in training curves; no method-specific numerical policy is
+used. Loss, architecture, optimizer, scheduler and sampling remain unchanged.
+
+A sealed old run must NOT have its source hash silently updated. For this
+zero-checkpoint failure, recovery uses a separate run directory containing
+byte-identical copied plans, shared initializations and audited asset manifests
+(whose paths still point at original assets). Its new source seal and explicit
+provenance record link to the old plan/hash/commit and preserve the old failure
+log. Reject this migration if any epoch checkpoint, completed track, checkpoint
+lock or test-open marker exists. Source/config/asset hashes remain enforced in
+the recovered run; never use this route to migrate trained checkpoints.
+
+Use `recover-unstarted-plan --source-run OLD --run-dir NEW` with explicit,
+distinct paths. The destination must not exist. It copies source audit/logs
+under `recovery_source_audit/`, checks all sealed asset/randomness hashes,
+rejects any saved training history/weights or test/checkpoint seals, and writes
+`recovery_provenance.json` linking both source hashes and the previous plan SHA.
+Continue with `run_modelwhale_formal.sh --from-stage train --resume`, keeping the
+original source-denoising run, batch, patch and worker settings.
