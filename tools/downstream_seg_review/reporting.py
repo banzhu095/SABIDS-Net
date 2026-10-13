@@ -144,7 +144,11 @@ def zip_package(out,filename,files):
     buf=io.StringIO();pd.DataFrame(manifest).to_csv(buf,index=False);content=buf.getvalue().encode('utf-8')
     path=out/filename
     with zipfile.ZipFile(path,'w',zipfile.ZIP_DEFLATED,compresslevel=3,allowZip64=True) as z:
-        for p in files:z.write(p,p.relative_to(out).as_posix())
+        # PNG, NPZ and XLSX already contain compressed data. Storing their bytes
+        # avoids expensive, ineffective recompression without changing any asset.
+        for p in files:
+            compression=zipfile.ZIP_STORED if p.suffix.lower() in {'.png','.npz','.xlsx','.zip'} else zipfile.ZIP_DEFLATED
+            z.write(p,p.relative_to(out).as_posix(),compress_type=compression)
         z.writestr('PACKAGE_MANIFEST.csv',content)
     with zipfile.ZipFile(path) as z:
         require(z.testzip() is None,'ZIP CRC failure')

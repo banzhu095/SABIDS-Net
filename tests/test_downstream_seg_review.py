@@ -91,3 +91,18 @@ def test_actual_label_bytes_must_match_sealed_inventory(tmp_path):
     assert validate_label_sources(tmp_path)=={str(p):sha(p)}
     p.write_bytes(b'changed')
     with pytest.raises(ValueError,match='label hash mismatch'):validate_label_sources(tmp_path)
+
+
+def test_already_compressed_assets_stored_without_recompression(tmp_path):
+    image=tmp_path/'mask.png'
+    Image.fromarray(np.zeros((8,8),np.uint8)).save(image)
+    probability=tmp_path/'probabilities.npz'
+    np.savez_compressed(probability,layer=np.zeros((8,8),np.float32))
+    table=tmp_path/'metrics.csv';table.write_text('metric,value\ndice,0.5\n')
+    receipt=zip_package(tmp_path,'assets.zip',[image,probability,table])
+    assert receipt['member_sha256_verified'] and receipt['crc_passed']
+    with zipfile.ZipFile(tmp_path/'assets.zip') as z:
+        for path in [image,probability]:
+            assert z.getinfo(path.name).compress_type==zipfile.ZIP_STORED
+            assert z.read(path.name)==path.read_bytes()
+        assert z.getinfo(table.name).compress_type==zipfile.ZIP_DEFLATED
