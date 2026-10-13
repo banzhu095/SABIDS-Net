@@ -4,10 +4,21 @@ import {Workbook,SpreadsheetFile} from '@oai/artifact-tool';
 const root=process.argv[2];
 const data=JSON.parse(await fs.readFile(path.join(root,'workbook_data.json'),'utf8'));
 const wb=Workbook.create();
+const names={display_name:'方法',method_id:'method_id',position_id:'位置',segmentation_seed:'分割seed',denoiser_seed:'降噪seed',
+  layer_dice:'Layer Dice',vessel_dice:'Vessel Dice（全图）',vessel_roi_dice:'Vessel ROI Dice（GT层内）',
+  precision:'Precision',recall:'Recall',iou:'IoU',boundary_dice:'Strict Boundary Dice',vessel_assd:'Vessel ASSD',
+  vessel_outside_gt_layer_fraction:'层外预测血管占比',vessel_outside_gt_layer_fp:'层外血管FP率',
+  upper_boundary_mae:'上边界MAE',lower_boundary_mae:'下边界MAE',thickness_mae:'厚度MAE',
+  delta_full_dice:'全图Dice差值',delta_roi_dice:'ROI Dice差值',outside_penalty_reduction:'层外Dice惩罚减少',
+  best_epoch:'best epoch',best_checkpoint_updates:'best checkpoint实际updates',total_training_updates:'总训练updates'};
 const preview=path.join(root,'workbook_preview');await fs.mkdir(preview,{recursive:true});
 for(const tab of data.tabs){
   const sheet=wb.worksheets.add(tab.name),cols=tab.columns;
-  const headers=cols.map(c=>c.label);
+  const headers=cols.map(c=>{
+    const base=c.key.replace(/_(mean|std)$/,'');
+    if(!names[base])return c.label;
+    return names[base]+(c.key.endsWith('_std')?'（种子间SD）':'')+(/mae|assd/.test(base)?' (px)':'');
+  });
   const values=[headers,...tab.rows.map(row=>cols.map(c=>row[c.key]??'不适用'))];
   sheet.getRangeByIndexes(3,1,values.length,cols.length).values=values;
   sheet.getRange('B2').values=[[tab.name]];sheet.getRange('B2').format.font={name:'Arial',size:14,bold:true};
@@ -38,7 +49,7 @@ for(const tab of data.tabs){
     }
   }
   const noteRow=values.length+6;
-  sheet.getRangeByIndexes(noteRow,1,1,1).values=[['来源：'+tab.source+'；百分数均值/种子间SD；差值pp；空间误差px。Clean单独参考，不适用不填0。']];
+  sheet.getRangeByIndexes(noteRow,1,1,1).values=[['来源：'+tab.source+'；百分数均值/种子间SD；差值pp；空间误差px。绿色为非Clean最优，灰蓝为Clean参考。不适用不填0。'+(tab.name==='协议与资产索引'?'预测资产完整索引见prediction_export_manifest.csv。':'')]];
   sheet.getRangeByIndexes(noteRow,1,1,1).format.columnWidth=38;
   const blob=await wb.render({sheetName:tab.name,range:`B2:${String.fromCharCode(66+Math.min(7,cols.length)-1)}${Math.min(14,values.length+3)}`,scale:1.5,format:'png'});
   await fs.writeFile(path.join(preview,tab.name+'.png'),new Uint8Array(await blob.arrayBuffer()));

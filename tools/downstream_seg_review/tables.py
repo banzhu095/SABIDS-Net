@@ -92,9 +92,27 @@ def protected_files(run):
     return {str(p.resolve()):sha(p) for p in files if p.is_file()}
 
 
+def validate_finished_stages(run):
+    for name in ['train','lock','evaluate','atlas','report','package']:
+        marker=read_json(run/'stages'/(name+'.json'))
+        require(marker['status']=='success','Original stage not successful: '+name)
+        for path,expected in marker.get('outputs',{}).items():
+            require(sha(run/path)==expected,'Original stage output hash mismatch: '+path)
+
+
 def audit(run,out,resume=False):
     out.mkdir(parents=True,exist_ok=True)
     require(not out.is_relative_to(run),'Review directory must not be inside original run')
+    validate_finished_stages(run)
+    seal=read_json(run/'checkpoint_lock.json')
+    keys={(m,s) for m in ORDER for s in SEEDS}
+    require(len(seal['checkpoints'])==30 and {(d['method_id'],d['segmentation_seed']) for d in seal['checkpoints']}==keys,'Checkpoint coverage differs')
+    matrix=pd.read_csv(run/'completion_matrix.csv')
+    require(len(matrix)==30 and set(zip(matrix.method_id,matrix.segmentation_seed))==keys and matrix.status.eq('complete').all() and matrix.updates.eq(33120).all(),'Completion matrix differs')
+    access=pd.read_csv(run/'test_access_log.csv')
+    require(access.threshold.eq(.5).all() and access.checkpoint_lock_sha256.eq(sha(run/'checkpoint_lock.json')).all(),'Original test-access binding differs')
+    write_json(out/'source_stage_hash_audit.json',dict(passed=True,stages=['train','lock','evaluate','atlas','report','package'],
+        checkpoint_keys=30,complete_matrix_keys=30,original_test_threshold=.5,test_access_bound_to_checkpoint_lock=True))
     baseline=out/'immutable_before.json'
     if baseline.exists():
         require(resume,'Review already exists; use --resume')
@@ -135,6 +153,8 @@ def tables(run,out):
     write_csv(out/'metric_missingness_audit.csv',nan,['metric','nan_frames','meaning'])
     ps,pos,seeds,main=regroup(frame)
     diffs=[]
+    cached=pd.concat([pd.read_csv(p,float_precision='round_trip') for p in run.glob('evaluation/*/*/metrics.csv')],ignore_index=True)
+    diffs+=compare_table(frame,cached,['method_id','segmentation_seed','sample_id'],'per-frame vs persisted per-track evaluation')
     for table,new,ks in [('per_position_seed_metrics.csv',ps,['method_id','segmentation_seed','position_id']),
                          ('per_position_metrics.csv',pos,['method_id','position_id']),('per_seed_metrics.csv',seeds,['method_id','segmentation_seed']),
                          ('per_method_metrics.csv',main,['method_id'])]:
@@ -183,6 +203,7 @@ def tables(run,out):
                 if row['val_vessel_roi_dice']>score['val_vessel_roi_dice']+.0001 or (abs(row['val_vessel_roi_dice']-score['val_vessel_roi_dice'])<=.0001 and row['val_layer_dice']>score['val_layer_dice']):score=row
             ep,updates=int(score['epoch']),int(score['updates']);v,l=float(score['val_vessel_roi_dice']),float(score['val_layer_dice']);status='curve_inferred_NOT_independently_verified'
         best=curve[curve.epoch==ep].iloc[0];last=curve.iloc[-1]
+        require(int(last['updates'])==33120 and updates<=33120,'Actual updates exceed/differ from uniform budget')
         require(int(best['updates'])==updates and np.isclose(best.val_vessel_roi_dice,v) and np.isclose(best.val_layer_dice,l),'Curve/best metadata mismatch')
         row=dict(method_id=m,segmentation_seed=s,best_epoch=ep,best_checkpoint_updates=updates,total_training_updates=33120,
                  best_validation_roi_dice=v,best_validation_layer_dice=l,last_validation_roi_dice=float(last.val_vessel_roi_dice),
@@ -209,6 +230,9 @@ def tables(run,out):
         group=[d for d in protocol if d['segmentation_seed']==seed]
         for k in ['initialization_sha256','data_plan_sha256','sampler_plan_sha256','augmentation_plan_sha256']:
             require(len({d[k] for d in group})==1,'Common randomness differs across methods')
+    write_csv(out/'common_randomness_audit.csv',[dict(segmentation_seed=seed,artifact=k,methods=10,unique_hashes=1,
+        sha256=next(d[k] for d in protocol if d['segmentation_seed']==seed),source_seal_verified=True)
+        for seed in SEEDS for k in ['initialization_sha256','data_plan_sha256','sampler_plan_sha256','augmentation_plan_sha256']])
     # Source join is already primary-denoiser-seed=42 and restricted to these positions.
     joint=pd.read_csv(run/'denoise_segmentation_joined.csv')
     require(set(joint.position_id)==set(POSITIONS) and not joint.duplicated(['method_id','position_id']).any(),'Denoise join key mismatch')

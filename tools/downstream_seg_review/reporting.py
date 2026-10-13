@@ -4,6 +4,7 @@ import hashlib
 import io
 import json
 import shutil
+import subprocess
 import zipfile
 from pathlib import Path
 
@@ -179,6 +180,10 @@ def packages(out,resume=False,predictions=True):
     snapshot=out/'analysis_source';snapshot.mkdir(exist_ok=True)
     for p in Path(__file__).parent.glob('*'):
         if p.suffix in ['.py','.mjs']:shutil.copyfile(p,snapshot/p.name)
+    git=subprocess.run(['git','rev-parse','HEAD'],cwd=Path(__file__).resolve().parents[2],capture_output=True,text=True)
+    write_json(out/'analysis_source_provenance.json',dict(git_commit=git.stdout.strip() if git.returncode==0 else None,
+        source_files={p.name:sha(p) for p in snapshot.iterdir() if p.is_file()},
+        purpose='Read-only review/export code, distinct from sealed original training source'))
     write_csv(out/'download_inventory.csv',receipts)
     download='# 下载路径\n\n'
     for d in receipts:download+=f"- `{d['path']}`：{d['mib']:.2f} MiB；SHA256 `{d['sha256']}`\n"

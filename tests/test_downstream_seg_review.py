@@ -8,7 +8,7 @@ import pytest
 from PIL import Image
 
 from tools.downstream_seg_benchmark.metrics import METRICS
-from tools.downstream_seg_review.tables import regroup,paired,decompose,compare_table
+from tools.downstream_seg_review.tables import regroup,paired,decompose,compare_table,validate_finished_stages
 from tools.downstream_seg_review.images import probability_assets,png,basic_metrics
 from tools.downstream_seg_review.reporting import zip_package
 
@@ -72,3 +72,13 @@ def test_zip_has_member_hash_size_manifest_and_crc(tmp_path):
         row=pd.read_csv(io.BytesIO(z.read('PACKAGE_MANIFEST.csv'))).iloc[0]
         assert row.sha256==hashlib.sha256(z.read('table.csv')).hexdigest()
     with pytest.raises(ValueError,match='Package exists'):zip_package(tmp_path,'fixture.zip',[p])
+
+
+def test_original_stage_status_and_hash_must_pass(tmp_path):
+    from tools.downstream_seg_benchmark.common import write_json,sha
+    p=tmp_path/'metrics.csv';p.write_text('sealed')
+    for stage in ['train','lock','evaluate','atlas','report','package']:
+        write_json(tmp_path/'stages'/(stage+'.json'),dict(status='success',outputs={'metrics.csv':sha(p)}))
+    validate_finished_stages(tmp_path)
+    p.write_text('modified')
+    with pytest.raises(ValueError,match='hash mismatch'):validate_finished_stages(tmp_path)
