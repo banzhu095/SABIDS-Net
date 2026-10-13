@@ -18,6 +18,10 @@ python -m tools.downstream_seg_benchmark.cli run-formal \
 ```
 
 All arguments must match the original sealed request. Recovery verifies the
+successful stage output hashes before any refresh. To intentionally rebuild a
+successful report and its package, add `--refresh-report`; this option is rejected
+for training or test stages and copies the previous report/workbook receipts.
+Recovery verifies the
 sealed cohort, labels, shared randomness files, and successful train, lock,
 evaluate and atlas stage output hashes. It retains the original training source
 hash and input signature, while recording the new postprocessing source hash

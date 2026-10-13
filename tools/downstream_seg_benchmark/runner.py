@@ -57,7 +57,8 @@ def completion_matrix(run):
     return rows
 
 
-def stage(run,name,signature,action,resume=False):
+def stage(run,name,signature,action,resume=False,refresh=False):
+    require(not refresh or (resume and name in ['report','package']),'Refresh is restricted to report/package with resume')
     folder=Path(run)/'stages';folder.mkdir(exist_ok=True)
     marker=folder/(name+'.json')
     if marker.exists():
@@ -66,7 +67,8 @@ def stage(run,name,signature,action,resume=False):
         if prior['status']=='success':
             require(resume,'Stage already completed; use --resume')
             for path,expected in prior.get('outputs',{}).items():require(sha(Path(run)/path)==expected,'Stage output changed: '+path)
-            print('[stage skipped] '+name,flush=True);return
+            if not refresh:
+                print('[stage skipped] '+name,flush=True);return
     started=time.monotonic()
     write_json(marker,dict(stage=name,status='running',input_signature=signature,started_at_utc=datetime.now(timezone.utc).isoformat()))
     try:
@@ -129,4 +131,4 @@ def run_formal(args):
     actions=[preflight,materialization,auditing,preparing,training,locking,evaluating,atlasing,reporting,packaging]
     start=STAGES.index(args.from_stage)
     for name,action in zip(STAGES[start:],actions[start:]):
-        stage(run,name,signature,action,args.resume)
+        stage(run,name,signature,action,args.resume,getattr(args,'refresh_report',False))

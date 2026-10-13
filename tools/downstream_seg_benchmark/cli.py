@@ -36,8 +36,11 @@ def main(argv=None):
     parser.add_argument('--device',default='cuda' if torch.cuda.is_available() else 'cpu')
     parser.add_argument('--mode',choices=['pilot','formal'],default='pilot')
     parser.add_argument('--resume',action='store_true')
+    parser.add_argument('--refresh-report',action='store_true',help='Archive and rebuild successful report/package only; requires --from-stage report --resume')
     parser.add_argument('--num-workers',type=int,default=4)
     args=parser.parse_args(argv)
+    require(not args.refresh_report or (args.command=='run-formal' and args.from_stage=='report' and args.resume),
+            '--refresh-report requires run-formal --from-stage report --resume')
     if args.command=='recover-unstarted-plan':
         from .protocol import recover_unstarted_plan
         require(args.source_run is not None and args.run_dir is not None, 'Explicit --source-run and new --run-dir required')

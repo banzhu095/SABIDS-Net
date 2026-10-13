@@ -131,13 +131,29 @@ def workbook(run):
         require('ERR_MODULE_NOT_FOUND' in result.stderr, 'Workbook builder failed: '+result.stderr[-1500:])
     # Cloud without artifact-tool: standard portable XLSX fallback, explicitly logged.
     from openpyxl import Workbook
-    from openpyxl.styles import Font, PatternFill
+    from openpyxl.styles import Font, PatternFill, Alignment
     wb=Workbook();wb.remove(wb.active)
     for name,rows in read_json(run/'workbook_tables.json').items():
         ws=wb.create_sheet(name);headers=list(rows[0]);ws.append(headers)
         for row in rows:ws.append([row.get(c) for c in headers])
-        for c in ws[1]:c.font=Font(bold=True,color='FFFFFF');c.fill=PatternFill('solid',fgColor='34495E')
+        for cells in ws:
+            for c in cells:
+                c.font=Font(name='Arial',size=11)
+                c.alignment=Alignment(vertical='center')
+                if isinstance(c.value,(int,float)):
+                    c.number_format='0' if any(k in str(ws.cell(1,c.column).value) for k in ['seed','positions','updates','expected','available']) else '0.0000'
+        for c in ws[1]:
+            c.font=Font(name='Arial',size=11,bold=True,color='FFFFFF');c.fill=PatternFill('solid',fgColor='34495E')
+            c.alignment=Alignment(wrap_text=True,vertical='center')
+        ws.row_dimensions[1].height=40
         for col in ws.columns:ws.column_dimensions[col[0].column_letter].width=28
+        ws.sheet_view.showGridLines=False
+        if name=='Status':
+            ws.column_dimensions['B'].width=90
+            for cells in ws:
+                ws.row_dimensions[cells[0].row].height=48
+                cells[1].alignment=Alignment(wrap_text=True,vertical='center')
+        if name in ['Position effects','Intervals']:ws.column_dimensions['A'].width=45
         ws.freeze_panes='A2'
     wb.save(run/filename)
     write_json(run/'workbook_backend.json',dict(backend='openpyxl',reason='Node/artifact-tool unavailable'))

@@ -49,6 +49,23 @@ def test_cli_preserves_original_report_exception(tmp_path,monkeypatch):
     assert calls==[1] and read_json(tmp_path/'failure.json')['reason']=='original report conflict'
 
 
+def test_portable_workbook_keeps_values_and_wraps_status(tmp_path,monkeypatch):
+    from tools.downstream_seg_benchmark import report
+    openpyxl=pytest.importorskip('openpyxl')
+    monkeypatch.delenv('ARTIFACT_NODE',raising=False)
+    monkeypatch.setattr(report.shutil,'which',lambda name:None)
+    text='Stage-1/D0 denoised-only downstream segmentation'
+    write_json(tmp_path/'workbook_tables.json',{'Status':[dict(item='Experiment',value=text)],
+        'Methods':[dict(method_id='sabids_current',vessel_dice_mean=.695058621)]})
+    write_json(tmp_path/'workbook_mode.json',dict(formal=True))
+    report.workbook(tmp_path)
+    wb=openpyxl.load_workbook(tmp_path/'benchmark_summary.xlsx')
+    assert wb['Status']['B2'].value==text and wb['Status']['B2'].alignment.wrap_text
+    assert wb['Status'].column_dimensions['B'].width==90
+    assert wb['Methods']['B2'].value==.695058621
+    assert wb['Methods']['B2'].number_format=='0.0000'
+
+
 def test_report_recovery_keeps_training_seal_and_checks_outputs(tmp_path):
     from tools.downstream_seg_benchmark.runner import prepare_postprocessing_recovery
     from tools.downstream_seg_benchmark.common import digest
@@ -215,6 +232,21 @@ def test_atomic_stage_resume_checks_output_hash(tmp_path):
     stage(tmp_path,'fixture','same',action,True);assert len(calls)==1
     write_csv(output,[{'value':2}])
     with pytest.raises(ValueError,match='output changed'):stage(tmp_path,'fixture','same',action,True)
+
+
+def test_refresh_is_report_only_and_verifies_previous_output(tmp_path):
+    from tools.downstream_seg_benchmark.runner import stage
+    output=tmp_path/'report.md';calls=[]
+    def action():
+        calls.append(1);output.write_text('valid report');return [output]
+    stage(tmp_path,'report','sealed',action)
+    stage(tmp_path,'report','sealed',action,True,True)
+    assert len(calls)==2
+    with pytest.raises(ValueError,match='restricted'):
+        stage(tmp_path,'train','sealed',action,True,True)
+    output.write_text('tampered')
+    with pytest.raises(ValueError,match='output changed'):
+        stage(tmp_path,'report','sealed',action,True,True)
 
 
 def test_amp_overflow_replays_same_window_without_losing_update(monkeypatch):
