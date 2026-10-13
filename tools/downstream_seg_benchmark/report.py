@@ -155,6 +155,9 @@ def package(run):
     for path in candidates:
         if not path.is_file() or path.suffix.lower() not in {'.csv','.md','.json','.yaml','.xlsx','.png','.log','.py','.mjs'}:continue
         rel=path.relative_to(run)
+        # The active package marker is still running while ZIP contents are
+        # assembled. Its final success/hash record is an external receipt.
+        if rel.as_posix()=='stages/package.json':continue
         if any(part in {'predictions','node_modules','workbook_preview'} for part in rel.parts):continue
         if path.name in ['PACKAGE_MANIFEST.csv','package_verification.json']:continue
         files.append(path)
@@ -216,6 +219,41 @@ def formal_report(run,audit,config):
     return status
 
 
+def reconcile_denoise_metrics(tables):
+    """Collapse equivalent source copies, never different seeds or real conflicts.
+
+    Floating columns allow only CSV round-trip noise (rtol=1e-12, atol=1e-15).
+    Identity/text columns and missingness must agree exactly. First source wins
+    only after every duplicate column has passed verification; no averaging.
+    """
+    keys=['dataset','split','method_id','sample_id','seed']
+    d=pd.concat(tables,ignore_index=True)
+    require(all(k in d for k in keys),'Denoising source missing logical key columns')
+    from .common import DEEP
+    d=d[(d.dataset=='PKU37')&(d.split=='test')].copy()
+    d['seed']=pd.to_numeric(d.seed,errors='raise')
+    d=d[(~d.method_id.isin(DEEP))|(d.seed==42)]
+    duplicate=d[d.duplicated(keys,keep=False)]
+    equivalent=0
+    for key,group in duplicate.groupby(keys,sort=False,dropna=False):
+        for column in d.columns:
+            values=group[column]
+            missing=values.isna()|(values.astype(str)=='')
+            require(missing.all() or not missing.any(),f'Conflicting denoising metric sources: {key} column={column} missingness')
+            if missing.all():continue
+            numeric=pd.to_numeric(values,errors='coerce')
+            if numeric.notna().all() and column not in keys+['position_id','frame_id']:
+                same=np.isclose(numeric.to_numpy(dtype=float),float(numeric.iloc[0]),rtol=1e-12,atol=1e-15).all()
+            else:same=values.astype(str).nunique(dropna=False)==1
+            require(same,f'Conflicting denoising metric sources: {key} column={column}')
+        equivalent+=len(group)-1
+    d=d.drop_duplicates(keys,keep='first')
+    require(not d.duplicated(['method_id','sample_id']).any(),'Conflicting denoising metric sources: multiple selected seeds or identities')
+    return d,dict(status='verified_equivalent_sources',input_rows=sum(len(t) for t in tables),
+                  selected_rows=len(d),equivalent_duplicate_rows=equivalent,rtol=1e-12,atol=1e-15,
+                  selection='deep primary seed 42; equivalent copies use first inventory source without averaging')
+
+
 def denoise_join(run):
     evidence=pd.read_csv(run/'formal_source_inventory.csv')
     tables=[]
@@ -224,11 +262,9 @@ def denoise_join(run):
     if not tables:
         write_csv(run/'denoise_segmentation_joined.csv',[],['method_id','position_id','reason'])
         write_json(run/'denoise_join_status.json',dict(status='missing_source_pixel_metrics'));return
-    d=pd.concat(tables,ignore_index=True).drop_duplicates()
+    d,reconciliation=reconcile_denoise_metrics(tables)
+    write_json(run/'denoise_join_status.json',reconciliation)
     if 'hf_energy_ratio_to_reference' in d:d['hf_energy_ratio']=d.hf_energy_ratio_to_reference
-    d=d[(d.dataset=='PKU37')&(d.split=='test')]
-    from .common import DEEP
-    if 'seed' in d:d=d[(~d.method_id.isin(DEEP))|(pd.to_numeric(d.seed)==42)]
     metrics=[c for c in ['psnr','ssim','epi','reference_edge_mae','gradient_magnitude_mae','hf_energy_ratio','laplacian_energy_ratio'] if c in d]
     require(not d.duplicated(['method_id','sample_id']).any(),'Conflicting denoising metric sources')
     for c in metrics:d[c]=pd.to_numeric(d[c],errors='coerce')

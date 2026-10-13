@@ -1168,6 +1168,23 @@ Populate one row per independent fold after validation threshold selection.
 - Local formal assets were not available.  Only unit tests and CPU-scale model
   forwards were run locally; no CUDA CV, oracle evaluation or sealed-test access
   occurred.  Actual cloud results must be recorded separately.
+# 2026-10-13 — Downstream report-only recovery
+
+- Cloud A30 run `downstream_seg_formal_20261009_a30_amp_recovery`, training
+  source commit `3e347016f19110bb8869cf796db5c39030c79b1c`, finished all 30
+  method/segmentation-seed arms, 60 epochs each. Frozen threshold 0.5, training
+  patch 384, evaluation 640, batch 1, seeds 42/123/2026; fixed denoiser seed 42.
+  Train, lock, evaluate and atlas stage markers passed; report failed.
+- Read-only diagnosis found 14 TV PKU37-test duplicate sample keys between base
+  and extension metric copies. Only residual_mean differed, by at most
+  5.169878828456423e-26; reported PSNR/SSIM/edge/energy metrics were identical.
+- Added all-column, tolerance-checked duplicate reconciliation, a nonrecursive
+  CLI failure handler, and audited report/package-only recovery. No original
+  source CSV, checkpoint, training seal, test threshold or inference is changed.
+  Focused regression tests passed 21 cases before cloud execution; full local
+  repository tests, compileall and diff checks passed. Actual cloud execution
+  and archive validation outcomes are recorded in runtime receipts.
+
 # 2026-09-30 — Dual-task adaptive denoising engineering implementation
 
 - Branch `feature/seg-guided-adaptive-denoise-v1`, base HEAD

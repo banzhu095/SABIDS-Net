@@ -97,7 +97,8 @@ def main(argv=None):
     except Exception as exc:
         write_json(run/'failure.json',dict(stage=args.command,error=type(exc).__name__,reason=str(exc)))
         write_csv(run/'failures.csv',[dict(stage=args.command,reason=str(exc))])
-        if (run/'audit.json').exists():build_report(run)
+        # Preserve the original exception. A failed report must not recursively
+        # run the same failing report or partially replace successful outputs.
         raise
 
 

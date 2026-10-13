@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import time
 from datetime import datetime,timezone
 from pathlib import Path
@@ -12,6 +13,35 @@ import torch
 from .common import FORMAL,digest,read_json,require,sha,source_hash,write_csv,write_json
 
 STAGES=['preflight','materialize','audit','prepare','train','lock','evaluate','atlas','report','package']
+
+
+def prepare_postprocessing_recovery(run,request,from_stage):
+    """Audited report-only code recovery; training/test seals are never rewritten."""
+    from .protocol import _verify_sealed_assets
+    run=Path(run)
+    lock=read_json(run/'plan_lock.json')
+    require(lock['config']==request['config'],'Postprocessing configuration differs from sealed plan')
+    _verify_sealed_assets(run,lock)
+    original=dict(request,source_hash=lock['source_sha256'])
+    signature=digest(original)
+    prior_stages=['train','lock','evaluate','atlas']+(['report'] if from_stage=='package' else [])
+    for name in prior_stages:
+        prior=read_json(run/'stages'/(name+'.json'))
+        require(prior['status']=='success' and prior['input_signature']==signature,'Postprocessing requires sealed completed stage: '+name)
+        for path,expected in prior.get('outputs',{}).items():
+            require(sha(run/path)==expected,'Stage output changed: '+path)
+    folder=run/'postprocessing_recovery'/datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')
+    folder.mkdir(parents=True)
+    for relative in ['failure.json','failures.csv','stages/report.json','stages/package.json',
+                     'downstream_segmentation_report.md','benchmark_summary.xlsx','package_verification.json','PACKAGE_MANIFEST.csv']:
+        p=run/relative
+        if p.is_file():
+            dest=folder/'previous'/relative;dest.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(p,dest)
+    write_json(folder/'provenance.json',dict(scope='report/package only; no training, lock, test or atlas execution',
+        sealed_training_source_sha256=lock['source_sha256'],postprocessing_source_sha256=request['source_hash'],
+        input_signature=signature,plan_sha256=sha(run/'plan_lock.json'),from_stage=from_stage,
+        verified_prior_stages=prior_stages))
+    return signature
 
 
 def completion_matrix(run):
@@ -64,6 +94,8 @@ def run_formal(args):
     config=default_config('formal');config.update(num_workers=args.num_workers,batch_size=args.batch_size,target_size=args.patch_size)
     request=dict(config=config,source=str(source),source_hash=source_hash(),manifest=sha(args.manifest) if args.manifest else None)
     signature=digest(request)
+    if args.from_stage in ['report','package']:
+        signature=prepare_postprocessing_recovery(run,request,args.from_stage)
     # Arm selectors are recovery controls, not scientific protocol changes.
     manifest=args.manifest or run/'materialized_primary_inputs.csv'
     def preflight():
@@ -89,7 +121,11 @@ def run_formal(args):
     def evaluating():evaluate(run,args.device,args.resume);return [run/'per_frame_metrics.csv']
     def atlasing():atlas(run);return list((run/'atlas').glob('*.png'))
     def reporting():build_report(run);workbook(run);return [run/'downstream_segmentation_report.md',run/'benchmark_summary.xlsx']
-    def packaging():package(run);return [run/'package_verification.json']
+    def packaging():
+        if start>=STAGES.index('report'):
+            write_json(run/'failure.json',dict(status='resolved',stage='postprocessing',reason=None))
+            write_csv(run/'failures.csv',[],['stage','reason'])
+        package(run);return [run/'package_verification.json']
     actions=[preflight,materialization,auditing,preparing,training,locking,evaluating,atlasing,reporting,packaging]
     start=STAGES.index(args.from_stage)
     for name,action in zip(STAGES[start:],actions[start:]):

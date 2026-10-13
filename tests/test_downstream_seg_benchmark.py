@@ -14,6 +14,62 @@ from tools.downstream_seg_benchmark.model import Segmenter
 from tools.downstream_seg_benchmark.protocol import build_plan, default_config
 
 
+def test_denoise_metric_copies_roundtrip_primary_only():
+    from tools.downstream_seg_benchmark.report import reconcile_denoise_metrics
+    a=dict(dataset='PKU37',split='test',position_id='pku_0006',sample_id='pku_0006_f29',
+           seed=0,method_id='tv_chambolle',psnr=32.317,ssim=.785,residual_mean=1.0420194485050158e-10)
+    b=dict(a,residual_mean=1.0420194485050157e-10)
+    deep=[dict(a,method_id='sabids_current',seed=s,psnr=float(s)) for s in [42,123,2026]]
+    result,audit=reconcile_denoise_metrics([pd.DataFrame([a]+deep),pd.DataFrame([b])])
+    assert len(result)==2 and audit['equivalent_duplicate_rows']==1
+    assert result[result.method_id=='sabids_current'].seed.tolist()==[42]
+    assert result[result.method_id=='tv_chambolle'].residual_mean.iloc[0]==a['residual_mean']
+
+
+@pytest.mark.parametrize('change',[
+    dict(psnr=33.),dict(position_id='wrong'),dict(residual_mean=1e-8),dict(psnr=''),dict(extra='value')])
+def test_denoise_conflicts_fail_closed(change):
+    from tools.downstream_seg_benchmark.report import reconcile_denoise_metrics
+    a=dict(dataset='PKU37',split='test',position_id='p',sample_id='p_f1',seed=0,
+           method_id='tv_chambolle',psnr=32.,residual_mean=1e-10)
+    with pytest.raises(ValueError,match='Conflicting denoising metric sources'):
+        reconcile_denoise_metrics([pd.DataFrame([a]),pd.DataFrame([dict(a,**change)])])
+
+
+def test_cli_preserves_original_report_exception(tmp_path,monkeypatch):
+    from tools.downstream_seg_benchmark import cli
+    write_json(tmp_path/'audit.json',{})
+    calls=[]
+    def fail(run):
+        calls.append(1)
+        raise ValueError('original report conflict')
+    monkeypatch.setattr(cli,'build_report',fail)
+    with pytest.raises(ValueError,match='original report conflict'):
+        cli.main(['build-report','--run-dir',str(tmp_path)])
+    assert calls==[1] and read_json(tmp_path/'failure.json')['reason']=='original report conflict'
+
+
+def test_report_recovery_keeps_training_seal_and_checks_outputs(tmp_path):
+    from tools.downstream_seg_benchmark.runner import prepare_postprocessing_recovery
+    from tools.downstream_seg_benchmark.common import digest
+    _,config=fixture_run(tmp_path,True);build_plan(tmp_path,config)
+    lock=read_json(tmp_path/'plan_lock.json');before=sha(tmp_path/'plan_lock.json')
+    request=dict(config=config,source='source',source_hash=lock['source_sha256'],manifest=None)
+    signature=digest(request)
+    result=tmp_path/'per_frame_metrics.csv';result.write_text('sealed test result')
+    for name in ['train','lock','evaluate','atlas']:
+        write_json(tmp_path/'stages'/(name+'.json'),dict(status='success',input_signature=signature,
+            outputs={'per_frame_metrics.csv':sha(result)}))
+    write_json(tmp_path/'failure.json',dict(reason='old failure'))
+    changed=dict(request,source_hash='new-report-source')
+    assert prepare_postprocessing_recovery(tmp_path,changed,'report')==signature
+    assert sha(tmp_path/'plan_lock.json')==before
+    assert len(list(tmp_path.glob('postprocessing_recovery/*/previous/failure.json')))==1
+    result.write_text('changed test result')
+    with pytest.raises(ValueError,match='Stage output changed'):
+        prepare_postprocessing_recovery(tmp_path,changed,'report')
+
+
 def fixture_run(tmp_path,formal=False):
     rows=[]
     image=tmp_path/'image.png';layer=tmp_path/'layer.png';vessel=tmp_path/'vessel.png'
