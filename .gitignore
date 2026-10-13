@@ -77,3 +77,5 @@ dist/
 
 # Local JavaScript dependency junction used by the workbook builder
 /tools/oct_denoise_benchmark/node_modules/
+/tools/downstream_seg_review/node_modules/
+/reports/downstream_seg_stage_summary_*/

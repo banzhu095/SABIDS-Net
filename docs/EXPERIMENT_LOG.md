@@ -1168,6 +1168,21 @@ Populate one row per independent fold after validation threshold selection.
 - Local formal assets were not available.  Only unit tests and CPU-scale model
   forwards were run locally; no CUDA CV, oracle evaluation or sealed-test access
   occurred.  Actual cloud results must be recorded separately.
+# 2026-10-13 — Read-only downstream stage-summary tooling
+
+- Added an isolated review/export workflow for the completed A30 formal run.
+  Original training/weights/inference/threshold/labels are unchanged. Outputs
+  occupy a separate ignored reports directory. Runtime metadata, not the
+  registry's total updates, verifies best checkpoint epoch and actual updates.
+- Seven focused tests passed for aggregation, duplicate keys, decomposition,
+  raw threshold masks/ignore colors, probability quantization and ZIP receipts.
+  Full local suite passed 432 tests; compileall and diff checks passed. Actual
+  cloud validation is recorded separately at execution.
+- Source inspection confirmed 4500 native640 float32 probability NPZ files;
+  SABIDS seed42 best metadata is epoch5/update2760, versus total budget33120.
+  Locked small_vessel_rich roles for pku_0017/0031 have zero small components.
+  No new inference is authorized or implemented in this review workflow.
+
 # 2026-10-13 — Downstream report-only recovery
 
 - Cloud A30 run `downstream_seg_formal_20261009_a30_amp_recovery`, training
