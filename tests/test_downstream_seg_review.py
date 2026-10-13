@@ -8,7 +8,7 @@ import pytest
 from PIL import Image
 
 from tools.downstream_seg_benchmark.metrics import METRICS
-from tools.downstream_seg_review.tables import regroup,paired,decompose,compare_table,validate_finished_stages
+from tools.downstream_seg_review.tables import regroup,paired,decompose,compare_table,validate_finished_stages,validate_label_sources
 from tools.downstream_seg_review.images import probability_assets,png,basic_metrics
 from tools.downstream_seg_review.reporting import zip_package
 
@@ -82,3 +82,12 @@ def test_original_stage_status_and_hash_must_pass(tmp_path):
     validate_finished_stages(tmp_path)
     p.write_text('modified')
     with pytest.raises(ValueError,match='hash mismatch'):validate_finished_stages(tmp_path)
+
+
+def test_actual_label_bytes_must_match_sealed_inventory(tmp_path):
+    from tools.downstream_seg_benchmark.common import write_json,sha
+    p=tmp_path/'label.png';p.write_bytes(b'gt')
+    write_json(tmp_path/'label_asset_inventory.json',{str(p):{'sha256':sha(p)}})
+    assert validate_label_sources(tmp_path)=={str(p):sha(p)}
+    p.write_bytes(b'changed')
+    with pytest.raises(ValueError,match='label hash mismatch'):validate_label_sources(tmp_path)

@@ -100,10 +100,18 @@ def validate_finished_stages(run):
             require(sha(run/path)==expected,'Original stage output hash mismatch: '+path)
 
 
+def validate_label_sources(run):
+    expected={p:d['sha256'] for p,d in read_json(run/'label_asset_inventory.json').items()}
+    for path,value in expected.items():require(sha(path)==value,'Original label hash mismatch: '+path)
+    return expected
+
+
 def audit(run,out,resume=False):
     out.mkdir(parents=True,exist_ok=True)
     require(not out.is_relative_to(run),'Review directory must not be inside original run')
     validate_finished_stages(run)
+    label_hashes=validate_label_sources(run)
+    write_json(out/'label_source_hash_audit.json',dict(passed=True,labels=len(label_hashes),sealed_label_hashes=label_hashes))
     seal=read_json(run/'checkpoint_lock.json')
     keys={(m,s) for m in ORDER for s in SEEDS}
     require(len(seal['checkpoints'])==30 and {(d['method_id'],d['segmentation_seed']) for d in seal['checkpoints']}==keys,'Checkpoint coverage differs')

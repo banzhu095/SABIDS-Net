@@ -131,6 +131,10 @@ def finish_immutable(out):
     write_json(out/'original_run_mutation_audit.json',dict(protected_files=len(before),changed=changes,passed=not changes,
         scope='Original config, weights, curves, metric tables, locks, shared randomness and test access log'))
     require(not changes,'Original experiment files changed')
+    labels=out/'label_source_hash_audit.json'
+    if labels.exists():
+        expected=read_json(labels)['sealed_label_hashes']
+        require(all(sha(p)==h for p,h in expected.items()),'Original label sources changed')
 
 
 def zip_package(out,filename,files):
