@@ -12,6 +12,21 @@ from torch.nn import functional as F
 from sabids.experiments.attenuation_aux import StableACConfig
 
 
+def fixed_linear_resize(value, size):
+    """align_corners=False linear interpolation with deterministic CUDA VJP.
+
+    PyTorch2.1 CUDA's upsample_linear1d backward rejects deterministic mode.
+    This fixed (nonlearnable) interpolation matrix has the same half-pixel
+    grid and edge replication; its backward is a deterministic GEMM.
+    """
+    length=value.shape[-1]
+    if length==size:return value
+    grid=((torch.arange(size,device=value.device,dtype=torch.float64)+.5)*(length/size)-.5).clamp(0,length-1)
+    source=torch.arange(length,device=value.device,dtype=torch.float64)
+    weights=(1-(source[:,None]-grid[None,:]).abs()).clamp_min(0).to(value.dtype)
+    return value @ weights
+
+
 class NativeStableAC(nn.Module):
     """Float64 native A-line integration, valid-neighbour trapezoids only.
 
@@ -116,7 +131,7 @@ class ACController(nn.Module):
         else:
             lateral=self.context(context).mean(-2)
             coeff=self.head(lateral).reshape(b,-1,self.bases,lateral.shape[-1])
-            coeff=F.interpolate(coeff.reshape(b,-1,lateral.shape[-1]),size=w,mode='linear',align_corners=False)
+            coeff=fixed_linear_resize(coeff.reshape(b,-1,lateral.shape[-1]),w)
             coeff=coeff.reshape(b,-1,self.bases,w)
             if self.method=='F3':coeff=coeff.expand(-1,2,-1,-1)
             centers=torch.linspace(0,1,self.bases,device=depth.device,dtype=depth.dtype)

@@ -43,6 +43,12 @@ Do not embed credentials in scripts. Hardware at first inspection: P10016GB,
 GPU idle; runtime PyTorch2.1.2+cu121. Keep512/batch1/accumulation2/AMP=false.
 An OOM is a resource failure: preserve logs, do not silently lower resolution.
 
+P100/PyTorch2.1 rejected the controller's CUDA linear1d interpolation backward
+under deterministic mode. The namespace now uses the same half-pixel linear
+grid as a fixed interpolation matrix (no parameters), with GEMM backward.
+Forward/gradient parity is tested; determinism stays enabled. Existing bilinear
+decoder and global-pool CUDA backwards passed their operator checks unchanged.
+
 ```bash
 cd /mnt/SABIDS-Net
 source /root/miniconda3/etc/profile.d/conda.sh

@@ -50,6 +50,17 @@ def analytic_pack():
     return torch.cat([a[k] for k in ('m','z0','c','depth','reliability','gain','rho','valid')],1)
 
 
+@pytest.mark.parametrize('length,size',[(1,9),(3,8),(8,3),(64,512)])
+def test_fixed_linear_resize_forward_and_gradient(length,size):
+    from sabids.models.learnable_ac import fixed_linear_resize
+    x=torch.randn(2,3,length,dtype=torch.float64,requires_grad=True)
+    actual=fixed_linear_resize(x,size)
+    expected=torch.nn.functional.interpolate(x,size=size,mode='linear',align_corners=False)
+    torch.testing.assert_close(actual,expected,atol=2e-14,rtol=2e-14)
+    grad=torch.randn_like(actual)
+    torch.testing.assert_close(torch.autograd.grad(actual,x,grad)[0],torch.autograd.grad(expected,x,grad)[0],atol=2e-14,rtol=2e-14)
+
+
 @pytest.mark.parametrize('method',['F0','F1','F2','F3','F4','F5','F6'])
 def test_zero_and_off_anchor_equivalence(method):
     cfg=config(True);base=build(cfg,'P3',42);m=build(cfg,method,42,base.state_dict())
