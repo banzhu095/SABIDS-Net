@@ -88,6 +88,12 @@ def average_precision(prob,truth):
     return float(np.sum(np.diff(np.r_[0,recall])*precision))
 
 
+def exterior_vessel_false_positive(prob,layer,vessel,valid):
+    # Reviewed Vessel positives outside Layer are genuine positives, not FP.
+    negatives=valid & ~layer & ~vessel
+    return float(((prob>=.5)&negatives).sum()/max(1,int(negatives.sum())))
+
+
 def assess(model,snapshot,cache,rows,method,cfg,device,predictions=None):
     model.eval();dataset=Frames(snapshot,cache,rows,method,cfg['size'])
     difficulty=read(Path(cache)/'difficulty.json');records=[];stability={}
@@ -98,6 +104,7 @@ def assess(model,snapshot,cache,rows,method,cfg,device,predictions=None):
             lp,vp=[restore(out[k].sigmoid(),l.shape,cfg['size']) for k in ('layer','vessel')]
             valid_layer=lv&~(v&~l)
             values=metrics(lp,vp,l,v,valid_layer,vv)
+            values['vessel_outside_gt_layer_fp']=exterior_vessel_false_positive(vp,l,v,vv)
             # Replace historical hardcoded model-grid component bins by frozen native thresholds.
             for k in ('small_vessel_recall','medium_vessel_recall','large_vessel_recall'):values.pop(k,None)
             gt=v&vv;pred=(vp>=.5)&vv

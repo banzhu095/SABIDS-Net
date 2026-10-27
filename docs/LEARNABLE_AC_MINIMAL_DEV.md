@@ -139,6 +139,9 @@ Primary comparisons F5-F0, F5-F1, F5-F2; Holm correction over available primary
 Vessel Dice tests. P3-F0 is the identical anchor consistency check, not an
 independent training replicate. Best/last separate, native P0 threshold.5,
 CSI=lower_boundary_mae in native px, all5 outer positions including0001/0004.
+The exterior Vessel FP rate excludes reviewed exterior Vessel positives and
+unknown pixels from its negative denominator. The separate exterior fraction
+is an anatomical-location diagnostic, not proof that all exterior pixels are FP.
 No independent generalization/blanket positive-result claim is permitted.
 
 Formal missing-source audit and exact conditional D1/teacher/D2 retraining

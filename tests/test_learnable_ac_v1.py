@@ -194,6 +194,18 @@ def test_paired_cluster_units_and_error_sign():
     assert ci[ci.metric=='vessel_dice'].p_holm_primary.notna().all()
 
 
+def test_reviewed_exterior_positive_is_not_false_positive():
+    from tools.learnable_ac_v1.learning import exterior_vessel_false_positive
+    layer=np.zeros((3,4),bool);vessel=layer.copy();valid=np.ones_like(layer)
+    layer[0]=True;vessel[1,0]=True
+    p=np.zeros(layer.shape);p[1,0]=1
+    assert exterior_vessel_false_positive(p,layer,vessel,valid)==0
+    p[2,2]=1
+    assert exterior_vessel_false_positive(p,layer,vessel,valid)==1/7
+    valid[2,2]=False
+    assert exterior_vessel_false_positive(p,layer,vessel,valid)==0
+
+
 def test_complete_cpu_closure(tmp_path,monkeypatch):
     from tools.learnable_ac_v1.checks import cpu_smoke
     result=cpu_smoke(tmp_path/'smoke')
