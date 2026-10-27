@@ -220,6 +220,13 @@ def package(cache,run,atlas_dir,report,output):
     require(atlas_dir.is_dir(),'Fixed atlas missing')
     output.parent.mkdir(parents=True,exist_ok=True)
     with zipfile.ZipFile(output,'x',zipfile.ZIP_DEFLATED) as z:
+        # Explicit small run receipts, never traverse sibling historical runs.
+        # Deployment records the committed source and physical cloud hashes;
+        # current upstream evidence supplements, not replaces, old provenance.
+        for name in ('deployment.json','current_d2_audit.json','resolved_config.json','reuse_audit.json'):
+            p=run.parent/name
+            if p.is_file():
+                member='run_identity/'+name;z.write(p,member);manifest['files'][member]=sha(p)
         for base,prefix in [(cache,'provenance'),(run,'training'),(report,'report'),(atlas_dir,'atlas')]:
             for p in sorted(base.rglob('*')):
                 if not p.is_file():continue

@@ -200,6 +200,13 @@ def test_complete_cpu_closure(tmp_path):
     assert CORE==('P3','F0','F1','F2','F5')
     binding=validate_completed(tmp_path/'smoke/training',tmp_path/'smoke/cache','F5',config(True))
     assert binding['synthetic'] and binding['completed_epochs']==2
+    from tools.learnable_ac_v1.reporting import package
+    import zipfile
+    write(tmp_path/'smoke/deployment.json',{'source_commit':'synthetic-test-only'})
+    package(tmp_path/'smoke/cache',tmp_path/'smoke/training',tmp_path/'smoke/atlas',tmp_path/'smoke/report',tmp_path/'with_receipt.zip')
+    with zipfile.ZipFile(tmp_path/'with_receipt.zip') as z:
+        assert 'run_identity/deployment.json' in z.namelist()
+        assert not any(n.endswith('.pth') for n in z.namelist())
     for p in (tmp_path/'smoke/atlas').glob('outer/*/F5/vessel_probability.npy'):
         prob=np.load(p,allow_pickle=False);mask=np.load(p.with_name('vessel_mask.npy'),allow_pickle=False)
         assert np.array_equal(mask,prob>=.5)
