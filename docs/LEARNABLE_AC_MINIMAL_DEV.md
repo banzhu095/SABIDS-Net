@@ -93,6 +93,10 @@ status includes actual /proc command/start ticks. Epoch JSON is a progress
 snapshot, NOT proof of completion. Completion is checked from model payload,
 optimizer/scheduler/RNG, expected steps, inner-best earliest tie and SHA; an
 immutable checkpoint_selection_binding.json is then written per method.
+Before the first training update, epoch0 also saves full AdamW/scheduler/RNG
+state. A first-epoch interruption replays from this complete boundary. Existing
+best/epoch0 weights without a full last state stop for inspection; they are
+never silently overwritten or presented as equivalent state restoration.
 
 ## Full continuation / manual evaluation / results
 

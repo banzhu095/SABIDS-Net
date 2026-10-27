@@ -212,11 +212,19 @@ def train(snapshot,cache,run,methods,cfg,seed=42,device='cpu',resume=False,stop_
             model.load_state_dict(state['model']);optimizer.load_state_dict(state['optimizer']);scheduler.load_state_dict(state['scheduler']);restore_rng(state,device)
             updates,best,best_epoch,history=state['updates'],state['best'],state['best_epoch'],state['history']
         else:
+            require(not any((folder/n).exists() for n in ('epoch0.pth','best.pth')),
+                    'Existing checkpoint without full last state; preserve this run and inspect, never overwrite best')
             validation,_=assess(model,snapshot,cache,inner,method,cfg,device)
             best=float(validation.groupby('position_id').vessel_soft_dice.mean().mean());require(np.isfinite(best),'Epoch0 validation nonfinite')
             save(folder/'epoch0.pth',dict(model=model.state_dict(),epoch=0,score=best,identity=identity,anchor_sha256=anchor_sha))
             save(folder/'best.pth',load(folder/'epoch0.pth'))
             history=[dict(epoch=0,inner_position_vessel_soft_dice=best,best=best,best_epoch=0,updates=0,seconds=0)]
+            # First-epoch interruptions also resume from a COMPLETE boundary.
+            # A best-ahead-of-last interruption still stops at transaction check.
+            if epochs:
+                save(folder/'last.pth',dict(model=model.state_dict(),optimizer=optimizer.state_dict(),scheduler=scheduler.state_dict(),
+                    epoch=0,best=best,best_epoch=0,history=history,updates=0,identity=identity,
+                    anchor_sha256=anchor_sha,**capture_rng(device)))
         write(folder/'initialization.json',dict(anchor_sha256=anchor_sha,frozen_anchor_sha256=frozen_before,
               total_parameters=sum(p.numel() for p in model.parameters()),trainable_parameters=sum(p.numel() for p in trainable),
               data_plan_sha256=digest(plans),initial_model_sha256=model_hash(build(cfg,method,seed,anchor_state['model'] if adaptive else None)),

@@ -194,7 +194,7 @@ def test_paired_cluster_units_and_error_sign():
     assert ci[ci.metric=='vessel_dice'].p_holm_primary.notna().all()
 
 
-def test_complete_cpu_closure(tmp_path):
+def test_complete_cpu_closure(tmp_path,monkeypatch):
     from tools.learnable_ac_v1.checks import cpu_smoke
     result=cpu_smoke(tmp_path/'smoke')
     assert result['status']=='passed' and result['epoch_resume_bit_exact']
@@ -225,6 +225,28 @@ def test_complete_cpu_closure(tmp_path):
         with np.load(tmp_path/f'smoke/training/F5/outer_best/predictions/{sid}.npz') as pred:
             assert np.array_equal(prob,pred['vessel'])
     from tools.learnable_ac_v1.learning import train
+    # A killed first epoch must have full epoch0 optimizer/scheduler/RNG state,
+    # not restart from weights or silently replace a selected best checkpoint.
+    import shutil
+    from tools.downstream_seg_benchmark.engine import load
+    partial=tmp_path/'early_interruption'
+    shutil.copytree(tmp_path/'smoke/training/P3',partial/'P3')
+    original_step=torch.optim.AdamW.step;calls=[0]
+    def interrupted_step(self,*args,**kwargs):
+        calls[0]+=1
+        if calls[0]==2:raise RuntimeError('simulated mid-first-epoch interruption')
+        return original_step(self,*args,**kwargs)
+    with monkeypatch.context() as patch:
+        patch.setattr(torch.optim.AdamW,'step',interrupted_step)
+        with pytest.raises(RuntimeError,match='simulated mid-first-epoch'):
+            train(tmp_path/'smoke/snapshot',tmp_path/'smoke/cache',partial,['F5'],config(True))
+    state=load(partial/'F5/last.pth')
+    assert state['epoch']==state['updates']==0 and state['optimizer']['state']=={}
+    assert {'torch_rng','numpy_rng','python_rng','cuda_rng','scheduler'}<=set(state)
+    train(tmp_path/'smoke/snapshot',tmp_path/'smoke/cache',partial,['F5'],config(True),resume=True)
+    expected=load(tmp_path/'smoke/continuous/F5/last.pth')
+    actual=load(partial/'F5/last.pth')
+    assert all(torch.equal(v,actual['model'][k]) for k,v in expected['model'].items())
     cfg=config(True);cfg['learning_rate']*=2
     with pytest.raises(ValueError,match='Study-level'):
         train(tmp_path/'smoke/snapshot',tmp_path/'smoke/cache',tmp_path/'smoke/training',['P0'],cfg,resume=True)
