@@ -1,0 +1,26 @@
+version: learnable_ac_v1.r1
+channels: [32, 64, 128, 256]
+depths: [2, 2, 4, 6]
+decoder_depth: 2
+context_channels: [16, 32, 64]
+size: 512
+base_epochs: 60
+adaptive_epochs: 20
+accumulation: 2
+learning_rate: 0.00005
+min_lr: 0.000001
+weight_decay: 0.0001
+clip: 1.0
+amp: false
+delta: 0.25
+lambda_smooth: 0.001
+lambda_anchor: 0.001
+boundary_loss: 0.0
+loss_version: positive_preserving_roi_v1
+selection: inner_position_vessel_soft_dice_strict_greater_earliest
+threshold: 0.5
+default_base: [P0, P1, P2, P3, P4]
+default_adaptive: [F0, F1, F2, F5]
+second_batch: [F3, F4, F6]
+optional_base: [P5, P6]
+joint_finetune: false

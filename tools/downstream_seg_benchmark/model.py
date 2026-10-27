@@ -19,13 +19,16 @@ class Segmenter(nn.Module):
         self.decoders = nn.ModuleDict({t: nn.ModuleList([DecoderStage(channels[i+1], channels[i], decoder_depth) for i in self.levels]) for t in ['layer', 'vessel']})
         self.heads = nn.ModuleDict({t: nn.Conv2d(channels[0], 1, 1) for t in ['layer', 'vessel']})
 
-    def forward(self, image):
+    def encode(self, image):
         x, features = self.stem(image), []
         for i, block in enumerate(self.encoder):
             x = block(x)
             features.append(x)
             if i < len(self.down):
                 x = self.down[i](x)
+        return features
+
+    def decode(self, features):
         output = {}
         for task in ['layer', 'vessel']:
             x = self.adapters[task][-1](features[-1])
@@ -33,6 +36,9 @@ class Segmenter(nn.Module):
                 x = self.decoders[task][j](x, self.adapters[task][i](features[i]))
             output[task] = self.heads[task](x)
         return output
+
+    def forward(self, image):
+        return self.decode(self.encode(image))
 
 
 def objective(output, layer, vessel, valid, vessel_valid):

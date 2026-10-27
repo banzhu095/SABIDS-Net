@@ -1,0 +1,7 @@
+_base_: ../adaptive_denoising/d2_teacher_pku37_v3_seed42.yaml
+# Prepared only by the existing evidence-gated teacher CLI. Its formal loss,
+# protocol and initialization checks are retained, not bypassed.
+train:
+  batch_size: 1
+  gradient_accumulation_steps: 2
+  amp: false
